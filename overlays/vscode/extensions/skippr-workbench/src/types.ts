@@ -48,3 +48,36 @@ export interface SkipprPanelPayload {
   diagnostics: string[];
   settings: ConnectionSettings;
 }
+
+export type SkipprRunEventName =
+  | "discover_start"
+  | "namespace_discovered"
+  | "discover_complete"
+  | "sync_start"
+  | "sync_status"
+  | "batch_ingested"
+  | "compaction_complete"
+  | "output_synced"
+  | "sync_complete"
+  | "sync_error";
+
+export interface SkipprRunEvent {
+  event: SkipprRunEventName;
+  timestamp?: string;
+  pipeline?: string;
+  namespace?: string;
+  field_count?: number;
+  fields_added?: string[];
+  rows?: number;
+  bytes?: number;
+  rows_written?: number;
+  parquet_file?: string;
+  namespaces_synced?: number;
+  namespaces_discovered?: number;
+  total_fields?: number;
+  total_rows?: number;
+  elapsed_ms?: number;
+  error?: string;
+  uploads_in_flight?: number;
+  ok?: boolean;
+}

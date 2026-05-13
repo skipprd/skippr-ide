@@ -74,7 +74,7 @@ if (!debugContributionSource.includes("miSkipprDiscover")) {
 MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 \tgroup: '1_skippr',
 \tcommand: {
-\t\tid: 'skippr.open.discover',
+\t\tid: 'skippr.run.discoverPipeline',
 \t\ttitle: nls.localize({ key: 'miSkipprDiscover', comment: ['&& denotes a mnemonic'] }, "Skippr &&Discover")
 \t},
 \torder: 10
@@ -83,7 +83,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 \tgroup: '1_skippr',
 \tcommand: {
-\t\tid: 'skippr.open.sync',
+\t\tid: 'skippr.run.syncPipelineOnce',
 \t\ttitle: nls.localize({ key: 'miSkipprSync', comment: ['&& denotes a mnemonic'] }, "Skippr &&Sync")
 \t},
 \torder: 11
@@ -113,11 +113,21 @@ if (!macMenubarSource.includes("miSkipprDiscover")) {
 
 \t\tactions.push(...[
 \t\t\t__separator__(),
-\t\t\tthis.createMenuItem(nls.localize({ key: 'miSkipprDiscover', comment: ['&& denotes a mnemonic'] }, "Skippr &&Discover"), 'skippr.open.discover'),
-\t\t\tthis.createMenuItem(nls.localize({ key: 'miSkipprSync', comment: ['&& denotes a mnemonic'] }, "Skippr &&Sync"), 'skippr.open.sync'),
+\t\t\tthis.createMenuItem(nls.localize({ key: 'miSkipprDiscover', comment: ['&& denotes a mnemonic'] }, "Skippr &&Discover"), 'skippr.run.discoverPipeline'),
+\t\t\tthis.createMenuItem(nls.localize({ key: 'miSkipprSync', comment: ['&& denotes a mnemonic'] }, "Skippr &&Sync"), 'skippr.run.syncPipelineOnce'),
 \t\t\tthis.createMenuItem(nls.localize({ key: 'miSkipprModel', comment: ['&& denotes a mnemonic'] }, "Skippr &&Model"), 'skippr.open.model')
 \t\t]);`;
   writeFileSync(macMenubarPath, macMenubarSource.replace(preferencesBlock, skipprMacBlock), "utf8");
+}
+
+for (const sourcePath of [debugContributionPath, macMenubarPath]) {
+  const source = readFileSync(sourcePath, "utf8");
+  const updated = source
+    .replaceAll("'skippr.open.discover'", "'skippr.run.discoverPipeline'")
+    .replaceAll("'skippr.open.sync'", "'skippr.run.syncPipelineOnce'");
+  if (updated !== source) {
+    writeFileSync(sourcePath, updated, "utf8");
+  }
 }
 
 console.log("Skippr overlay applied successfully.");

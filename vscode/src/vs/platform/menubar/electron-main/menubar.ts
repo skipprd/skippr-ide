@@ -449,8 +449,8 @@ export class Menubar extends Disposable {
 
 		actions.push(...[
 			__separator__(),
-			this.createMenuItem(nls.localize({ key: 'miSkipprDiscover', comment: ['&& denotes a mnemonic'] }, "Skippr &&Discover"), 'skippr.open.discover'),
-			this.createMenuItem(nls.localize({ key: 'miSkipprSync', comment: ['&& denotes a mnemonic'] }, "Skippr &&Sync"), 'skippr.open.sync'),
+			this.createMenuItem(nls.localize({ key: 'miSkipprDiscover', comment: ['&& denotes a mnemonic'] }, "Skippr &&Discover"), 'skippr.run.discoverPipeline'),
+			this.createMenuItem(nls.localize({ key: 'miSkipprSync', comment: ['&& denotes a mnemonic'] }, "Skippr &&Sync"), 'skippr.run.syncPipelineOnce'),
 			this.createMenuItem(nls.localize({ key: 'miSkipprModel', comment: ['&& denotes a mnemonic'] }, "Skippr &&Model"), 'skippr.open.model')
 		]);
 

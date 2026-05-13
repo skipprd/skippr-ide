@@ -31,11 +31,11 @@
       },
       {
         "command": "skippr.open.discover",
-        "title": "Skippr: Discover"
+        "title": "Skippr: Open Discover Panel"
       },
       {
         "command": "skippr.open.sync",
-        "title": "Skippr: Sync"
+        "title": "Skippr: Open Sync Panel"
       },
       {
         "command": "skippr.open.model",
@@ -48,6 +48,38 @@
       {
         "command": "skippr.open.lineage",
         "title": "Skippr: Lineage"
+      },
+      {
+        "command": "skippr.run.discoverPipeline",
+        "title": "Skippr: Discover Pipeline"
+      },
+      {
+        "command": "skippr.run.syncPipelineOnce",
+        "title": "Skippr: Sync Pipeline Once"
+      },
+      {
+        "command": "skippr.run.syncAllOnce",
+        "title": "Skippr: Sync All Once"
+      },
+      {
+        "command": "skippr.run.startSyncPipeline",
+        "title": "Skippr: Start Pipeline Sync"
+      },
+      {
+        "command": "skippr.run.stopSyncPipeline",
+        "title": "Skippr: Stop Pipeline Sync"
+      },
+      {
+        "command": "skippr.cli.install",
+        "title": "Skippr: Install CLI"
+      },
+      {
+        "command": "skippr.cli.update",
+        "title": "Skippr: Update CLI"
+      },
+      {
+        "command": "skippr.cli.showVersion",
+        "title": "Skippr: Show CLI Version"
       }
     ],
     "menus": {
@@ -66,9 +98,118 @@
         },
         {
           "command": "skippr.open.model"
+        },
+        {
+          "command": "skippr.run.discoverPipeline"
+        },
+        {
+          "command": "skippr.run.syncPipelineOnce"
+        },
+        {
+          "command": "skippr.run.syncAllOnce"
+        },
+        {
+          "command": "skippr.run.startSyncPipeline"
+        },
+        {
+          "command": "skippr.run.stopSyncPipeline"
+        },
+        {
+          "command": "skippr.cli.install"
+        },
+        {
+          "command": "skippr.cli.update"
+        },
+        {
+          "command": "skippr.cli.showVersion"
         }
       ]
     },
+    "debuggers": [
+      {
+        "type": "skippr",
+        "label": "Skippr",
+        "program": "./out/extension.js",
+        "configurationAttributes": {
+          "launch": {
+            "required": ["type", "request", "name", "skipprKind"],
+            "properties": {
+              "type": {
+                "enum": ["skippr"]
+              },
+              "request": {
+                "enum": ["launch"]
+              },
+              "name": {
+                "type": "string"
+              },
+              "skipprKind": {
+                "type": "string",
+                "enum": ["discover", "sync-once", "sync-all-once", "sync"],
+                "description": "Skippr operation to run."
+              },
+              "pipeline": {
+                "type": "string",
+                "description": "Pipeline name. Not required for sync-all-once."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Discover Pipeline",
+            "skipprKind": "discover",
+            "pipeline": "${input:skipprPipeline}"
+          },
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Sync Pipeline Once",
+            "skipprKind": "sync-once",
+            "pipeline": "${input:skipprPipeline}"
+          },
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Sync All Once",
+            "skipprKind": "sync-all-once"
+          },
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Start Pipeline Sync",
+            "skipprKind": "sync",
+            "pipeline": "${input:skipprPipeline}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Skippr: Discover Pipeline",
+            "description": "Run Skippr discover for a pipeline.",
+            "body": {
+              "type": "skippr",
+              "request": "launch",
+              "name": "Skippr: Discover Pipeline",
+              "skipprKind": "discover",
+              "pipeline": "${input:skipprPipeline}"
+            }
+          },
+          {
+            "label": "Skippr: Sync Pipeline Once",
+            "description": "Run one Skippr sync pass for a pipeline.",
+            "body": {
+              "type": "skippr",
+              "request": "launch",
+              "name": "Skippr: Sync Pipeline Once",
+              "skipprKind": "sync-once",
+              "pipeline": "${input:skipprPipeline}"
+            }
+          }
+        ]
+      }
+    ],
     "configuration": {
       "title": "Skippr IDE",
       "properties": {
@@ -86,6 +227,27 @@
           "type": "string",
           "default": "https://auth.skippr.io",
           "description": "Skippr Auth API base URL."
+        },
+        "skippr.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional advanced override for the Skippr CLI path. Leave empty to auto-detect skippr or skipprd on PATH."
+        },
+        "skippr.defaultPipeline": {
+          "type": "string",
+          "default": "",
+          "description": "Default Skippr pipeline used by run commands."
+        },
+        "skippr.logLevel": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "default": "info",
+          "description": "Log level passed to Skippr run commands."
+        },
+        "skippr.run.cwd": {
+          "type": "string",
+          "default": "",
+          "description": "Working directory for Skippr run commands. Defaults to the configured Skippr workspace path or the first VS Code workspace folder."
         }
       }
     }

@@ -1,6 +1,16 @@
 import * as vscode from "vscode";
 import { loadPanelPayloadFromRust } from "./rustBridge";
-import { ConnectionSettings, SkipprPanelId, SkipprPanelName, SkipprPanelPayload } from "./types";
+import {
+  installSkipprCli,
+  isSkipprRunKind,
+  resolveSkipprCli,
+  showSkipprVersion,
+  SkipprProcess,
+  SkipprRunKind,
+  startSkipprRun,
+  updateSkipprCli
+} from "./skipprRunner";
+import { ConnectionSettings, SkipprPanelId, SkipprPanelName, SkipprPanelPayload, SkipprRunEvent } from "./types";
 
 const panelSpecs: Array<{ id: SkipprPanelId; name: SkipprPanelName; command: string }> = [
   { id: "skippr.discover", name: "Discover", command: "skippr.open.discover" },
@@ -17,11 +27,61 @@ const authTokenKey = "skippr.auth.token";
 const authRefreshTokenKey = "skippr.auth.refreshToken";
 const authEmailKey = "skippr.auth.email";
 const splashSeenKey = "skippr.splashSeen.v1";
+const cliPathKey = "skippr.cliPath";
+const defaultPipelineKey = "skippr.defaultPipeline";
+const logLevelKey = "skippr.logLevel";
+const runCwdKey = "skippr.run.cwd";
 
 interface AuthSession {
   token: string;
   refreshToken: string;
   email: string;
+}
+
+let activeRun: SkipprProcess | undefined;
+
+class SkipprDebugAdapter implements vscode.DebugAdapter {
+  private readonly emitter = new vscode.EventEmitter<vscode.DebugProtocolMessage>();
+  private sequence = 1;
+
+  readonly onDidSendMessage = this.emitter.event;
+
+  constructor(private readonly run: (configuration: vscode.DebugConfiguration) => Promise<void>) {}
+
+  handleMessage(message: { command?: string; seq?: number; arguments?: vscode.DebugConfiguration }): void {
+    if (message.command === "initialize") {
+      this.sendResponse(message, { supportsConfigurationDoneRequest: false });
+      return;
+    }
+    if (message.command === "launch") {
+      this.sendResponse(message);
+      void this.run((message.arguments ?? {}) as vscode.DebugConfiguration).finally(() => {
+        this.emitter.fire({ type: "event", event: "terminated", seq: this.sequence++ });
+      });
+      return;
+    }
+    if (message.command === "disconnect") {
+      this.sendResponse(message);
+      this.emitter.fire({ type: "event", event: "terminated", seq: this.sequence++ });
+      return;
+    }
+    this.sendResponse(message);
+  }
+
+  dispose(): void {
+    this.emitter.dispose();
+  }
+
+  private sendResponse(request: { command?: string; seq?: number }, body?: unknown): void {
+    this.emitter.fire({
+      type: "response",
+      seq: this.sequence++,
+      request_seq: request.seq ?? 0,
+      success: true,
+      command: request.command ?? "",
+      body
+    });
+  }
 }
 
 function getAuthBaseUrl(): string {
@@ -63,6 +123,184 @@ async function configureConnection(): Promise<void> {
 
   await config.update(workspacePathKey, workspacePath.trim(), vscode.ConfigurationTarget.Global);
   await config.update(apiTargetKey, apiTarget.trim(), vscode.ConfigurationTarget.Global);
+}
+
+function getRunCwd(): string {
+  const config = vscode.workspace.getConfiguration();
+  const configured = config.get<string>(runCwdKey, "").trim();
+  if (configured) {
+    return configured;
+  }
+  const workspacePath = config.get<string>(workspacePathKey, "").trim();
+  if (workspacePath) {
+    return workspacePath;
+  }
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+}
+
+function getLogLevel(): string {
+  return vscode.workspace.getConfiguration().get<string>(logLevelKey, "info").trim() || "info";
+}
+
+async function promptForPipeline(title: string): Promise<string | undefined> {
+  const config = vscode.workspace.getConfiguration();
+  const current = config.get<string>(defaultPipelineKey, "").trim();
+  const pipeline = await vscode.window.showInputBox({
+    title,
+    value: current,
+    prompt: "Skippr pipeline name",
+    ignoreFocusOut: true
+  });
+  if (!pipeline) {
+    return undefined;
+  }
+  const trimmed = pipeline.trim();
+  await config.update(defaultPipelineKey, trimmed, vscode.ConfigurationTarget.Global);
+  return trimmed;
+}
+
+function describeRunEvent(event: SkipprRunEvent): string {
+  switch (event.event) {
+    case "discover_start":
+      return `Discover started: ${event.pipeline ?? "pipeline"}`;
+    case "namespace_discovered":
+      return `Discovered ${event.namespace ?? "namespace"} (${event.field_count ?? 0} fields)`;
+    case "discover_complete":
+      return `Discover complete: ${event.pipeline ?? "pipeline"} (${event.namespaces_discovered ?? 0} namespaces)`;
+    case "sync_start":
+      return `Sync started: ${event.pipeline ?? "pipeline"}`;
+    case "sync_status":
+      return `Sync status: ${event.pipeline ?? "pipeline"} rows=${event.total_rows ?? 0} written=${event.rows_written ?? 0}`;
+    case "batch_ingested":
+      return `Batch ingested: ${event.namespace ?? "namespace"} rows=${event.rows ?? 0}`;
+    case "compaction_complete":
+      return `Compaction complete: ${event.namespace ?? "namespace"}`;
+    case "output_synced":
+      return `Output synced: ${event.namespace ?? "namespace"} rows=${event.rows_written ?? 0}`;
+    case "sync_complete":
+      return `Sync complete: ${event.pipeline ?? "pipeline"} rows=${event.total_rows ?? 0}`;
+    case "sync_error":
+      return `Sync error: ${event.error ?? "unknown error"}`;
+  }
+}
+
+function setRunStatusIdle(statusItem: vscode.StatusBarItem): void {
+  statusItem.command = "skippr.run.discoverPipeline";
+  statusItem.text = "$(play) Skippr";
+  statusItem.tooltip = "Run Skippr discover or sync commands";
+}
+
+function setRunStatusRunning(statusItem: vscode.StatusBarItem, label: string): void {
+  statusItem.command = "skippr.run.stopSyncPipeline";
+  statusItem.text = `$(sync~spin) ${label}`;
+  statusItem.tooltip = "Skippr is running. Click to stop.";
+}
+
+async function resolveCliOrOfferInstall(output: vscode.LogOutputChannel): Promise<string | undefined> {
+  const config = vscode.workspace.getConfiguration();
+  const cliPath = await resolveSkipprCli(config.get<string>(cliPathKey, ""));
+  if (cliPath) {
+    return cliPath;
+  }
+  output.show(true);
+  output.warn("Skippr CLI was not found on PATH.");
+  const choice = await vscode.window.showWarningMessage("Skippr CLI was not found.", "Install CLI");
+  if (choice === "Install CLI") {
+    const result = await installSkipprCli(output);
+    if (result.code === 0) {
+      return resolveSkipprCli(config.get<string>(cliPathKey, ""));
+    }
+  }
+  return undefined;
+}
+
+async function runSkipprCommand(
+  kind: SkipprRunKind,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem,
+  requestedPipeline?: string
+): Promise<void> {
+  if (activeRun) {
+    vscode.window.showWarningMessage(`Skippr is already running: ${activeRun.label}`);
+    output.show(true);
+    return;
+  }
+
+  const pipeline =
+    kind === "sync-all-once"
+      ? undefined
+      : requestedPipeline?.trim() || (await promptForPipeline(kind === "discover" ? "Discover Skippr Pipeline" : "Sync Skippr Pipeline"));
+  if (kind !== "sync-all-once" && !pipeline) {
+    return;
+  }
+
+  const cliPath = await resolveCliOrOfferInstall(output);
+  if (!cliPath) {
+    return;
+  }
+
+  output.show(true);
+  const run = startSkipprRun(
+    {
+      kind,
+      cliPath,
+      cwd: getRunCwd(),
+      pipeline,
+      logLevel: getLogLevel()
+    },
+    {
+      onEvent: (event) => {
+        const message = describeRunEvent(event);
+        output.info(message);
+        setRunStatusRunning(statusItem, message);
+      },
+      onLog: (line) => output.info(line)
+    }
+  );
+
+  activeRun = run;
+  setRunStatusRunning(statusItem, run.label);
+  const result = await run.done;
+  if (activeRun === run) {
+    activeRun = undefined;
+  }
+
+  if (result.code === 0) {
+    output.info(`${run.label} completed in ${result.elapsedMs}ms.`);
+    setRunStatusIdle(statusItem);
+    vscode.window.showInformationMessage(`${run.label} completed.`);
+  } else if (result.signal) {
+    output.warn(`${run.label} stopped by signal ${result.signal}.`);
+    setRunStatusIdle(statusItem);
+  } else {
+    output.error(`${run.label} failed with exit code ${result.code}.`);
+    setRunStatusIdle(statusItem);
+    vscode.window.showErrorMessage(`${run.label} failed. See Skippr output for details.`);
+  }
+}
+
+async function runSkipprDebugConfiguration(
+  configuration: vscode.DebugConfiguration,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): Promise<void> {
+  if (!isSkipprRunKind(configuration.skipprKind)) {
+    output.error(`Invalid Skippr debug configuration kind: ${String(configuration.skipprKind)}`);
+    vscode.window.showErrorMessage("Invalid Skippr debug configuration. Expected skipprKind discover, sync-once, sync-all-once, or sync.");
+    return;
+  }
+  const pipeline = typeof configuration.pipeline === "string" ? configuration.pipeline : undefined;
+  await runSkipprCommand(configuration.skipprKind, output, statusItem, pipeline);
+}
+
+function stopActiveRun(statusItem: vscode.StatusBarItem, output: vscode.LogOutputChannel): void {
+  if (!activeRun) {
+    vscode.window.showInformationMessage("No Skippr run is active.");
+    return;
+  }
+  output.info(`Stopping ${activeRun.label}...`);
+  activeRun.stop();
+  setRunStatusIdle(statusItem);
 }
 
 async function saveAuthSession(context: vscode.ExtensionContext, session: AuthSession): Promise<void> {
@@ -307,6 +545,13 @@ export function activate(context: vscode.ExtensionContext): void {
   statusItem.show();
   context.subscriptions.push(statusItem);
 
+  const runStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 999);
+  setRunStatusIdle(runStatusItem);
+  runStatusItem.show();
+
+  const output = vscode.window.createOutputChannel("Skippr", { log: true });
+  context.subscriptions.push(runStatusItem, output);
+
   context.subscriptions.push(
     vscode.commands.registerCommand("skippr.configureConnection", async () => {
       await configureConnection();
@@ -327,6 +572,93 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("skippr.openSplash", async () => {
       await showSplash(context, statusItem);
+    }),
+    vscode.commands.registerCommand("skippr.cli.install", async () => {
+      const result = await installSkipprCli(output);
+      if (result.code === 0) {
+        vscode.window.showInformationMessage("Skippr CLI installed.");
+      } else {
+        vscode.window.showErrorMessage("Skippr CLI install failed. See Skippr output for details.");
+      }
+    }),
+    vscode.commands.registerCommand("skippr.cli.update", async () => {
+      const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+      const result = await updateSkipprCli(cliPath, output);
+      if (result.code === 0) {
+        vscode.window.showInformationMessage("Skippr CLI updated.");
+      } else {
+        vscode.window.showErrorMessage("Skippr CLI update failed. See Skippr output for details.");
+      }
+    }),
+    vscode.commands.registerCommand("skippr.cli.showVersion", async () => {
+      const cliPath = await resolveCliOrOfferInstall(output);
+      if (!cliPath) {
+        return;
+      }
+      const result = await showSkipprVersion(cliPath, output);
+      if (result.code !== 0) {
+        vscode.window.showErrorMessage("Unable to read Skippr CLI version. See Skippr output for details.");
+      }
+    }),
+    vscode.commands.registerCommand("skippr.run.discoverPipeline", async () => {
+      await runSkipprCommand("discover", output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.run.syncPipelineOnce", async () => {
+      await runSkipprCommand("sync-once", output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.run.syncAllOnce", async () => {
+      await runSkipprCommand("sync-all-once", output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.run.startSyncPipeline", async () => {
+      await runSkipprCommand("sync", output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.run.stopSyncPipeline", () => {
+      stopActiveRun(runStatusItem, output);
+    }),
+    vscode.debug.registerDebugAdapterDescriptorFactory("skippr", {
+      createDebugAdapterDescriptor: () =>
+        new vscode.DebugAdapterInlineImplementation(
+          new SkipprDebugAdapter((configuration) => runSkipprDebugConfiguration(configuration, output, runStatusItem))
+        )
+    }),
+    vscode.debug.registerDebugConfigurationProvider("skippr", {
+      provideDebugConfigurations: () => [
+        {
+          type: "skippr",
+          request: "launch",
+          name: "Skippr: Discover Pipeline",
+          skipprKind: "discover"
+        },
+        {
+          type: "skippr",
+          request: "launch",
+          name: "Skippr: Sync Pipeline Once",
+          skipprKind: "sync-once"
+        },
+        {
+          type: "skippr",
+          request: "launch",
+          name: "Skippr: Sync All Once",
+          skipprKind: "sync-all-once"
+        },
+        {
+          type: "skippr",
+          request: "launch",
+          name: "Skippr: Start Pipeline Sync",
+          skipprKind: "sync"
+        }
+      ],
+      resolveDebugConfiguration: (_folder, configuration) => {
+        if (!configuration.type) {
+          return {
+            type: "skippr",
+            request: "launch",
+            name: "Skippr: Discover Pipeline",
+            skipprKind: "discover"
+          };
+        }
+        return configuration;
+      }
     })
   );
 

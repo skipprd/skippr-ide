@@ -291,7 +291,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 	group: '1_skippr',
 	command: {
-		id: 'skippr.open.discover',
+		id: 'skippr.run.discoverPipeline',
 		title: nls.localize({ key: 'miSkipprDiscover', comment: ['&& denotes a mnemonic'] }, "Skippr &&Discover")
 	},
 	order: 10
@@ -300,7 +300,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 	group: '1_skippr',
 	command: {
-		id: 'skippr.open.sync',
+		id: 'skippr.run.syncPipelineOnce',
 		title: nls.localize({ key: 'miSkipprSync', comment: ['&& denotes a mnemonic'] }, "Skippr &&Sync")
 	},
 	order: 11
