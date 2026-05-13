@@ -1,0 +1,181 @@
+{
+  "nameShort": "Skippr IDE",
+  "nameLong": "Skippr IDE",
+  "applicationName": "skippr-ide",
+  "dataFolderName": ".skippr-ide",
+  "sharedDataFolderName": ".skippr-ide-shared",
+  "win32MutexName": "skippride",
+  "licenseName": "Skippr IDE License",
+  "licenseUrl": "https://skippr.com/license",
+  "serverLicenseUrl": "https://skippr.com/license",
+  "serverGreeting": [],
+  "serverLicense": [],
+  "serverLicensePrompt": "",
+  "serverApplicationName": "skippr-ide-server",
+  "serverDataFolderName": ".skippr-ide-server",
+  "tunnelApplicationName": "skippr-ide-tunnel",
+  "win32DirName": "Skippr IDE",
+  "win32NameVersion": "Skippr IDE",
+  "win32RegValueName": "SkipprIDE",
+  "win32x64AppId": "{{D77B7E06-80BA-4137-BCF4-654B95CCEBC5}",
+  "win32arm64AppId": "{{D1ACE434-89C5-48D1-88D3-E2991DF85475}",
+  "win32x64UserAppId": "{{CC6B787D-37A0-49E8-AE24-8559A032BE0C}",
+  "win32arm64UserAppId": "{{3AEBF0C8-F733-4AD4-BADE-FDB816D53D7B}",
+  "win32AppUserModelId": "Skippr.IDE",
+  "win32ShellNameShort": "Skippr &IDE",
+  "win32TunnelServiceMutex": "skippride-tunnelservice",
+  "win32TunnelMutex": "skippride-tunnel",
+  "darwinBundleIdentifier": "com.skippr.ide",
+  "darwinProfileUUID": "47827DD9-4734-49A0-AF80-7E19B11495CC",
+  "darwinProfilePayloadUUID": "CF808BE7-53F3-46C6-A7E2-7EDB98A5E959",
+  "linuxIconName": "skippr-ide",
+  "licenseFileName": "LICENSE.txt",
+  "reportIssueUrl": "https://skippr.com/support",
+  "nodejsRepository": "https://nodejs.org",
+  "urlProtocol": "skippr-ide",
+  "enableTelemetry": false,
+  "removeTelemetryMachineId": true,
+  "agentsTelemetryAppName": "agents",
+  "webviewContentExternalBaseUrlTemplate": "https://skippr.com/ide-webview/{{uuid}}/out/vs/workbench/contrib/webview/browser/pre/",
+  "builtInExtensions": [],
+  "defaultChatAgent": {
+    "extensionId": "skippr.data-agent",
+    "chatExtensionId": "skippr.data-agent",
+    "chatExtensionOutputId": "skippr.data-agent-output",
+    "chatExtensionOutputExtensionStateCommand": "skippr.dataAgent.output.extensionState",
+    "documentationUrl": "https://skippr.com/docs/ide/data-agent",
+    "skusDocumentationUrl": "https://skippr.com/pricing",
+    "termsStatementUrl": "https://skippr.com/terms",
+    "privacyStatementUrl": "https://skippr.com/privacy",
+    "publicCodeMatchesUrl": "https://skippr.com/privacy",
+    "provider": {
+      "default": {
+        "id": "skippr",
+        "name": "Skippr Data Agent"
+      },
+      "enterprise": {
+        "id": "skippr-enterprise",
+        "name": "Skippr Enterprise"
+      },
+      "google": {
+        "id": "skippr-google",
+        "name": "Google"
+      },
+      "apple": {
+        "id": "skippr-apple",
+        "name": "Apple"
+      }
+    },
+    "providerExtensionId": "skippr.auth-provider",
+    "providerUriSetting": "skippr.auth.baseUrl",
+    "providerScopes": [
+      [
+        "openid"
+      ],
+      [
+        "profile"
+      ],
+      [
+        "email"
+      ]
+    ],
+    "entitlementUrl": "https://auth.skippr.io/auth/session",
+    "entitlementSignupLimitedUrl": "https://auth.skippr.io/auth/session",
+    "tokenEntitlementUrl": "https://auth.skippr.io/auth/session",
+    "manageSettingsUrl": "https://skippr.com/settings",
+    "managePlanUrl": "https://skippr.com/pricing",
+    "manageOverageUrl": "https://skippr.com/pricing",
+    "completionsEnablementSetting": "skippr.dataAgent.enable",
+    "chatEnabledSetting": "skippr.dataAgent.chat.enable",
+    "chatTemporarilyDisabledSetting": "skippr.dataAgent.chat.temporarilyDisabled",
+    "chatQuotaExceededContext": "skippr.dataAgent.chat.quotaExceeded",
+    "completionsQuotaExceededContext": "skippr.dataAgent.completions.quotaExceeded",
+    "walkthroughCommand": "skippr.openSplash",
+    "completionsMenuCommand": "skippr.dataAgent.showCompletionsMenu",
+    "chatRefreshTokenCommand": "skippr.auth.refresh",
+    "generateCommitMessageCommand": "skippr.dataAgent.generateCommitMessage",
+    "resolveMergeConflictsCommand": "skippr.dataAgent.resolveMergeConflicts",
+    "completionsAdvancedSetting": "skippr.dataAgent.completions.advanced",
+    "signUpUrl": "https://skippr.com/signup",
+    "upgradePlanUrl": "https://skippr.com/pricing",
+    "publicCodeByDefaultUrl": "https://skippr.com/privacy",
+    "nextEditSuggestionsSetting": "skippr.dataAgent.nextEditSuggestions",
+    "mcpRegistryDataUrl": "https://skippr.com/mcp/registry"
+  },
+  "trustedExtensionAuthAccess": {},
+  "onboardingKeymaps": [
+    {
+      "id": "vscode",
+      "label": "VS Code",
+      "description": "Default keyboard mapping"
+    },
+    {
+      "id": "sublime",
+      "label": "Sublime Text",
+      "description": "Keyboard mapping from Sublime Text"
+    },
+    {
+      "id": "intellij",
+      "label": "IntelliJ / JetBrains",
+      "extensionId": "k--kato.intellij-idea-keybindings",
+      "description": "Keyboard mapping from IntelliJ IDEA"
+    },
+    {
+      "id": "vim",
+      "label": "Vim",
+      "extensionId": "vscodevim.vim",
+      "description": "Vim modal editing"
+    },
+    {
+      "id": "eclipse",
+      "label": "Eclipse",
+      "extensionId": "alphabotsec.vscode-eclipse-keybindings",
+      "description": "Keyboard mapping from Eclipse"
+    },
+    {
+      "id": "notepadpp",
+      "label": "Notepad++",
+      "description": "Keyboard mapping from Notepad++"
+    }
+  ],
+  "onboardingThemes": [
+    {
+      "id": "dark-2026",
+      "label": "Dark 2026",
+      "themeId": "Dark 2026",
+      "type": "dark"
+    },
+    {
+      "id": "hc-dark",
+      "label": "Dark High Contrast",
+      "themeId": "Default High Contrast",
+      "type": "hcDark"
+    },
+    {
+      "id": "solarized-dark",
+      "label": "Solarized Dark",
+      "themeId": "Solarized Dark",
+      "type": "dark"
+    },
+    {
+      "id": "light-2026",
+      "label": "Light 2026",
+      "themeId": "Light 2026",
+      "type": "light"
+    },
+    {
+      "id": "hc-light",
+      "label": "Light High Contrast",
+      "themeId": "Default High Contrast Light",
+      "type": "hcLight"
+    },
+    {
+      "id": "solarized-light",
+      "label": "Solarized Light",
+      "themeId": "Solarized Light",
+      "type": "light"
+    }
+  ],
+  "builtInExtensionsEnabledWithAutoUpdates": [],
+  "sessionsWindowAllowedExtensions": []
+}

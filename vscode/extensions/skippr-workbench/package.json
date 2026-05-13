@@ -1,0 +1,102 @@
+{
+  "name": "skippr-workbench",
+  "displayName": "Skippr Workbench",
+  "description": "Built-in Skippr IDE workbench module",
+  "version": "0.0.1",
+  "publisher": "skippr",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "skippr.configureConnection",
+        "title": "Skippr: Configure Connection"
+      },
+      {
+        "command": "skippr.openSplash",
+        "title": "Skippr: Open Welcome"
+      },
+      {
+        "command": "skippr.auth.signIn",
+        "title": "Skippr: Sign In"
+      },
+      {
+        "command": "skippr.auth.signOut",
+        "title": "Skippr: Sign Out"
+      },
+      {
+        "command": "skippr.open.discover",
+        "title": "Skippr: Discover"
+      },
+      {
+        "command": "skippr.open.sync",
+        "title": "Skippr: Sync"
+      },
+      {
+        "command": "skippr.open.model",
+        "title": "Skippr: Model"
+      },
+      {
+        "command": "skippr.open.catalog",
+        "title": "Skippr: Catalog"
+      },
+      {
+        "command": "skippr.open.lineage",
+        "title": "Skippr: Lineage"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "skippr.auth.signIn"
+        },
+        {
+          "command": "skippr.auth.signOut"
+        },
+        {
+          "command": "skippr.open.discover"
+        },
+        {
+          "command": "skippr.open.sync"
+        },
+        {
+          "command": "skippr.open.model"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Skippr IDE",
+      "properties": {
+        "skippr.workspacePath": {
+          "type": "string",
+          "default": "",
+          "description": "Local workspace path for Skippr resources."
+        },
+        "skippr.apiTarget": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API endpoint for Skippr backend."
+        },
+        "skippr.auth.baseUrl": {
+          "type": "string",
+          "default": "https://auth.skippr.io",
+          "description": "Skippr Auth API base URL."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.5"
+  }
+}
