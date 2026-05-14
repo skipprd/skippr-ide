@@ -12,6 +12,36 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "authentication": [
+      {
+        "id": "skippr",
+        "label": "Skippr"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "skippr.chat",
+        "name": "skippr",
+        "fullName": "Skippr Agent",
+        "description": "Ask, plan, and run Skippr data-engineering workflows.",
+        "isSticky": true,
+        "sampleRequest": "What data is available in this pipeline?",
+        "commands": [
+          {
+            "name": "ask",
+            "description": "Read-only answers over workspace, catalog, lineage, docs, and thread context."
+          },
+          {
+            "name": "plan",
+            "description": "Produce a data-engineering plan without applying changes."
+          },
+          {
+            "name": "model",
+            "description": "Start or attach to the shared Skippr model run."
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "skippr.configureConnection",
@@ -28,6 +58,10 @@
       {
         "command": "skippr.auth.signOut",
         "title": "Skippr: Sign Out"
+      },
+      {
+        "command": "skippr.auth.account",
+        "title": "Skippr: Account"
       },
       {
         "command": "skippr.open.discover",
@@ -66,6 +100,26 @@
         "title": "Skippr: Start Pipeline Sync"
       },
       {
+        "command": "skippr.run.modelPipeline",
+        "title": "Skippr: Model Pipeline"
+      },
+      {
+        "command": "skippr.run.pickPipelineAction",
+        "title": "Skippr: Run pipeline…"
+      },
+      {
+        "command": "skippr.chat.ask",
+        "title": "Skippr Chat: Ask"
+      },
+      {
+        "command": "skippr.chat.plan",
+        "title": "Skippr Chat: Plan"
+      },
+      {
+        "command": "skippr.chat.runModelSubagent",
+        "title": "Skippr Chat: Run Model Subagent"
+      },
+      {
         "command": "skippr.run.stopSyncPipeline",
         "title": "Skippr: Stop Pipeline Sync"
       },
@@ -80,6 +134,18 @@
       {
         "command": "skippr.cli.showVersion",
         "title": "Skippr: Show CLI Version"
+      },
+      {
+        "command": "skippr.setupWorkspace",
+        "title": "Skippr: Setup Workspace"
+      },
+      {
+        "command": "skippr.validateConfiguration",
+        "title": "Skippr: Validate Configuration"
+      },
+      {
+        "command": "skippr.openConfig",
+        "title": "Skippr: Open Config"
       }
     ],
     "menus": {
@@ -89,6 +155,9 @@
         },
         {
           "command": "skippr.auth.signOut"
+        },
+        {
+          "command": "skippr.auth.account"
         },
         {
           "command": "skippr.open.discover"
@@ -112,6 +181,18 @@
           "command": "skippr.run.startSyncPipeline"
         },
         {
+          "command": "skippr.run.modelPipeline"
+        },
+        {
+          "command": "skippr.chat.ask"
+        },
+        {
+          "command": "skippr.chat.plan"
+        },
+        {
+          "command": "skippr.chat.runModelSubagent"
+        },
+        {
           "command": "skippr.run.stopSyncPipeline"
         },
         {
@@ -122,6 +203,23 @@
         },
         {
           "command": "skippr.cli.showVersion"
+        },
+        {
+          "command": "skippr.setupWorkspace"
+        },
+        {
+          "command": "skippr.validateConfiguration"
+        },
+        {
+          "command": "skippr.openConfig"
+        }
+      ]
+    },
+    "views": {
+      "workbench.view.debug": [
+        {
+          "id": "skippr.runDebug",
+          "name": "Skippr"
         }
       ]
     },
@@ -145,12 +243,21 @@
               },
               "skipprKind": {
                 "type": "string",
-                "enum": ["discover", "sync-once", "sync-all-once", "sync"],
-                "description": "Skippr operation to run."
+                "enum": ["discover", "sync-once", "model"],
+                "description": "discover, sync-once (single sync pass), or model."
               },
               "pipeline": {
                 "type": "string",
-                "description": "Pipeline name. Not required for sync-all-once."
+                "description": "Pipeline name. When empty, launch resolution uses skippr.defaultPipeline when set."
+              },
+              "configPath": {
+                "type": "string",
+                "description": "Path to skippr.yml or skippr.yaml. Defaults to the auto-detected workspace config."
+              },
+              "logLevel": {
+                "type": "string",
+                "enum": ["debug", "info", "warn", "error"],
+                "description": "Log level passed to Skippr."
               }
             }
           }
@@ -159,52 +266,66 @@
           {
             "type": "skippr",
             "request": "launch",
-            "name": "Skippr: Discover Pipeline",
+            "name": "Skippr: Discover",
             "skipprKind": "discover",
-            "pipeline": "${input:skipprPipeline}"
+            "configPath": "${workspaceFolder}/skippr.yml",
+            "logLevel": "info",
+            "pipeline": "${config:skippr.defaultPipeline}"
           },
           {
             "type": "skippr",
             "request": "launch",
-            "name": "Skippr: Sync Pipeline Once",
+            "name": "Skippr: Sync",
             "skipprKind": "sync-once",
-            "pipeline": "${input:skipprPipeline}"
+            "configPath": "${workspaceFolder}/skippr.yml",
+            "logLevel": "info",
+            "pipeline": "${config:skippr.defaultPipeline}"
           },
           {
             "type": "skippr",
             "request": "launch",
-            "name": "Skippr: Sync All Once",
-            "skipprKind": "sync-all-once"
-          },
-          {
-            "type": "skippr",
-            "request": "launch",
-            "name": "Skippr: Start Pipeline Sync",
-            "skipprKind": "sync",
-            "pipeline": "${input:skipprPipeline}"
+            "name": "Skippr: Model",
+            "skipprKind": "model",
+            "configPath": "${workspaceFolder}/skippr.yml",
+            "logLevel": "info",
+            "pipeline": "${config:skippr.defaultPipeline}"
           }
         ],
         "configurationSnippets": [
           {
-            "label": "Skippr: Discover Pipeline",
+            "label": "Skippr: Discover",
             "description": "Run Skippr discover for a pipeline.",
             "body": {
               "type": "skippr",
               "request": "launch",
-              "name": "Skippr: Discover Pipeline",
+              "name": "Skippr: Discover",
               "skipprKind": "discover",
-              "pipeline": "${input:skipprPipeline}"
+              "configPath": "${workspaceFolder}/skippr.yml",
+              "pipeline": "${config:skippr.defaultPipeline}"
             }
           },
           {
-            "label": "Skippr: Sync Pipeline Once",
+            "label": "Skippr: Sync",
             "description": "Run one Skippr sync pass for a pipeline.",
             "body": {
               "type": "skippr",
               "request": "launch",
-              "name": "Skippr: Sync Pipeline Once",
+              "name": "Skippr: Sync",
               "skipprKind": "sync-once",
-              "pipeline": "${input:skipprPipeline}"
+              "configPath": "${workspaceFolder}/skippr.yml",
+              "pipeline": "${config:skippr.defaultPipeline}"
+            }
+          },
+          {
+            "label": "Skippr: Model",
+            "description": "Run Skippr model for a pipeline.",
+            "body": {
+              "type": "skippr",
+              "request": "launch",
+              "name": "Skippr: Model",
+              "skipprKind": "model",
+              "configPath": "${workspaceFolder}/skippr.yml",
+              "pipeline": "${config:skippr.defaultPipeline}"
             }
           }
         ]
@@ -236,7 +357,7 @@
         "skippr.defaultPipeline": {
           "type": "string",
           "default": "",
-          "description": "Default Skippr pipeline used by run commands."
+          "description": "Default pipeline for Skippr runs, debug launch configs (${config:skippr.defaultPipeline}), and gutter Run on skippr.yml."
         },
         "skippr.logLevel": {
           "type": "string",

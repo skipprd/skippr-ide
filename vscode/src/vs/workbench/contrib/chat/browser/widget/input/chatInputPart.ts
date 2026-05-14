@@ -145,6 +145,8 @@ const INPUT_EDITOR_PADDING = { compact: { top: 2, bottom: 2 }, default: { top: 1
 const CachedLanguageModelsKey = 'chat.cachedLanguageModels.v2';
 const CHAT_INPUT_PICKER_COLLAPSE_WIDTH = 480;
 const PERMISSION_LEVEL_OPTION_ID = 'permissionLevel';
+const SKIPPR_CHAT_MODE_STORAGE_KEY = 'skippr.chat.mode';
+type SkipprChatModeId = 'ask' | 'plan' | 'agent';
 
 export interface IChatInputStyles {
 	overlayBackground: string;
@@ -396,6 +398,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	private modelWidget: ModelPickerActionItem | undefined;
 	private modeWidget: ModePickerActionItem | undefined;
 	private permissionWidget: PermissionPickerActionItem | undefined;
+	private skipprModeSelect: HTMLSelectElement | undefined;
 	private sessionTargetWidget: SessionTypePickerActionItem | undefined;
 	private delegationWidget: DelegationSessionPickerActionItem | undefined;
 	private readonly chatSessionPickerWidgets = this._register(new DisposableMap<string, ChatSessionPickerActionItem>());
@@ -2231,6 +2234,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		if (this.options.renderStyle === 'compact') {
 			this.secondaryToolbarContainer.style.display = 'none';
 		}
+		this.renderSkipprModeSelector(this.secondaryToolbarContainer);
 		this.chatEditingSessionWidgetContainer = elements.chatEditingSessionWidgetContainer;
 		this.chatInputTodoListWidgetContainer = elements.chatInputTodoListWidgetContainer;
 		this.chatArtifactsWidgetContainer = elements.chatArtifactsWidgetContainer;
@@ -2917,6 +2921,69 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		}
 
 		this._indexOfLastOpenedContext = -1;
+	}
+
+	private renderSkipprModeSelector(container: HTMLElement): void {
+		const modeRow = dom.append(container, $('.skippr-chat-mode-selector'));
+		const label = dom.append(modeRow, $('span.skippr-chat-mode-label'));
+		label.textContent = localize('skipprChatMode.label', "Mode");
+
+		const select = dom.append(modeRow, $('select.skippr-chat-mode-select')) as HTMLSelectElement;
+		select.setAttribute('aria-label', localize('skipprChatMode.ariaLabel', "Skippr chat mode"));
+		const modes: Array<{ id: SkipprChatModeId; label: string }> = [
+			{ id: 'ask', label: localize('skipprChatMode.ask', "Ask") },
+			{ id: 'plan', label: localize('skipprChatMode.plan', "Plan") },
+			{ id: 'agent', label: localize('skipprChatMode.agent', "Agent") },
+		];
+		for (const mode of modes) {
+			const option = document.createElement('option');
+			option.value = mode.id;
+			option.textContent = mode.label;
+			select.append(option);
+		}
+
+		const storedMode = this.storageService.get(SKIPPR_CHAT_MODE_STORAGE_KEY, StorageScope.APPLICATION, 'ask');
+		const initialMode = this.isSkipprChatMode(storedMode) ? storedMode : 'ask';
+		select.value = initialMode;
+		this.skipprModeSelect = select;
+		this.applySkipprChatMode(initialMode, false);
+
+		this._register(addDisposableListener(select, dom.EventType.CHANGE, () => {
+			const mode = this.isSkipprChatMode(select.value) ? select.value : 'ask';
+			this.applySkipprChatMode(mode, true);
+			this.inputEditor.focus();
+		}));
+		this._register(this.onDidChangeCurrentChatMode(() => this.syncSkipprModeSelectorFromChatMode()));
+	}
+
+	private isSkipprChatMode(value: string): value is SkipprChatModeId {
+		return value === 'ask' || value === 'plan' || value === 'agent';
+	}
+
+	private applySkipprChatMode(mode: SkipprChatModeId, storeSelection: boolean): void {
+		if (storeSelection) {
+			this.storageService.store(SKIPPR_CHAT_MODE_STORAGE_KEY, mode, StorageScope.APPLICATION, StorageTarget.USER);
+		}
+		if (mode === 'ask') {
+			this.setChatMode(ChatModeKind.Ask, storeSelection);
+		} else {
+			// Skippr Plan is a non-mutating Agent submode until the shared
+			// chat-mode service exposes a native plan kind.
+			this.setChatMode(ChatModeKind.Agent, storeSelection);
+		}
+	}
+
+	private syncSkipprModeSelectorFromChatMode(): void {
+		if (!this.skipprModeSelect) {
+			return;
+		}
+		const current = this.currentModeKind;
+		const storedMode = this.storageService.get(SKIPPR_CHAT_MODE_STORAGE_KEY, StorageScope.APPLICATION, this.skipprModeSelect.value);
+		if (current === ChatModeKind.Ask) {
+			this.skipprModeSelect.value = 'ask';
+		} else if (current === ChatModeKind.Agent && (storedMode === 'plan' || storedMode === 'agent')) {
+			this.skipprModeSelect.value = storedMode;
+		}
 	}
 
 	private handleAttachmentDeletion(e: KeyboardEvent | unknown, index: number, attachment: IChatRequestVariableEntry) {

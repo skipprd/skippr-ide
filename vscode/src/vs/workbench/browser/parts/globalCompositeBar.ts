@@ -33,7 +33,7 @@ import { ILogService } from '../../../platform/log/common/log.js';
 import { IProductService } from '../../../platform/product/common/productService.js';
 import { ISecretStorageService } from '../../../platform/secrets/common/secrets.js';
 import { AuthenticationSessionInfo, getCurrentAuthenticationSessionInfo } from '../../services/authentication/browser/authenticationService.js';
-import { AuthenticationSessionAccount, IAuthenticationService, INTERNAL_AUTH_PROVIDER_PREFIX } from '../../services/authentication/common/authentication.js';
+import { AuthenticationSessionAccount, IAuthenticationService } from '../../services/authentication/common/authentication.js';
 import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
 import { IHoverService } from '../../../platform/hover/browser/hover.js';
 import { ILifecycleService, LifecyclePhase } from '../../services/lifecycle/common/lifecycle.js';
@@ -358,7 +358,7 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 	protected override async resolveMainMenuActions(accountsMenu: IMenu, disposables: DisposableStore): Promise<IAction[]> {
 		await super.resolveMainMenuActions(accountsMenu, disposables);
 
-		const providers = this.authenticationService.getProviderIds().filter(p => !p.startsWith(INTERNAL_AUTH_PROVIDER_PREFIX));
+		const providers = this.authenticationService.getProviderIds().filter(p => p === 'skippr');
 		const otherCommands = accountsMenu.getActions();
 		let menus: IAction[] = [];
 
@@ -386,8 +386,29 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 					continue;
 				}
 
-				const canUseMcp = !!provider.authorizationServers?.length;
+					const canUseMcp = providerId !== 'skippr' && !!provider.authorizationServers?.length;
 				for (const account of accounts) {
+						if (providerId === 'skippr') {
+							const providerSubMenuActions: IAction[] = [
+								toAction({
+									id: 'skipprAccount',
+									label: localize('skipprAccount', "Skippr Account"),
+									enabled: true,
+									run: () => this.commandService.executeCommand('skippr.auth.account')
+								})
+							];
+							if (account.canSignOut) {
+								providerSubMenuActions.push(toAction({
+									id: 'skipprSignOut',
+									label: localize('skipprSignOut', "Sign Out"),
+									enabled: true,
+									run: () => this.commandService.executeCommand('skippr.auth.signOut')
+								}));
+							}
+							menus.push(new SubmenuAction('activitybar.submenu', `${account.label} (${provider.label})`, providerSubMenuActions));
+							continue;
+						}
+
 					const manageExtensionsAction = toAction({
 						id: `configureSessions${account.label}`,
 						label: localize('manageTrustedExtensions', "Manage Trusted Extensions"),
@@ -482,16 +503,29 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 					menus.push(providerSubMenu);
 				}
 			}
+
+			if (!menus.length) {
+				menus.push(toAction({
+					id: 'skipprSignIn',
+					label: localize('skipprSignIn', "Sign in to Skippr"),
+					enabled: true,
+					run: () => this.commandService.executeCommand('skippr.auth.account')
+				}));
+			}
 		}
 
-		if (menus.length && otherCommands.length) {
+		const skipprCommands = otherCommands
+			.map(group => [group[0], group[1].filter(action => action.id.startsWith('skippr.'))] as const)
+			.filter(group => group[1].length);
+
+		if (menus.length && skipprCommands.length) {
 			menus.push(new Separator());
 		}
 
-		otherCommands.forEach((group, i) => {
+		skipprCommands.forEach((group, i) => {
 			const actions = group[1];
 			menus = menus.concat(actions);
-			if (i !== otherCommands.length - 1) {
+			if (i !== skipprCommands.length - 1) {
 				menus.push(new Separator());
 			}
 		});

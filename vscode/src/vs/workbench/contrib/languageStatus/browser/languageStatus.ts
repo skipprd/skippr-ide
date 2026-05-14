@@ -169,7 +169,18 @@ class LanguageStatus {
 		if (!editor?.hasModel()) {
 			return new LanguageStatusViewModel([], []);
 		}
-		const all = this._languageStatusService.getLanguageStatus(editor.getModel());
+		const allRaw = this._languageStatusService.getLanguageStatus(editor.getModel());
+		let dedicatedChanged = false;
+		for (const raw of allRaw) {
+			if (shouldHideCopilotLanguageStatus(raw) && this._dedicated.delete(raw.id)) {
+				dedicatedChanged = true;
+				this._statusBarService.updateEntryVisibility(raw.id, false);
+			}
+		}
+		if (dedicatedChanged) {
+			this._storeState();
+		}
+		const all = allRaw.filter(item => !shouldHideCopilotLanguageStatus(item));
 		const combined: ILanguageStatus[] = [];
 		const dedicated: ILanguageStatus[] = [];
 		for (const item of all) {
@@ -450,4 +461,18 @@ export class ResetAction extends Action2 {
 
 function computeText(text: string, loading: boolean): string {
 	return joinStrings([text !== '' && text, loading && '$(loading~spin)'], '\u00A0\u00A0');
+}
+
+/** Skippr IDE: suppress GitHub Copilot language-status rows (often pinned next to Skippr on the status bar). */
+function shouldHideCopilotLanguageStatus(item: ILanguageStatus): boolean {
+	const source = item.source.toLowerCase();
+	const name = item.name.toLowerCase();
+	const id = item.id.toLowerCase();
+	if (source.includes('copilot') || name.includes('copilot')) {
+		return true;
+	}
+	if (id.includes('copilot') && (id.includes('github') || source.includes('github'))) {
+		return true;
+	}
+	return false;
 }

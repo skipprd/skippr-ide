@@ -309,7 +309,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 MenuRegistry.appendMenuItem(MenuId.MenubarDebugMenu, {
 	group: '1_skippr',
 	command: {
-		id: 'skippr.open.model',
+		id: 'skippr.run.modelPipeline',
 		title: nls.localize({ key: 'miSkipprModel', comment: ['&& denotes a mnemonic'] }, "Skippr &&Model")
 	},
 	order: 12

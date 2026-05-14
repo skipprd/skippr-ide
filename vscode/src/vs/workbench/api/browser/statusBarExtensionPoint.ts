@@ -64,6 +64,9 @@ class ExtensionStatusBarItemService implements IExtensionStatusBarItemService {
 
 	private readonly _entries: Map<string, { accessor: IStatusbarEntryAccessor; entry: IStatusbarEntry; alignment: MainThreadStatusBarAlignment; priority: number; disposable: IDisposable }> = new Map();
 
+	/** Entry IDs for which we intentionally did not create a status bar item (e.g. suppressed Copilot); used so the ext host gets DidDefine once then DidUpdate. */
+	private readonly _suppressedEntryIds = new Set<string>();
+
 	private readonly _onDidChange = new Emitter<IExtensionStatusBarItemChangeEvent>();
 	readonly onDidChange: Event<IExtensionStatusBarItemChangeEvent> = this._onDidChange.event;
 
@@ -72,6 +75,7 @@ class ExtensionStatusBarItemService implements IExtensionStatusBarItemService {
 	dispose(): void {
 		this._entries.forEach(entry => entry.accessor.dispose());
 		this._entries.clear();
+		this._suppressedEntryIds.clear();
 		this._onDidChange.dispose();
 	}
 
@@ -81,6 +85,20 @@ class ExtensionStatusBarItemService implements IExtensionStatusBarItemService {
 		command: Command | undefined, color: string | ThemeColor | undefined, backgroundColor: ThemeColor | undefined,
 		alignLeft: boolean, priority: number | undefined, accessibilityInformation: IAccessibilityInformation | undefined
 	): StatusBarUpdateKind {
+		// Skippr IDE: hide GitHub Copilot status bar affordances; Skippr owns the
+		// bottom-bar agent surface via skippr-workbench + built-in Skippr status.
+		if (extensionId && ExtensionIdentifier.toKey(extensionId).startsWith('github.') && ExtensionIdentifier.toKey(extensionId).includes('copilot')) {
+			if (this._entries.has(entryId)) {
+				this.unsetEntry(entryId);
+				return StatusBarUpdateKind.DidUpdate;
+			}
+			if (!this._suppressedEntryIds.has(entryId)) {
+				this._suppressedEntryIds.add(entryId);
+				return StatusBarUpdateKind.DidDefine;
+			}
+			return StatusBarUpdateKind.DidUpdate;
+		}
+
 		// if there are icons in the text use the tooltip for the aria label
 		let ariaLabel: string;
 		let role: string | undefined = undefined;
@@ -157,6 +175,7 @@ class ExtensionStatusBarItemService implements IExtensionStatusBarItemService {
 	}
 
 	unsetEntry(entryId: string): void {
+		this._suppressedEntryIds.delete(entryId);
 		this._entries.get(entryId)?.disposable.dispose();
 		this._entries.delete(entryId);
 	}

@@ -56,14 +56,6 @@
       "enterprise": {
         "id": "skippr-enterprise",
         "name": "Skippr Enterprise"
-      },
-      "google": {
-        "id": "skippr-google",
-        "name": "Google"
-      },
-      "apple": {
-        "id": "skippr-apple",
-        "name": "Apple"
       }
     },
     "providerExtensionId": "skippr.auth-provider",

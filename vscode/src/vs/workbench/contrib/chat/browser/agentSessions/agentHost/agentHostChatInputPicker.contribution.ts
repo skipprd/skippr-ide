@@ -13,8 +13,8 @@ import { ChatContextKeys, ChatContextKeyExprs } from '../../../common/actions/ch
  * menu by VS Code's menu/toolbar convention.
  *
  * Order layout in the secondary toolbar (existing items annotated):
- *   0    OpenSessionTargetPickerAction        (Skippr Agent - Agent Host)
- *   0.5  OpenDelegationPickerAction
+ *   0    (session target picker removed in Skippr IDE)
+ *   0.5  OpenDelegationPickerAction            (hidden when supportsDelegation is false)
  *   0.6  OpenWorkspacePickerAction
  *   0.7  OpenAgentHostModePickerAction        (NEW — Mode)
  *   1    OpenPermissionPickerAction           (Default Approvals)

@@ -164,9 +164,9 @@ export class AgentHostContribution extends Disposable implements IWorkbenchContr
 			: localize('agentHost.displayName', "{0} - Agent Host", agent.displayName);
 
 		// Chat session contribution.
-		// In the Agents app, hide the delegation picker for local agent host
-		// sessions (matches behavior of remote agent host sessions). In VS Code,
-		// keep the picker available so users can hand off to other targets.
+		// Skippr IDE: agent-host sessions run in a dedicated process; hide the
+		// delegation picker and the empty-session "session target" chip (same as
+		// the Agents app / remote agent host UX).
 		store.add(this._chatSessionsService.registerChatSessionContribution({
 			type: sessionType,
 			name: agentId,
@@ -174,7 +174,7 @@ export class AgentHostContribution extends Disposable implements IWorkbenchContr
 			description: agent.description,
 			canDelegate: true,
 			requiresCustomModels: true,
-			supportsDelegation: !this._isSessionsWindow,
+			supportsDelegation: false,
 			capabilities: {
 				supportsCheckpoints: true,
 				supportsPromptAttachments: true,

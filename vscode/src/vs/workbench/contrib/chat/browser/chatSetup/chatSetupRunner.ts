@@ -203,30 +203,8 @@ export class ChatSetup {
 
 		let buttons: Array<ContinueWithButton>;
 		if (!options?.forceAnonymous && (this.context.state.entitlement === ChatEntitlement.Unknown || options?.forceSignInDialog)) {
-			const defaultProviderButton: ContinueWithButton = [localize('continueWith', "Sign in to {0}", defaultChat.provider.default.name), ChatSetupStrategy.SetupWithoutEnterpriseProvider, styleButton('continue-button', 'default')];
-			const defaultProviderLink: ContinueWithButton = [defaultProviderButton[0], defaultProviderButton[1], styleButton('link-button')];
-
-			const enterpriseProviderButton: ContinueWithButton = [localize('continueWith', "Sign in to {0}", defaultChat.provider.enterprise.name), ChatSetupStrategy.SetupWithEnterpriseProvider, styleButton('continue-button', 'default')];
-			const enterpriseProviderLink: ContinueWithButton = [enterpriseProviderButton[0], enterpriseProviderButton[1], styleButton('link-button')];
-
-			const googleProviderButton: ContinueWithButton = [localize('continueWith', "Sign in to {0}", defaultChat.provider.google.name), ChatSetupStrategy.SetupWithGoogleProvider, styleButton('continue-button', 'google')];
-			const appleProviderButton: ContinueWithButton = [localize('continueWith', "Sign in to {0}", defaultChat.provider.apple.name), ChatSetupStrategy.SetupWithAppleProvider, styleButton('continue-button', 'apple')];
-
-			if (!this.defaultAccountService.getDefaultAccountAuthenticationProvider().enterprise) {
-				buttons = coalesce([
-					defaultProviderButton,
-					googleProviderButton,
-					appleProviderButton,
-					enterpriseProviderLink
-				]);
-			} else {
-				buttons = coalesce([
-					enterpriseProviderButton,
-					googleProviderButton,
-					appleProviderButton,
-					defaultProviderLink
-				]);
-			}
+			const skipprProviderButton: ContinueWithButton = [localize('continueWithSkippr', "Sign in to Skippr"), ChatSetupStrategy.SetupWithoutEnterpriseProvider, styleButton('continue-button', 'skippr')];
+			buttons = coalesce([skipprProviderButton]);
 		} else {
 			buttons = [[localize('setupAIButton', "Use Skippr Data Agent"), ChatSetupStrategy.DefaultSetup, undefined]];
 		}

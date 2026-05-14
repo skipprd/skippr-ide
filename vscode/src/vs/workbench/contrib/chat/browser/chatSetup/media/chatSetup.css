@@ -19,12 +19,19 @@
 		display: inline-block;
 	}
 
+	.dialog-buttons-row > .dialog-buttons > .monaco-button.continue-button.skippr::before,
 	.dialog-buttons-row > .dialog-buttons > .monaco-button.continue-button.default::before {
-		background-image: url('./github.svg');
-	}
-
-	.dialog-buttons-row > .dialog-buttons > .monaco-button.continue-button.google::before {
-		background-image: url('./google.svg');
+		content: 'S';
+		background: var(--vscode-button-foreground);
+		color: var(--vscode-button-background);
+		border-radius: 4px;
+		text-align: center;
+		font-weight: 700;
+		font-size: 11px;
+		line-height: 16px !important;
+		height: 16px;
+		margin-right: 6px;
+		padding-right: 0;
 	}
 
 	/* Link Buttons */
@@ -51,11 +58,3 @@
 	}
 }
 
-.monaco-workbench.hc-light .chat-setup-dialog .dialog-buttons-row > .dialog-buttons > .monaco-button.continue-button.apple::before,
-.monaco-workbench.vs .chat-setup-dialog .dialog-buttons-row > .dialog-buttons > .monaco-button.continue-button.apple::before {
-	background-image: url('./apple-light.svg');
-}
-
-.chat-setup-dialog .dialog-buttons-row > .dialog-buttons > .monaco-button.continue-button.apple::before {
-	background-image: url('./apple-dark.svg');
-}

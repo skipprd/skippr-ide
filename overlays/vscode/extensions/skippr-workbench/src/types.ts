@@ -59,7 +59,18 @@ export type SkipprRunEventName =
   | "compaction_complete"
   | "output_synced"
   | "sync_complete"
-  | "sync_error";
+  | "sync_error"
+  | "model_start"
+  | "model_thread_resumed"
+  | "model_phase_changed"
+  | "model_complete"
+  | "model_error"
+  | "ask_start"
+  | "ask_complete"
+  | "ask_error"
+  | "plan_start"
+  | "plan_complete"
+  | "plan_error";
 
 export interface SkipprRunEvent {
   event: SkipprRunEventName;
@@ -80,4 +91,59 @@ export interface SkipprRunEvent {
   error?: string;
   uploads_in_flight?: number;
   ok?: boolean;
+  thread_id?: string;
+  phase?: string;
+  repair_status?: string;
+  pending_plan_revision?: boolean;
+  failure_summary?: string;
+  answer?: string;
+  plan?: string;
+}
+
+export interface SkipprDoctorCheck {
+  ok: boolean;
+  severity: string;
+  message: string;
+  suggested_fix_command?: string;
+}
+
+export interface SkipprDoctorResult {
+  ok: boolean;
+  config_path?: string;
+  checks: SkipprDoctorCheck[];
+}
+
+export interface SkipprConfigShowResult {
+  ok: boolean;
+  config_path: string;
+  workspace?: string;
+  pipelines: string[];
+  sources: string[];
+  sinks: string[];
+  schema_sinks: string[];
+  default_pipeline?: string;
+}
+
+export interface SkipprFieldSchema {
+  name: string;
+  label: string;
+  field_type: string;
+  required: boolean;
+  secret: boolean;
+  repeatable: boolean;
+  description: string;
+  example?: string;
+}
+
+export interface SkipprConnectorSchema {
+  kind: string;
+  label: string;
+  fields: SkipprFieldSchema[];
+}
+
+export interface SkipprConfigSchema {
+  version: number;
+  default_config_file: string;
+  sources: SkipprConnectorSchema[];
+  warehouses: SkipprConnectorSchema[];
 }

@@ -1033,6 +1033,37 @@ have to be updated for changes to the rules above, or to support more deeply nes
 	order: 1;
 }
 
+.interactive-session .chat-secondary-toolbar .skippr-chat-mode-selector {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 24px;
+	margin-right: 8px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.interactive-session .chat-secondary-toolbar .skippr-chat-mode-label {
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+}
+
+.interactive-session .chat-secondary-toolbar .skippr-chat-mode-select {
+	height: 22px;
+	padding: 0 22px 0 8px;
+	border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, transparent));
+	border-radius: 999px;
+	color: var(--vscode-dropdown-foreground);
+	background: var(--vscode-dropdown-background);
+	font: inherit;
+	font-size: 12px;
+}
+
+.interactive-session .chat-secondary-toolbar .skippr-chat-mode-select:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
 /* When context usage is inside the toolbars (compact mode), keep the ordering */
 .interactive-session .chat-input-toolbars .chat-context-usage-container {
 	order: 1;
