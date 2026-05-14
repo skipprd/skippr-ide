@@ -348,7 +348,10 @@ export class AdapterManager extends Disposable implements IAdapterManager {
 		let model: IEditorModel | null = null;
 		if (isCodeEditor(activeTextEditorControl)) {
 			model = activeTextEditorControl.getModel();
-			const language = model ? model.getLanguageId() : undefined;
+			// .env files use the "dotenv" language id; there is no dotenv debug adapter. Treat as unknown so
+			// we fall through to debugger picker / Skippr instead of "You don't have an extension for debugging Dotenv."
+			const rawLanguage = model ? model.getLanguageId() : undefined;
+			const language = rawLanguage === 'dotenv' ? undefined : rawLanguage;
 			if (language) {
 				languageLabel = this.languageService.getLanguageName(language);
 			}

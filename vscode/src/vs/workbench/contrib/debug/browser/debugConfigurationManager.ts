@@ -599,6 +599,24 @@ abstract class AbstractLaunch implements ILaunch {
 		return content;
 	}
 
+	/**
+	 * Skippr IDE: if no debugger was chosen (e.g. picker dismissed), still seed launch.json from the built-in Skippr debugger.
+	 */
+	async getInitialConfigurationContentOrSkipprSeed(folderUri?: uri, type?: string, useInitialConfigs?: boolean, token?: CancellationToken): Promise<string> {
+		let content = await this.getInitialConfigurationContent(folderUri, type, useInitialConfigs, token);
+		if (content) {
+			return content;
+		}
+		const skippr = this.adapterManager.getEnabledDebugger('skippr');
+		if (!skippr) {
+			return content;
+		}
+		const initialConfigs = useInitialConfigs ?
+			await this.configurationManager.provideDebugConfigurations(folderUri, 'skippr', token || CancellationToken.None) :
+			[];
+		return await skippr.getInitialConfigurationContent(initialConfigs);
+	}
+
 
 	get hidden(): boolean {
 		return false;
@@ -663,7 +681,7 @@ class Launch extends AbstractLaunch implements ILaunch {
 			content = fileContent.value.toString();
 		} catch {
 			// launch.json not found: create one by collecting launch configs from debugConfigProviders
-			content = await this.getInitialConfigurationContent(this.workspace.uri, type, !suppressInitialConfigs, token);
+			content = await this.getInitialConfigurationContentOrSkipprSeed(this.workspace.uri, type, !suppressInitialConfigs, token);
 			if (!content) {
 				// Cancelled
 				return { editor: null, created: false };
@@ -741,7 +759,7 @@ class WorkspaceLaunch extends AbstractLaunch implements ILaunch {
 		const launchExistInFile = !!this.getConfig();
 		if (!launchExistInFile) {
 			// Launch property in workspace config not found: create one by collecting launch configs from debugConfigProviders
-			const content = await this.getInitialConfigurationContent(undefined, type, useInitialConfigs, token);
+			const content = await this.getInitialConfigurationContentOrSkipprSeed(undefined, type, useInitialConfigs, token);
 			if (content) {
 				await this.configurationService.updateValue('launch', json.parse(content), ConfigurationTarget.WORKSPACE);
 			} else {

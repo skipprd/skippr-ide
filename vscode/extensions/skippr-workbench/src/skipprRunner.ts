@@ -14,6 +14,14 @@ export interface SkipprRunOptions {
   configPath?: string;
   pipeline?: string;
   logLevel: string;
+  /** `skippr discover --output` (CLI: progress | json | text). */
+  discoverOutput?: string;
+  /** When true, pass `skippr model --no-resume`. */
+  modelNoResume?: boolean;
+  /** Appended after built flags (e.g. from the Run panel “Args” field). */
+  extraArgs?: string[];
+  /** When set, used as the child process environment (typically `process.env` merged with Skippr settings). */
+  spawnEnv?: NodeJS.ProcessEnv;
 }
 
 export interface SkipprRunResult {
@@ -65,10 +73,14 @@ export async function installSkipprCli(output: vscode.LogOutputChannel): Promise
   return runShellCommand(installerCommand, output);
 }
 
-export async function updateSkipprCli(cliPath: string | undefined, output: vscode.LogOutputChannel): Promise<SkipprRunResult> {
+export async function updateSkipprCli(
+  cliPath: string | undefined,
+  output: vscode.LogOutputChannel,
+  spawnEnv: NodeJS.ProcessEnv = process.env
+): Promise<SkipprRunResult> {
   output.show(true);
   if (cliPath) {
-    const update = await runCommand(buildCliCommand(cliPath, ["update"]), output, cliCommandCwd(cliPath));
+    const update = await runCommand(buildCliCommand(cliPath, ["update"]), output, cliCommandCwd(cliPath), spawnEnv);
     if (update.code === 0) {
       return update;
     }
@@ -78,22 +90,27 @@ export async function updateSkipprCli(cliPath: string | undefined, output: vscod
   return runShellCommand(installerCommand, output);
 }
 
-export async function showSkipprVersion(cliPath: string, output: vscode.LogOutputChannel): Promise<SkipprRunResult> {
+export async function showSkipprVersion(
+  cliPath: string,
+  output: vscode.LogOutputChannel,
+  spawnEnv: NodeJS.ProcessEnv = process.env
+): Promise<SkipprRunResult> {
   output.show(true);
   output.info(`Checking Skippr CLI version: ${formatCliCommand(cliPath, ["--version"])}`);
-  return runCommand(buildCliCommand(cliPath, ["--version"]), output, cliCommandCwd(cliPath));
+  return runCommand(buildCliCommand(cliPath, ["--version"]), output, cliCommandCwd(cliPath), spawnEnv);
 }
 
 export async function runSkipprJson<T>(
   cliPath: string,
   args: string[],
   cwd: string,
-  output: vscode.LogOutputChannel
+  output: vscode.LogOutputChannel,
+  spawnEnv: NodeJS.ProcessEnv = process.env
 ): Promise<SkipprJsonCommandResult<T>> {
   const startedAt = Date.now();
   const [command, ...commandArgs] = buildCliCommand(cliPath, args);
   output.info(`$ ${formatCliCommand(cliPath, args)}`);
-  const child = spawn(command, commandArgs, { cwd: cliCommandCwd(cliPath) ?? cwd, env: process.env, shell: false });
+  const child = spawn(command, commandArgs, { cwd: cliCommandCwd(cliPath) ?? cwd, env: spawnEnv, shell: false });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -144,7 +161,7 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
   callbacks.onLog(`$ ${formatCliCommand(command, args)}`);
   const child = spawn(spawnCommand, spawnArgs, {
     cwd: cliCommandCwd(command) ?? options.cwd,
-    env: process.env,
+    env: options.spawnEnv ?? process.env,
     shell: false
   });
 
@@ -198,7 +215,7 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
   };
 }
 
-function buildCliCommand(cliPath: string, args: string[]): string[] {
+export function buildCliCommand(cliPath: string, args: string[]): string[] {
   if (cliPath !== localCargoCli) {
     return [cliPath, ...args];
   }
@@ -209,12 +226,12 @@ function buildCliCommand(cliPath: string, args: string[]): string[] {
   return ["cargo", "run", "--manifest-path", manifestPath, "-p", "skippr-cli", "--", ...args];
 }
 
-function cliCommandCwd(cliPath: string): string | undefined {
+export function cliCommandCwd(cliPath: string): string | undefined {
   const manifestPath = cliPath === localCargoCli ? resolveLocalSkipprdManifest() : undefined;
   return manifestPath ? path.dirname(manifestPath) : undefined;
 }
 
-function formatCliCommand(cliPath: string, args: string[]): string {
+export function formatCliCommand(cliPath: string, args: string[]): string {
   return buildCliCommand(cliPath, args).join(" ");
 }
 
@@ -256,10 +273,16 @@ function buildRunArgs(options: SkipprRunOptions): string[] {
     if (options.pipeline) {
       args.push("--pipeline", options.pipeline);
     }
+    const raw = (options.discoverOutput ?? "json").trim().toLowerCase();
+    const out = raw === "progress" || raw === "json" || raw === "text" ? raw : "json";
+    args.push("--output", out);
   } else if (options.kind === "model") {
     args.push("model");
     if (options.pipeline) {
       args.push("--pipeline", options.pipeline);
+    }
+    if (options.modelNoResume) {
+      args.push("--no-resume");
     }
     args.push("--output", "jsonl");
   } else {
@@ -270,10 +293,10 @@ function buildRunArgs(options: SkipprRunOptions): string[] {
     if (options.kind === "sync-once" || options.kind === "sync-all-once") {
       args.push("--once");
     }
-  }
-
-  if (options.kind !== "model") {
     args.push("--output", "json");
+  }
+  if (options.extraArgs?.length) {
+    args.push(...options.extraArgs);
   }
   return args;
 }
@@ -328,11 +351,16 @@ function runShellCommand(command: string, output: vscode.LogOutputChannel): Prom
   return runCommand([shell, ...args], output);
 }
 
-function runCommand(commandAndArgs: string[], output: vscode.LogOutputChannel, cwd?: string): Promise<SkipprRunResult> {
+function runCommand(
+  commandAndArgs: string[],
+  output: vscode.LogOutputChannel,
+  cwd?: string,
+  spawnEnv: NodeJS.ProcessEnv = process.env
+): Promise<SkipprRunResult> {
   const [command, ...args] = commandAndArgs;
   const startedAt = Date.now();
   output.info(`$ ${command} ${args.join(" ")}`);
-  const child = spawn(command, args, cwd ? { cwd } : undefined);
+  const child = spawn(command, args, cwd ? { cwd, env: spawnEnv } : { env: spawnEnv });
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => output.info(chunk.trimEnd()));
   child.stderr.setEncoding("utf8");

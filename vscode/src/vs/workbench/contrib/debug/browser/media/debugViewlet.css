@@ -369,3 +369,20 @@
 	display: flex;
 	align-items: center;
 }
+
+/* Skippr IDE: title-bar Skippr run cluster (extra SelectBoxes after launch-style command box) */
+.monaco-workbench .part > .title > .title-actions .skippr-run-toolbar-extras {
+	display: flex;
+	align-items: stretch;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .part > .title > .title-actions .skippr-run-toolbar-extras .configuration {
+	display: flex;
+	align-items: stretch;
+}
+
+.monaco-workbench .part > .title > .title-actions .skippr-run-toolbar-extras .monaco-select-box {
+	min-width: 72px;
+	max-width: 200px;
+}

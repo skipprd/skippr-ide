@@ -13,6 +13,7 @@ import { Action2, MenuId, MenuItemAction, MenuRegistry, registerAction2 } from '
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IProgressService } from '../../../../platform/progress/common/progress.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -26,10 +27,10 @@ import { WorkbenchStateContext } from '../../../common/contextkeys.js';
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { FocusSessionActionViewItem, StartDebugActionViewItem } from './debugActionViewItems.js';
-import { DEBUG_CONFIGURE_COMMAND_ID, DEBUG_CONFIGURE_LABEL, DEBUG_START_COMMAND_ID, DEBUG_START_LABEL, DISCONNECT_ID, FOCUS_SESSION_ID, SELECT_AND_START_ID, STOP_ID } from './debugCommands.js';
+import { DEBUG_CONFIGURE_COMMAND_ID, DEBUG_CONFIGURE_LABEL, DEBUG_START_COMMAND_ID, DEBUG_START_LABEL, DISCONNECT_ID, FOCUS_SESSION_ID, SELECT_AND_START_ID, SKIPPR_RUN_TOOLBAR_COMMAND_ID, SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, STOP_ID } from './debugCommands.js';
 import { debugConfigure } from './debugIcons.js';
 import { createDisconnectMenuItemAction } from './debugToolBar.js';
-import { WelcomeView } from './welcomeView.js';
+import { SkipprRunToolbarActionViewItem } from './skipprRunToolbarActionViewItem.js';
 import { BREAKPOINTS_VIEW_ID, CONTEXT_DEBUGGERS_AVAILABLE, CONTEXT_DEBUG_STATE, CONTEXT_DEBUG_UX, CONTEXT_DEBUG_UX_KEY, getStateLabel, IDebugService, ILaunch, REPL_VIEW_ID, State, VIEWLET_ID, EDITOR_CONTRIBUTION_ID, IDebugEditorContribution } from '../common/debug.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
@@ -40,6 +41,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 export class DebugViewPaneContainer extends ViewPaneContainer {
 
 	private startDebugActionViewItem: StartDebugActionViewItem | undefined;
+	private skipprRunToolbarActionViewItem: SkipprRunToolbarActionViewItem | undefined;
 	private progressResolve: (() => void) | undefined;
 	private breakpointView: ViewPane | undefined;
 	private paneListeners = new Map<string, IDisposable>();
@@ -92,12 +94,16 @@ export class DebugViewPaneContainer extends ViewPaneContainer {
 
 		if (this.startDebugActionViewItem) {
 			this.startDebugActionViewItem.focus();
-		} else {
-			this.focusView(WelcomeView.ID);
+		} else if (this.skipprRunToolbarActionViewItem) {
+			this.skipprRunToolbarActionViewItem.focus();
 		}
 	}
 
 	override getActionViewItem(action: IAction, options: IBaseActionViewItemOptions): IActionViewItem | undefined {
+		if (action.id === SKIPPR_RUN_TOOLBAR_COMMAND_ID) {
+			this.skipprRunToolbarActionViewItem = this.instantiationService.createInstance(SkipprRunToolbarActionViewItem, null, action, options);
+			return this.skipprRunToolbarActionViewItem;
+		}
 		if (action.id === DEBUG_START_COMMAND_ID) {
 			this.startDebugActionViewItem = this.instantiationService.createInstance(StartDebugActionViewItem, null, action, options);
 			return this.startDebugActionViewItem;
@@ -180,7 +186,8 @@ MenuRegistry.appendMenuItem(MenuId.ViewContainerTitle, {
 		ContextKeyExpr.or(
 			ContextKeyExpr.not('config.debug.hideLauncherWhileDebugging'),
 			ContextKeyExpr.not('inDebugMode')
-		)
+		),
+		ContextKeyExpr.notEquals(SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true)
 	),
 	order: 10,
 	group: 'navigation',
@@ -195,13 +202,9 @@ registerAction2(class extends Action2 {
 	constructor() {
 		super({
 			id: DEBUG_CONFIGURE_COMMAND_ID,
-			title: {
-				value: DEBUG_CONFIGURE_LABEL,
-				original: 'Open \'launch.json\'',
-				mnemonicTitle: nls.localize({ key: 'miOpenConfigurations', comment: ['&& denotes a mnemonic'] }, "Open &&Configurations")
-			},
+			title: DEBUG_CONFIGURE_LABEL,
 			metadata: {
-				description: nls.localize2('openLaunchConfigDescription', 'Opens the file used to configure how your program is debugged')
+				description: nls.localize2('openSkipprYamlConfigDescription', 'Opens skippr.yml or skippr.yaml for the active workspace.')
 			},
 			f1: true,
 			icon: debugConfigure,
@@ -227,6 +230,11 @@ registerAction2(class extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor, opts?: { addNew?: boolean }): Promise<void> {
+		const contextKeyService = accessor.get(IContextKeyService);
+		if (contextKeyService.getContextKeyValue<boolean>(SKIPPR_RUN_TOOLBAR_CONTEXT_KEY) === true) {
+			await accessor.get(ICommandService).executeCommand('skippr.openConfig');
+			return;
+		}
 		const debugService = accessor.get(IDebugService);
 		const quickInputService = accessor.get(IQuickInputService);
 		const configurationManager = debugService.getConfigurationManager();
@@ -294,11 +302,34 @@ MenuRegistry.appendMenuItem(MenuId.ViewContainerTitle, {
 		ContextKeyExpr.or(
 			ContextKeyExpr.equals('config.debug.toolBarLocation', 'docked'),
 			ContextKeyExpr.has('config.debug.hideLauncherWhileDebugging')
-		)
+		),
+		ContextKeyExpr.notEquals(SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true)
 	),
 	order: 10,
 	command: {
 		id: SELECT_AND_START_ID,
 		title: nls.localize('startAdditionalSession', "Start Additional Session"),
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SKIPPR_RUN_TOOLBAR_COMMAND_ID,
+			title: nls.localize2('skipprRunToolbarAction', 'Skippr run'),
+			f1: false,
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				group: 'navigation',
+				order: 0,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('viewContainer', VIEWLET_ID),
+					ContextKeyExpr.equals(SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true)
+				)
+			}]
+		});
+	}
+	run(): void {
+		// Custom IActionViewItem performs runs; this action exists for the title menu entry.
 	}
 });

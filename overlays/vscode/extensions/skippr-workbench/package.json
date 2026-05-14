@@ -104,6 +104,10 @@
         "title": "Skippr: Model Pipeline"
       },
       {
+        "command": "skippr.run.doctor",
+        "title": "Skippr: Doctor"
+      },
+      {
         "command": "skippr.run.pickPipelineAction",
         "title": "Skippr: Run pipeline…"
       },
@@ -146,9 +150,50 @@
       {
         "command": "skippr.openConfig",
         "title": "Skippr: Open Config"
+      },
+      {
+        "command": "skippr.editPipelineEnv",
+        "title": "Skippr: Edit Pipeline Environment Variables"
+      },
+      {
+        "command": "skippr.refreshDiagnostics",
+        "title": "Skippr: Refresh Config Diagnostics"
+      }
+    ],
+    "views": {
+      "debug": [
+        {
+          "id": "skippr.runStatus",
+          "name": "STATUS",
+          "type": "webview",
+          "order": 50
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "skippr.debug.toolbar",
+        "label": "Skippr"
       }
     ],
     "menus": {
+      "debug/toolBar": [
+        {
+          "submenu": "skippr.debug.toolbar",
+          "group": "navigation@8",
+          "when": "debuggersAvailable"
+        }
+      ],
+      "skippr.debug.toolbar": [
+        {
+          "command": "skippr.run.pickPipelineAction",
+          "group": "1_run@5"
+        },
+        {
+          "command": "skippr.run.stopSyncPipeline",
+          "group": "2_control@1"
+        }
+      ],
       "commandPalette": [
         {
           "command": "skippr.auth.signIn"
@@ -184,6 +229,9 @@
           "command": "skippr.run.modelPipeline"
         },
         {
+          "command": "skippr.run.doctor"
+        },
+        {
           "command": "skippr.chat.ask"
         },
         {
@@ -212,14 +260,12 @@
         },
         {
           "command": "skippr.openConfig"
-        }
-      ]
-    },
-    "views": {
-      "workbench.view.debug": [
+        },
         {
-          "id": "skippr.runDebug",
-          "name": "Skippr"
+          "command": "skippr.editPipelineEnv"
+        },
+        {
+          "command": "skippr.refreshDiagnostics"
         }
       ]
     },
@@ -227,6 +273,9 @@
       {
         "type": "skippr",
         "label": "Skippr",
+        "languages": [
+          "yaml"
+        ],
         "program": "./out/extension.js",
         "configurationAttributes": {
           "launch": {
@@ -243,8 +292,8 @@
               },
               "skipprKind": {
                 "type": "string",
-                "enum": ["discover", "sync-once", "model"],
-                "description": "discover, sync-once (single sync pass), or model."
+                "enum": ["discover", "sync", "sync-once", "sync-all-once", "model", "doctor", "test"],
+                "description": "discover; sync or sync-once for one sync pass; sync-all-once; model; doctor; test (dbt)."
               },
               "pipeline": {
                 "type": "string",
@@ -258,6 +307,14 @@
                 "type": "string",
                 "enum": ["debug", "info", "warn", "error"],
                 "description": "Log level passed to Skippr."
+              },
+              "skipprExtraArgs": {
+                "type": "string",
+                "description": "Optional extra CLI arguments (space-separated; basic quoting supported)."
+              },
+              "skipprTestSelect": {
+                "type": "string",
+                "description": "For skipprKind test: optional dbt --select value (e.g. test unique_id)."
               }
             }
           }
@@ -289,6 +346,25 @@
             "configPath": "${workspaceFolder}/skippr.yml",
             "logLevel": "info",
             "pipeline": "${config:skippr.defaultPipeline}"
+          },
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Doctor",
+            "skipprKind": "doctor",
+            "configPath": "${workspaceFolder}/skippr.yml",
+            "logLevel": "info"
+          },
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Test (dbt)",
+            "skipprKind": "test",
+            "configPath": "${workspaceFolder}/skippr.yml",
+            "logLevel": "info",
+            "pipeline": "${config:skippr.defaultPipeline}",
+            "skipprTestSelect": "",
+            "skipprExtraArgs": ""
           }
         ],
         "configurationSnippets": [
@@ -326,6 +402,32 @@
               "skipprKind": "model",
               "configPath": "${workspaceFolder}/skippr.yml",
               "pipeline": "${config:skippr.defaultPipeline}"
+            }
+          },
+          {
+            "label": "Skippr: Doctor",
+            "description": "Run skippr doctor for the workspace config.",
+            "body": {
+              "type": "skippr",
+              "request": "launch",
+              "name": "Skippr: Doctor",
+              "skipprKind": "doctor",
+              "configPath": "${workspaceFolder}/skippr.yml",
+              "logLevel": "info"
+            }
+          },
+          {
+            "label": "Skippr: Test (dbt)",
+            "description": "Run skippr test run (dbt) for a pipeline.",
+            "body": {
+              "type": "skippr",
+              "request": "launch",
+              "name": "Skippr: Test (dbt)",
+              "skipprKind": "test",
+              "configPath": "${workspaceFolder}/skippr.yml",
+              "pipeline": "${config:skippr.defaultPipeline}",
+              "skipprTestSelect": "",
+              "skipprExtraArgs": ""
             }
           }
         ]
@@ -369,6 +471,32 @@
           "type": "string",
           "default": "",
           "description": "Working directory for Skippr run commands. Defaults to the configured Skippr workspace path or the first VS Code workspace folder."
+        },
+        "skippr.run.extraArgs": {
+          "type": "string",
+          "default": "",
+          "description": "Optional extra CLI arguments for runs started from the Run Skippr title bar (space-separated; basic quoting supported). Merged with launch.json skipprExtraArgs when using debug."
+        },
+        "skippr.env": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "markdownDescription": "Extra environment variables merged into **every** Skippr CLI spawn for this workspace folder (after `process.env`). Use for values shared across pipelines (e.g. `SKIPPR_HOME`). Per-pipeline overrides: `skippr.pipelineEnv`.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "skippr.pipelineEnv": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "markdownDescription": "Map of **pipeline name** → `{ VAR: value }` merged into Skippr spawns when that pipeline is active (after `skippr.env`). Keys must match pipeline names in `skippr.yml`. Set via **Skippr: Edit Pipeline Environment Variables** or `.vscode/settings.json`.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       }
     }

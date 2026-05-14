@@ -1,4 +1,11 @@
 import * as vscode from "vscode";
+import {
+  parsePipelineParentId,
+  resolveDbtChildrenForPipelineItem,
+  runDbtTestsForRequest,
+  type SkipprDbtTestDeps
+} from "./skipprDbtTestController";
+import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
 import { isSkipprConfigDocument, listPipelineDefinitionLines } from "./skipprPipelineCodeLens";
 
 function removeItemsForFile(controller: vscode.TestController, uri: vscode.Uri): void {
@@ -13,56 +20,51 @@ function removeItemsForFile(controller: vscode.TestController, uri: vscode.Uri):
   }
 }
 
-function makePipelineTestId(configFsPath: string, pipeline: string): string {
+function makePipelineParentTestId(configFsPath: string, pipeline: string): string {
   return JSON.stringify([configFsPath, pipeline]);
 }
 
-function parsePipelineTestId(id: string): { configFsPath: string; pipeline: string } | undefined {
-  try {
-    const parsed = JSON.parse(id) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === 2 &&
-      typeof parsed[0] === "string" &&
-      typeof parsed[1] === "string"
-    ) {
-      return { configFsPath: parsed[0], pipeline: parsed[1] };
-    }
-  } catch {
-    // ignore
-  }
-  return undefined;
-}
-
-function collectRequestedTests(request: vscode.TestRunRequest, controller: vscode.TestController): vscode.TestItem[] {
-  if (request.include && request.include.length > 0) {
-    const out: vscode.TestItem[] = [];
-    const walk = (t: vscode.TestItem): void => {
-      out.push(t);
-      t.children.forEach(walk);
-    };
-    for (const t of request.include) {
-      walk(t);
-    }
-    return out;
-  }
-  const out: vscode.TestItem[] = [];
-  controller.items.forEach((t) => {
-    out.push(t);
-  });
-  return out;
+export interface SkipprPipelineTestHostDeps {
+  output: vscode.LogOutputChannel;
+  resolveCliPath: () => Promise<string | undefined>;
+  getConfigCwd: (configFsPath: string) => string;
+  /** Open the Skippr output channel (e.g. after a test or discovery failure). */
+  revealSkipprOutput?: () => void;
 }
 
 /**
- * Publishes each top-level `pipelines:` entry as a {@link vscode.TestItem} so VS Code
- * shows the standard run affordance in the **testing gutter** (line margin), not CodeLens.
+ * Registers the Skippr pipeline test controller: one parent {@link vscode.TestItem} per pipeline
+ * line in `skippr.yml`, with lazy dbt child discovery via `skippr test list`.
  */
-export function registerSkipprPipelineTestController(
+export function registerSkipprPipelineTestControllers(
   context: vscode.ExtensionContext,
-  runPick: (configFsPath: string, pipeline: string) => Promise<boolean>
+  deps: SkipprPipelineTestHostDeps
 ): void {
-  const controller = vscode.tests.createTestController("skippr.pipelineRun", "Skippr pipelines");
-  controller.label = "Skippr pipelines";
+  const controller = vscode.tests.createTestController("skippr.pipelineTests", "Skippr pipeline tests");
+  controller.label = "Skippr pipeline tests";
+
+  const revealSkipprOutput = deps.revealSkipprOutput ?? (() => deps.output.show(false));
+  const dbtDeps: SkipprDbtTestDeps = {
+    output: deps.output,
+    resolveCliPath: deps.resolveCliPath,
+    getConfigCwd: deps.getConfigCwd,
+    revealSkipprOutput,
+    getSpawnEnv: (ref) => mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(ref.configFsPath), ref.pipeline)
+  };
+
+  controller.resolveHandler = async (item) => {
+    if (!item) {
+      return;
+    }
+    if (item.parent) {
+      return;
+    }
+    const ref = parsePipelineParentId(item.id);
+    if (!ref) {
+      return;
+    }
+    await resolveDbtChildrenForPipelineItem(controller, item, ref, dbtDeps);
+  };
 
   const syncDocument = (document: vscode.TextDocument): void => {
     if (!isSkipprConfigDocument(document)) {
@@ -71,41 +73,19 @@ export function registerSkipprPipelineTestController(
     removeItemsForFile(controller, document.uri);
     const defs = listPipelineDefinitionLines(document.getText());
     for (const { line, name } of defs) {
-      const id = makePipelineTestId(document.uri.fsPath, name);
-      const item = controller.createTestItem(id, name, document.uri);
+      const id = makePipelineParentTestId(document.uri.fsPath, name);
+      const testItem = controller.createTestItem(id, name, document.uri);
       const lineText = document.lineAt(line).text;
-      item.range = new vscode.Range(line, 0, line, Math.max(lineText.length, 0));
-      item.description = "pipeline";
-      controller.items.add(item);
+      testItem.range = new vscode.Range(line, 0, line, Math.max(lineText.length, 0));
+      testItem.description = "pipeline";
+      testItem.canResolveChildren = true;
+      controller.items.add(testItem);
     }
   };
 
-  controller.createRunProfile("Run", vscode.TestRunProfileKind.Run, async (request, token) => {
+  controller.createRunProfile("Run dbt tests", vscode.TestRunProfileKind.Run, async (request, token) => {
     const run = controller.createTestRun(request);
-    try {
-      const items = collectRequestedTests(request, controller);
-      for (const test of items) {
-        if (token.isCancellationRequested) {
-          break;
-        }
-        const parsed = parsePipelineTestId(test.id);
-        if (!parsed) {
-          run.errored(test, new vscode.TestMessage("Invalid Skippr pipeline test id"), Date.now());
-          continue;
-        }
-        run.started(test);
-        const ran = await runPick(parsed.configFsPath, parsed.pipeline);
-        if (token.isCancellationRequested) {
-          run.skipped(test);
-        } else if (ran) {
-          run.passed(test, Date.now());
-        } else {
-          run.skipped(test);
-        }
-      }
-    } finally {
-      run.end();
-    }
+    await runDbtTestsForRequest(controller, request, run, token, dbtDeps);
   }, true);
 
   controller.refreshHandler = async () => {

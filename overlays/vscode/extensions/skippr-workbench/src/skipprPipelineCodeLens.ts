@@ -86,3 +86,24 @@ export function listPipelineDefinitionLines(text: string): Array<{ line: number;
 
   return out;
 }
+
+export class SkipprPipelineCodeLensProvider implements vscode.CodeLensProvider {
+  constructor(private readonly runPickCommandId: string) {}
+
+  provideCodeLenses(document: vscode.TextDocument): vscode.ProviderResult<vscode.CodeLens[]> {
+    const defs = listPipelineDefinitionLines(document.getText());
+    const lenses: vscode.CodeLens[] = [];
+    for (const { line, name } of defs) {
+      const range = document.lineAt(line).range;
+      lenses.push(
+        new vscode.CodeLens(range, {
+          title: "$(debug-start) Run…",
+          tooltip: "Run Discover, Sync (once), or Model for this pipeline",
+          command: this.runPickCommandId,
+          arguments: [document.uri.fsPath, name]
+        })
+      );
+    }
+    return lenses;
+  }
+}
