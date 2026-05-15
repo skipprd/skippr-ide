@@ -14,6 +14,7 @@ fi
 ensure_vscode_node "${VSCODE_DIR}"
 ensure_vscode_dependencies "${VSCODE_DIR}"
 ensure_skippr_workbench_dependencies "${VSCODE_DIR}"
+ensure_skippr_data_agent_dependencies "${VSCODE_DIR}"
 
 echo "Starting Skippr IDE fork in dev mode..."
 cd "${VSCODE_DIR}"
@@ -23,10 +24,12 @@ npm run watch-client &
 PID_TWO=$!
 npm --prefix extensions/skippr-workbench run watch &
 PID_THREE=$!
+npm --prefix extensions/skippr-data-agent run watch &
+PID_FOUR=$!
 
-trap 'kill ${PID_ONE} ${PID_TWO} ${PID_THREE} 2>/dev/null || true' INT TERM EXIT
+trap 'kill ${PID_ONE} ${PID_TWO} ${PID_THREE} ${PID_FOUR} 2>/dev/null || true' INT TERM EXIT
 while true; do
-  for pid in "${PID_ONE}" "${PID_TWO}" "${PID_THREE}"; do
+  for pid in "${PID_ONE}" "${PID_TWO}" "${PID_THREE}" "${PID_FOUR}"; do
     if ! kill -0 "${pid}" 2>/dev/null; then
       wait "${pid}" || true
       exit 1

@@ -51,3 +51,15 @@ ensure_skippr_workbench_dependencies() {
     (cd "${ext_dir}" && npm install)
   fi
 }
+
+ensure_skippr_data_agent_dependencies() {
+  local vscode_dir="$1"
+  local ext_dir="${vscode_dir}/extensions/skippr-data-agent"
+  if [ ! -d "${ext_dir}" ]; then
+    echo "Missing built-in skippr-data-agent extension. Run npm run apply:overlay first."
+    return 1
+  fi
+  if [ ! -d "${ext_dir}/node_modules" ]; then
+    (cd "${ext_dir}" && npm install)
+  fi
+}

@@ -24,12 +24,16 @@ fi
 ensure_vscode_node "${VSCODE_DIR}"
 ensure_vscode_dependencies "${VSCODE_DIR}"
 ensure_skippr_workbench_dependencies "${VSCODE_DIR}"
+ensure_skippr_data_agent_dependencies "${VSCODE_DIR}"
 
 echo "Compiling Rust core..."
 cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml"
 
 echo "Compiling built-in skippr-workbench..."
 (cd "${VSCODE_DIR}/extensions/skippr-workbench" && npm run compile)
+
+echo "Compiling built-in skippr-data-agent..."
+(cd "${VSCODE_DIR}/extensions/skippr-data-agent" && (test -d node_modules || npm install) && npm run compile)
 
 cd "${VSCODE_DIR}"
 mkdir -p "${ARTIFACTS_DIR}"

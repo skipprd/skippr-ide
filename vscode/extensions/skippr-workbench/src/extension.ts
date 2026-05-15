@@ -6,6 +6,8 @@ import {
   installSkipprCli,
   isSkipprRunKind,
   resolveSkipprCli,
+  parseSkipprChatResultFromJsonl,
+  runSkipprChatJsonl,
   runSkipprJson,
   showSkipprVersion,
   SkipprProcess,
@@ -76,12 +78,6 @@ interface SkipprRunRequest {
   pipeline?: string;
   configPath?: string;
   logLevel?: string;
-}
-
-interface SkipprChatCommandResult {
-  ok: boolean;
-  answer?: string;
-  plan?: string;
 }
 
 type SkipprRunnableKind = SkipprRunKind | "ask" | "plan";
@@ -1113,37 +1109,40 @@ async function runSkipprChatCli(
   if (!cliPath) {
     throw new Error("Skippr CLI was not found.");
   }
-  const args = ["--config", target.configPath, mode.cliCommand!, "--pipeline", target.pipeline, "--output", "json"];
-  if (modeId === "ask") {
-    args.push("--question", prompt.trim());
-  } else if (prompt.trim()) {
-    args.push("--goal", prompt.trim());
-  }
+  const message =
+    modeId === "plan" && !prompt.trim() ? "produce a data-engineering plan" : prompt.trim();
 
   output.show(true);
   const headline = `${mode.label} ${target.pipeline}`;
   setRunStatusRunning(statusItem, headline);
-  const result = await runSkipprJson<SkipprChatCommandResult>(
+  const jsonl = await runSkipprChatJsonl(
     cliPath,
-    args,
+    target.configPath,
+    target.pipeline,
+    modeId === "ask" ? "ask" : "plan",
+    message,
     getConfigCwd(target.configPath),
     output,
     skipprSpawnEnv(target.configPath, target.pipeline)
   );
-  const chatOk = result.code === 0 && !result.signal && Boolean(result.value?.ok);
+  const parsed = parseSkipprChatResultFromJsonl(jsonl.lines);
+  const chatOk = jsonl.code === 0 && !jsonl.signal && parsed.ok;
   finishRunStatusPanel({
     headline,
-    code: result.code,
-    signal: result.signal,
-    elapsedMs: result.elapsedMs,
+    code: jsonl.code,
+    signal: jsonl.signal,
+    elapsedMs: jsonl.elapsedMs,
     logicalOk: chatOk,
-    detail: chatOk ? "CLI returned a successful JSON response." : "CLI reported failure or invalid response — see output."
+    detail: chatOk ? "CLI reported a successful chat turn." : "CLI reported failure — see output."
   });
   setRunStatusIdle(statusItem);
   if (!chatOk) {
     throw new Error(`Skippr ${mode.label} failed. See Skippr output for details.`);
   }
-  return result.value!.answer ?? result.value!.plan ?? `${mode.label} completed.`;
+  const text =
+    parsed.assistantMarkdown ||
+    (parsed.threadId ? `Chat turn completed (thread \`${parsed.threadId}\`).` : `${mode.label} completed.`);
+  return text;
 }
 
 function registerSkipprChatParticipant(
@@ -1218,38 +1217,42 @@ async function runSkipprChatMode(
     return;
   }
 
-  const args = ["--config", configPath, mode.cliCommand, "--pipeline", request.pipeline, "--output", "json"];
-  if (mode.id === "ask") {
-    args.push("--question", prompt?.trim() ?? "");
-  } else if (prompt?.trim()) {
-    args.push("--goal", prompt.trim());
-  }
+  const message =
+    mode.id === "ask"
+      ? (prompt?.trim() ?? "")
+      : (prompt?.trim() || "produce a data-engineering plan");
 
   output.show(true);
   const headline = `${mode.label} ${request.pipeline}`;
   setRunStatusRunning(statusItem, headline);
-  const result = await runSkipprJson<SkipprChatCommandResult>(
+  const jsonl = await runSkipprChatJsonl(
     cliPath,
-    args,
+    configPath,
+    request.pipeline,
+    mode.id === "ask" ? "ask" : "plan",
+    message,
     getConfigCwd(configPath),
     output,
     skipprSpawnEnv(configPath, request.pipeline)
   );
-  const chatOk = result.code === 0 && !result.signal && Boolean(result.value?.ok);
+  const parsed = parseSkipprChatResultFromJsonl(jsonl.lines);
+  const chatOk = jsonl.code === 0 && !jsonl.signal && parsed.ok;
   finishRunStatusPanel({
     headline,
-    code: result.code,
-    signal: result.signal,
-    elapsedMs: result.elapsedMs,
+    code: jsonl.code,
+    signal: jsonl.signal,
+    elapsedMs: jsonl.elapsedMs,
     logicalOk: chatOk,
-    detail: chatOk ? "CLI returned a successful JSON response." : "CLI reported failure or invalid response — see output."
+    detail: chatOk ? "CLI reported a successful chat turn." : "CLI reported failure — see output."
   });
   setRunStatusIdle(statusItem);
   if (!chatOk) {
     vscode.window.showErrorMessage(`Skippr ${mode.label} failed. See Skippr output for details.`);
     return;
   }
-  const text = result.value!.answer ?? result.value!.plan ?? `${mode.label} completed.`;
+  const text =
+    parsed.assistantMarkdown ||
+    (parsed.threadId ? `Chat turn completed (thread \`${parsed.threadId}\`).` : `${mode.label} completed.`);
   output.info(text);
   vscode.window.showInformationMessage(`Skippr ${mode.label} completed.`);
 }
@@ -2244,6 +2247,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output
   });
   registerSkipprChatParticipant(context, output, runStatusItem);
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "skippr.workbench.internal.runChatCli",
+      async (args: { mode: "ask" | "plan"; prompt: string }) => {
+        return await runSkipprChatCli(args.mode, args.prompt, output, runStatusItem);
+      }
+    )
+  );
 
   registerSkipprPipelineTestControllers(context, {
     output,

@@ -8,6 +8,7 @@ cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml" >/dev/null
 
 echo "Checking built-in module exists..."
 test -f "${ROOT_DIR}/overlays/vscode/extensions/skippr-workbench/src/extension.ts"
+test -f "${ROOT_DIR}/overlays/vscode/extensions/skippr-data-agent/src/extension.ts"
 test -f "${ROOT_DIR}/config/product.overrides.json"
 
 echo "Checking overlay script syntax..."
