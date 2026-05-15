@@ -87,6 +87,7 @@ type SkipprChatProgressPayload = {
 };
 
 const SKIPPR_CHAT_SETUP_PROGRESS_COMMAND_ID = 'skippr.chatSetup.internal.chatProgress';
+const localSkipprChatProgress = new Map<string, (event: SkipprChatProgressEvent) => void>();
 
 function asSkipprChatProgressEvent(value: unknown): SkipprChatProgressEvent | undefined {
 	if (!value || typeof value !== 'object') {
@@ -301,7 +302,6 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	readonly onUnresolvableError = this._onUnresolvableError.event;
 
 	private readonly pendingForwardedRequests = new ResourceMap<Promise<void>>();
-	private readonly localSkipprChatProgress = new Map<string, (event: SkipprChatProgressEvent) => void>();
 
 	constructor(
 		private readonly context: ChatEntitlementContext,
@@ -367,7 +367,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			if (!event) {
 				return;
 			}
-			const sink = this.localSkipprChatProgress.get(requestId);
+			const sink = localSkipprChatProgress.get(requestId);
 			sink?.(event);
 		}));
 	}
@@ -416,7 +416,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		const command = request.command === 'plan' ? 'plan' : 'ask';
 		const progressRequestId = `chat-setup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		let lastStreamProgressAt = Date.now();
-		this.localSkipprChatProgress.set(progressRequestId, event => {
+		localSkipprChatProgress.set(progressRequestId, event => {
 			lastStreamProgressAt = Date.now();
 			progress({
 				kind: 'progressMessage',
@@ -448,14 +448,14 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 				progressRequestId,
 			});
 			clearInterval(statusHandle);
-			this.localSkipprChatProgress.delete(progressRequestId);
+			localSkipprChatProgress.delete(progressRequestId);
 			progress({
 				kind: 'markdownContent',
 				content: new MarkdownString(text || localize('emptyLocalSkipprChatResponse', "(empty response)"))
 			});
 		} catch (error) {
 			clearInterval(statusHandle);
-			this.localSkipprChatProgress.delete(progressRequestId);
+			localSkipprChatProgress.delete(progressRequestId);
 			this.logService.error('[chat setup] Local Skippr chat failed', error);
 			progress({
 				kind: 'warning',

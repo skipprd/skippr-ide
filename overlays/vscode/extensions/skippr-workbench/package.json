@@ -13,6 +13,8 @@
   ],
   "contributes": {
     "configurationDefaults": {
+      "workbench.startupEditor": "none",
+      "workbench.welcomePage.experimentalOnboarding": false,
       "testing.gutterEnabled": true,
       "[yaml]": {
         "editor.codeLens": true

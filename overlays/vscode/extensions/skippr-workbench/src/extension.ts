@@ -54,7 +54,7 @@ const authBaseUrlKey = "skippr.auth.baseUrl";
 const authTokenKey = "skippr.auth.token";
 const authRefreshTokenKey = "skippr.auth.refreshToken";
 const authEmailKey = "skippr.auth.email";
-const splashSeenKey = "skippr.splashSeen.v1";
+const splashDismissedKey = "skippr.splashDismissed.v1";
 const cliPathKey = "skippr.cliPath";
 const defaultPipelineKey = "skippr.defaultPipeline";
 const logLevelKey = "skippr.logLevel";
@@ -2243,38 +2243,319 @@ async function openPanel(
   panel.webview.html = renderPanelHtml(payload, session);
 }
 
+type SplashAction =
+  | "engineer"
+  | "business"
+  | "openRecent"
+  | "openFolder"
+  | "signin"
+  | "discover"
+  | "continue";
+
+let activeSplashPanel: vscode.WebviewPanel | undefined;
+
+async function runWorkbenchCommand(command: string): Promise<void> {
+  try {
+    await vscode.commands.executeCommand(command);
+  } catch {
+    // Some workbench commands are context-sensitive or unavailable in tests.
+  }
+}
+
+async function hideWorkbenchForSplash(): Promise<void> {
+  await runWorkbenchCommand("skippr.workbench.hideForSplash");
+}
+
+async function restoreFullIdeLayout(): Promise<void> {
+  await runWorkbenchCommand("skippr.workbench.restoreFromSplash");
+  await runWorkbenchCommand("workbench.action.activityBarLocation.default");
+  await runWorkbenchCommand("workbench.action.restoreAuxiliaryBar");
+  await runWorkbenchCommand("workbench.view.explorer");
+  await runWorkbenchCommand("workbench.action.closePanel");
+  await runWorkbenchCommand("workbench.action.focusActiveEditorGroup");
+}
+
+async function enterAgentsOnlyLayout(): Promise<void> {
+  await runWorkbenchCommand("workbench.action.activityBarLocation.hide");
+  await runWorkbenchCommand("workbench.action.closeSidebar");
+  await runWorkbenchCommand("workbench.action.closePanel");
+  await runWorkbenchCommand("workbench.action.restoreAuxiliaryBar");
+  await runWorkbenchCommand("workbench.action.chat.open");
+  await runWorkbenchCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+}
+
+function renderSplashHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 32px;
+      color: var(--vscode-foreground);
+      background:
+        radial-gradient(circle at 50% 0%, rgba(84, 108, 255, 0.14), transparent 34rem),
+        linear-gradient(180deg, var(--vscode-editor-background), color-mix(in srgb, var(--vscode-editor-background) 88%, #000 12%));
+      font-family: var(--vscode-font-family);
+    }
+    .card {
+      width: min(460px, calc(100vw - 48px));
+      padding: 30px;
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 76%, transparent);
+      border-radius: 20px;
+      background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-sideBar-background));
+      box-shadow: 0 24px 90px rgba(0, 0, 0, 0.36);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 13px;
+      letter-spacing: 0.02em;
+    }
+    .mark {
+      width: 24px;
+      height: 24px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--vscode-button-background), color-mix(in srgb, var(--vscode-button-background) 58%, #fff 42%));
+      box-shadow: 0 10px 30px color-mix(in srgb, var(--vscode-button-background) 35%, transparent);
+    }
+    h1 {
+      margin: 0 0 20px;
+      font-size: 28px;
+      line-height: 1.12;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+    }
+    .choices {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+    button {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      padding: 14px 16px;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    button.secondary {
+      color: var(--vscode-foreground);
+      background: color-mix(in srgb, var(--vscode-input-background) 72%, transparent);
+      border-color: var(--vscode-panel-border);
+    }
+    button.ghost {
+      padding: 6px 0;
+      width: auto;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      text-align: center;
+    }
+    .label {
+      display: block;
+      font-size: 15px;
+      font-weight: 650;
+      margin-bottom: 4px;
+    }
+    .copy {
+      display: block;
+      color: color-mix(in srgb, currentColor 72%, transparent);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .divider {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 12px;
+      margin: 20px 0;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .divider::before, .divider::after {
+      content: "";
+      height: 1px;
+      background: var(--vscode-panel-border);
+    }
+    .project-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .links {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      margin-top: 20px;
+      font-size: 12px;
+    }
+    @media (max-width: 520px) {
+      body { padding: 20px; }
+      .card { width: 100%; padding: 22px; }
+      .project-actions { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="card" aria-labelledby="splash-title">
+    <div class="brand"><span class="mark" aria-hidden="true"></span><span>Skippr IDE</span></div>
+    <h1 id="splash-title">Who are you?</h1>
+
+    <section class="choices" aria-label="Choose your experience">
+      <button data-action="engineer">
+        <span class="label">Engineer</span>
+        <span class="copy">Give me the full IDE.</span>
+      </button>
+      <button data-action="business" class="secondary">
+        <span class="label">Business User</span>
+        <span class="copy">IDEhhh? Show my data insights.</span>
+      </button>
+    </section>
+
+    <div class="divider"><span>Open existing project</span></div>
+
+    <section class="project-actions" aria-label="Open an existing project">
+      <button data-action="openRecent" class="secondary">
+        <span class="label">Open Recent</span>
+      </button>
+      <button data-action="openFolder" class="secondary">
+        <span class="label">Browse...</span>
+      </button>
+    </section>
+
+    <nav class="links" aria-label="Skippr account">
+      <button data-action="signin" class="ghost">Sign in</button>
+      <button data-action="discover" class="ghost">Discover</button>
+      <button data-action="continue" class="ghost">Continue</button>
+    </nav>
+  </main>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.addEventListener("click", event => {
+      const button = event.target.closest("button[data-action]");
+      if (button) {
+        vscode.postMessage({ command: button.dataset.action });
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function isEmptyWorkbench(): boolean {
+  return (vscode.workspace.workspaceFolders?.length ?? 0) === 0;
+}
+
 async function showSplash(
   context: vscode.ExtensionContext,
   statusItem: vscode.StatusBarItem,
-  authProvider: SkipprAuthenticationProvider
+  authProvider: SkipprAuthenticationProvider,
+  options: { auto?: boolean } = {}
 ): Promise<void> {
-  type WelcomeItem = vscode.QuickPickItem & { slug: "signin" | "discover" | "continue" };
-  const picked = await vscode.window.showQuickPick<WelcomeItem>(
-    [
-      { label: "$(sign-in) Sign in to Skippr", description: "Email verification code", slug: "signin" },
-      { label: "$(compass) Open Discover", description: "Browse data sources and pipelines", slug: "discover" },
-      {
-        label: "$(debug-step-over) Continue without signing in",
-        description: "You can sign in later from the status bar",
-        slug: "continue"
+  if (activeSplashPanel) {
+    activeSplashPanel.reveal(vscode.ViewColumn.Active);
+    return;
+  }
+
+  await hideWorkbenchForSplash();
+  const panel = vscode.window.createWebviewPanel("skippr.splash", "Skippr IDE", vscode.ViewColumn.Active, {
+    enableScripts: true,
+    retainContextWhenHidden: true
+  });
+  activeSplashPanel = panel;
+  let restoreOnDispose = true;
+
+  const markDismissed = async () => {
+    if (options.auto) {
+      await context.workspaceState.update(splashDismissedKey, true);
+    }
+  };
+  const closeSplash = async (restoreWorkbench: boolean) => {
+    restoreOnDispose = restoreWorkbench;
+    await markDismissed();
+    activeSplashPanel = undefined;
+    panel.dispose();
+  };
+
+  panel.webview.html = renderSplashHtml();
+  setTimeout(() => {
+    if (activeSplashPanel === panel) {
+      void hideWorkbenchForSplash();
+    }
+  }, 150);
+  panel.onDidDispose(() => {
+    if (activeSplashPanel === panel) {
+      activeSplashPanel = undefined;
+    }
+    void markDismissed();
+    if (restoreOnDispose) {
+      void restoreFullIdeLayout();
+    }
+  });
+
+  panel.webview.onDidReceiveMessage(async (message: { command?: SplashAction }) => {
+    switch (message.command) {
+      case "engineer":
+      case "continue":
+        await restoreFullIdeLayout();
+        await closeSplash(false);
+        return;
+      case "business":
+        await enterAgentsOnlyLayout();
+        await closeSplash(false);
+        return;
+      case "openRecent":
+        await runWorkbenchCommand("workbench.action.openRecent");
+        return;
+      case "openFolder":
+        await runWorkbenchCommand("workbench.action.files.openFileFolder");
+        return;
+      case "signin": {
+        const session = await signIn(context, statusItem, authProvider, false);
+        if (session) {
+          vscode.window.showInformationMessage(`Signed in to Skippr as ${session.email}.`);
+        }
+        return;
       }
-    ],
-    { title: "Welcome to Skippr IDE", ignoreFocusOut: true }
-  );
-  if (!picked) {
+      case "discover":
+        await restoreFullIdeLayout();
+        await closeSplash(false);
+        await vscode.commands.executeCommand("skippr.open.discover");
+        return;
+    }
+  });
+}
+
+function maybeOpenEmptyWorkbenchSplash(
+  context: vscode.ExtensionContext,
+  statusItem: vscode.StatusBarItem,
+  authProvider: SkipprAuthenticationProvider
+): void {
+  if (!isEmptyWorkbench() || context.workspaceState.get<boolean>(splashDismissedKey)) {
     return;
   }
-  if (picked.slug === "discover") {
-    await vscode.commands.executeCommand("skippr.open.discover");
-    return;
-  }
-  if (picked.slug === "continue") {
-    return;
-  }
-  const session = await signIn(context, statusItem, authProvider, false);
-  if (session) {
-    vscode.window.showInformationMessage(`Signed in to Skippr as ${session.email}.`);
-  }
+  setTimeout(() => {
+    if (isEmptyWorkbench()) {
+      void showSplash(context, statusItem, authProvider, { auto: true });
+    }
+  }, 0);
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -2637,10 +2918,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await refreshConfigStatus(output, runStatusItem);
     await runVectorIngestOnOpen(context, output, runStatusItem);
   });
-  if (!context.globalState.get<boolean>(splashSeenKey)) {
-    void context.globalState.update(splashSeenKey, true);
-    void showSplash(context, statusItem, authProvider);
-  }
+  maybeOpenEmptyWorkbenchSplash(context, statusItem, authProvider);
 }
 
 export function deactivate(): void {}

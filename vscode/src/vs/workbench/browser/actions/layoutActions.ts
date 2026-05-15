@@ -6,7 +6,7 @@
 import { ILocalizedString, localize, localize2 } from '../../../nls.js';
 import { MenuId, MenuRegistry, registerAction2, Action2 } from '../../../platform/actions/common/actions.js';
 import { Categories } from '../../../platform/action/common/actionCommonCategories.js';
-import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
+import { ConfigurationTarget, IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { alert } from '../../../base/browser/ui/aria/aria.js';
 import { EditorActionsLocation, EditorTabsMode, IWorkbenchLayoutService, LayoutSettings, Parts, Position, ZenModeSettings, positionToString } from '../../services/layout/browser/layoutService.js';
 import { ServicesAccessor, IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
@@ -26,7 +26,7 @@ import { ICommandService } from '../../../platform/commands/common/commands.js';
 import { AuxiliaryBarVisibleContext, PanelAlignmentContext, PanelVisibleContext, SideBarVisibleContext, FocusedViewContext, InEditorZenModeContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, IsMainWindowFullscreenContext, PanelPositionContext, IsAuxiliaryWindowFocusedContext, IsSessionsWindowContext, TitleBarStyleContext, IsAuxiliaryWindowContext } from '../../common/contextkeys.js';
 import { Codicon } from '../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../base/common/themables.js';
-import { DisposableStore } from '../../../base/common/lifecycle.js';
+import { DisposableStore, IDisposable } from '../../../base/common/lifecycle.js';
 import { registerIcon } from '../../../platform/theme/common/iconRegistry.js';
 import { ICommandActionTitle } from '../../../platform/action/common/action.js';
 import { mainWindow } from '../../../base/browser/window.js';
@@ -430,6 +430,53 @@ export class ToggleStatusbarVisibilityAction extends Action2 {
 }
 
 registerAction2(ToggleStatusbarVisibilityAction);
+
+let skipprSplashEditorOptions: IDisposable | undefined;
+let skipprPreviousStatusBarVisible: boolean | undefined;
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.hideForSplash',
+			title: localize2('skipprHideForSplash', "Hide Workbench for Skippr Splash"),
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const layoutService = accessor.get(IWorkbenchLayoutService);
+		const editorGroupService = accessor.get(IEditorGroupsService);
+		const configurationService = accessor.get(IConfigurationService);
+
+		layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
+		layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+		layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
+		layoutService.setPartHidden(true, Parts.PANEL_PART);
+		skipprPreviousStatusBarVisible ??= configurationService.getValue<boolean>('workbench.statusBar.visible');
+		await configurationService.updateValue('workbench.statusBar.visible', false, ConfigurationTarget.MEMORY);
+		skipprSplashEditorOptions?.dispose();
+		skipprSplashEditorOptions = editorGroupService.enforcePartOptions({ showTabs: EditorTabsMode.NONE });
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.restoreFromSplash',
+			title: localize2('skipprRestoreFromSplash', "Restore Workbench from Skippr Splash"),
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const layoutService = accessor.get(IWorkbenchLayoutService);
+		const configurationService = accessor.get(IConfigurationService);
+
+		skipprSplashEditorOptions?.dispose();
+		skipprSplashEditorOptions = undefined;
+		layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
+		await configurationService.updateValue('workbench.statusBar.visible', skipprPreviousStatusBarVisible ?? true, ConfigurationTarget.MEMORY);
+		skipprPreviousStatusBarVisible = undefined;
+	}
+});
 
 // ------------------- Editor Tabs Layout --------------------------------
 

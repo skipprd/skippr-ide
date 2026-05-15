@@ -310,20 +310,10 @@ function emitSkipprChatProgress(line: unknown, onProgress?: (event: SkipprChatPr
     return;
   }
   if (type === "await_approval" || type === "awaitApproval") {
-    onProgress({
-      kind: "approval",
-      status: "running",
-      label: "Approval required",
-      detail: stringField(o, "prompt")
-    });
     return;
   }
   if (type === "ChatSummary") {
-    onProgress({
-      kind: "summary",
-      status: Boolean(o.ok) ? "completed" : "failed",
-      label: "Skippr chat"
-    });
+    return;
   }
 }
 
@@ -379,10 +369,6 @@ function assistantSnippetFromChatJsonlObject(line: unknown): string | undefined 
   if (o.type === "assistant" || o.type === "answer" || o.type === "message") {
     return stringFieldFromObject(o, ["markdown", "display", "answer", "text"]);
   }
-  if (o.type === "await_approval" || o.type === "awaitApproval") {
-    const prompt = stringField(o, "prompt") || "Please approve or reject.";
-    return `Approval required: ${prompt}`;
-  }
   return undefined;
 }
 
@@ -408,8 +394,9 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
     if (o.type === "ChatSummary" && !sawSummary) {
       sawSummary = true;
       ok = Boolean(o.ok);
-      if (typeof o.thread_id === "string" && o.thread_id.trim()) {
-        threadId = o.thread_id.trim();
+      const summaryThreadId = stringFieldFromObject(o, ["thread_id", "threadId"]);
+      if (summaryThreadId) {
+        threadId = summaryThreadId;
       }
       if (typeof o.failure_summary === "string" && o.failure_summary.trim()) {
         failureSummary = o.failure_summary.trim();
@@ -420,8 +407,9 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
     }
     if ((o.type === "await_approval" || o.type === "awaitApproval") && !approvalPrompt) {
       approvalPrompt = stringField(o, "prompt") || "Please approve or reject.";
-      if (typeof o.thread_id === "string" && o.thread_id.trim()) {
-        threadId = o.thread_id.trim();
+      const approvalThreadId = stringFieldFromObject(o, ["thread_id", "threadId"]);
+      if (approvalThreadId) {
+        threadId = approvalThreadId;
       }
     }
   }
