@@ -30,6 +30,8 @@ export interface SkipprPipelineTestHostDeps {
   getConfigCwd: (configFsPath: string) => string;
   /** Open the Skippr output channel (e.g. after a test or discovery failure). */
   revealSkipprOutput?: () => void;
+  getLogLevel?: () => string;
+  getRunExtraArgsText?: () => string;
 }
 
 /**
@@ -49,7 +51,9 @@ export function registerSkipprPipelineTestControllers(
     resolveCliPath: deps.resolveCliPath,
     getConfigCwd: deps.getConfigCwd,
     revealSkipprOutput,
-    getSpawnEnv: (ref) => mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(ref.configFsPath), ref.pipeline)
+    getSpawnEnv: (ref) => mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(ref.configFsPath), ref.pipeline),
+    getLogLevel: deps.getLogLevel,
+    getRunExtraArgsText: deps.getRunExtraArgsText
   };
 
   controller.resolveHandler = async (item) => {

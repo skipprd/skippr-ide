@@ -19,6 +19,7 @@ import {
 } from "./skipprPipelineCodeLens";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
+import { parseShellArgs } from "./skipprCliArgs";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
 import { registerSkipprConfigDiagnostics } from "./skipprConfigDiagnostics";
 import {
@@ -301,44 +302,6 @@ function skipprSpawnEnv(configPath: string | undefined, pipeline: string | undef
 
 const SKIPPR_RUN_TOOLBAR_CONTEXT_KEY = "skippr.runToolbarInTitle";
 
-/** Split extra CLI text into argv tokens (basic quoting). */
-function parseShellArgs(input: string): string[] {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return [];
-  }
-  const out: string[] = [];
-  let cur = "";
-  let quote: '"' | "'" | null = null;
-  for (let i = 0; i < trimmed.length; i += 1) {
-    const c = trimmed[i];
-    if (quote) {
-      if (c === quote) {
-        quote = null;
-      } else {
-        cur += c;
-      }
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      quote = c;
-      continue;
-    }
-    if (/\s/.test(c)) {
-      if (cur.length) {
-        out.push(cur);
-        cur = "";
-      }
-      continue;
-    }
-    cur += c;
-  }
-  if (cur.length) {
-    out.push(cur);
-  }
-  return out;
-}
-
 function getConfigCwd(configPath?: string): string {
   return configPath ? path.dirname(configPath) : getRunCwd();
 }
@@ -581,6 +544,7 @@ function renderRunConfigHtml(kind: SkipprRunnableKind, pipelines: string[], conf
     .map((pathValue) => `<option value="${escapeHtml(pathValue)}" ${pathValue === configPath ? "selected" : ""}>${escapeHtml(pathValue)}</option>`)
     .join("");
   const needsPipeline = kind !== "sync-all-once";
+  const showLogLevel = kind !== "discover";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -609,10 +573,14 @@ function renderRunConfigHtml(kind: SkipprRunnableKind, pipelines: string[], conf
       ${pipelines.length ? `<select id="pipeline">${pipelineOptions}</select>` : `<input id="pipeline" value="${escapeHtml(defaultPipeline)}" placeholder="Pipeline name" />`}` : ""}
     <label for="configPath">Config path</label>
     ${configPaths.length ? `<select id="configPath">${configOptions}</select>` : `<input id="configPath" value="${escapeHtml(configPath ?? "")}" placeholder="skippr.yml" />`}
-    <label for="logLevel">Log level</label>
+    ${
+      showLogLevel
+        ? `<label for="logLevel">Log level</label>
     <select id="logLevel">
       ${["debug", "info", "warn", "error"].map((level) => `<option value="${level}" ${level === logLevel ? "selected" : ""}>${level}</option>`).join("")}
-    </select>
+    </select>`
+        : ""
+    }
     <div class="actions">
       <button id="cancel" class="secondary">Cancel</button>
       <button id="run" class="primary">Run ${escapeHtml(runKindLabel(kind))}</button>
@@ -625,7 +593,7 @@ function renderRunConfigHtml(kind: SkipprRunnableKind, pipelines: string[], conf
       command: "run",
       pipeline: document.getElementById("pipeline")?.value ?? "",
       configPath: document.getElementById("configPath").value,
-      logLevel: document.getElementById("logLevel").value
+      logLevel: document.getElementById("logLevel")?.value ?? ""
     }));
   </script>
 </body>
@@ -1027,6 +995,8 @@ async function executeRunDebugPanelRun(
     command?: string;
     logLevel?: string;
     pipeline?: string;
+    /** When set (e.g. CodeLens on this file), use this config instead of resolveSkipprConfigAtCwd(). */
+    configPath?: string;
     testSelect?: string;
     extraArgs?: string;
     syncMode?: "once" | "stream";
@@ -1037,11 +1007,21 @@ async function executeRunDebugPanelRun(
   statusItem: vscode.StatusBarItem
 ): Promise<void> {
   const cmd = (message.command ?? "").trim();
-  const configPath = (await resolveSkipprConfigAtCwd()).trim();
+  const fromEditor = typeof message.configPath === "string" ? message.configPath.trim() : "";
+  const configPath = fromEditor || (await resolveSkipprConfigAtCwd()).trim();
   const logLevel = (message.logLevel ?? "").trim() || getLogLevel();
   const pipeline = (message.pipeline ?? "").trim();
-  const extraCliArgs = parseShellArgs(typeof message.extraArgs === "string" ? message.extraArgs : "");
+  const extraCliArgs = parseShellArgs(
+    typeof message.extraArgs === "string" && message.extraArgs.trim()
+      ? message.extraArgs
+      : vscode.workspace.getConfiguration().get<string>(runExtraArgsKey, "").trim()
+  );
   const syncMode = message.syncMode === "stream" ? "stream" : "once";
+
+  output.show(true);
+  if (fromEditor) {
+    activeConfigPath = fromEditor;
+  }
 
   if (!configPath) {
     vscode.window.showWarningMessage("No skippr.yml or skippr.yaml next to the Skippr working directory. Check run CWD or use Setup Workspace.");
@@ -1284,23 +1264,51 @@ async function runPickPipelineAction(
     vscode.window.showErrorMessage("Skippr: missing pipeline or config path.");
     return false;
   }
+  const cfg = configFsPath.trim();
+  const pipe = pipeline.trim();
+  const wsExtra = vscode.workspace.getConfiguration().get<string>(runExtraArgsKey, "").trim();
   const picked = await vscode.window.showQuickPick(
     [
-      { label: "$(pass) Doctor", description: "Validate environment and configuration", action: "doctor" as const },
-      { label: "$(search) Discover", description: "Discover namespaces for this pipeline", action: "discover" as const },
-      { label: "$(sync) Sync (once)", description: "Run one sync pass", action: "sync-once" as const },
-      { label: "$(circuit-board) Model", description: "Run Skippr model for this pipeline", action: "model" as const }
+      {
+        label: "$(search) Discover",
+        description: "Discover namespaces (same as Run Skippr title bar)",
+        command: "discover" as const
+      },
+      {
+        label: "$(sync) Sync",
+        description: "One bounded sync pass (sync-once)",
+        command: "sync" as const
+      },
+      {
+        label: "$(circuit-board) Model",
+        description: "Run Skippr model for this pipeline",
+        command: "model" as const
+      },
+      {
+        label: "$(pass) Doctor",
+        description: "Validate environment and configuration",
+        command: "doctor" as const
+      }
     ],
-    { title: `Skippr — ${pipeline}`, placeHolder: "Choose run action" }
+    { title: `Run Skippr — ${pipe}`, placeHolder: "Choose action (uses skippr.run.extraArgs from settings)" }
   );
   if (!picked) {
     return false;
   }
-  if (picked.action === "doctor") {
-    await runSkipprDoctor(output, statusItem, configFsPath.trim(), { logLevel: getLogLevel() });
-    return true;
-  }
-  await runSkipprCommand(picked.action, output, statusItem, pipeline.trim(), configFsPath.trim());
+  await executeRunDebugPanelRun(
+    {
+      command: picked.command,
+      pipeline: pipe,
+      configPath: cfg,
+      logLevel: getLogLevel(),
+      extraArgs: wsExtra,
+      syncMode: "once",
+      discoverOutput: "json",
+      modelNoResume: false
+    },
+    output,
+    statusItem
+  );
   return true;
 }
 
@@ -2241,7 +2249,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     resolveCliPath: () => resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
     getConfigCwd: (configFsPath: string) => getConfigCwd(configFsPath),
-    revealSkipprOutput: () => output.show(false)
+    revealSkipprOutput: () => output.show(false),
+    getLogLevel: () => getLogLevel(),
+    getRunExtraArgsText: () => vscode.workspace.getConfiguration().get<string>(runExtraArgsKey, "").trim()
   });
 
   context.subscriptions.push(

@@ -54,15 +54,6 @@ const SYNC_MODE_OPTIONS: ISelectOptionItem[] = [
 	{ text: nls.localize('skipprSyncStream', 'Stream') },
 ];
 
-/** `skippr discover --output` (CLI: progress | json | text). */
-const DISCOVER_OUTPUT_OPTIONS: ISelectOptionItem[] = [
-	{ text: nls.localize('skipprDiscoverOutProgress', 'Progress') },
-	{ text: nls.localize('skipprDiscoverOutJson', 'JSON') },
-	{ text: nls.localize('skipprDiscoverOutText', 'Text') },
-];
-
-const DISCOVER_OUTPUT_VALUES = ['progress', 'json', 'text'] as const;
-
 /** `skippr model --no-resume` */
 const MODEL_THREAD_OPTIONS: ISelectOptionItem[] = [
 	{ text: nls.localize('skipprModelResume', 'Resume thread') },
@@ -90,7 +81,7 @@ interface SkipprToolbarModel {
 	tests?: Array<{ value: string; label: string }>;
 }
 
-type SecondaryColumnKind = 'none' | 'sync' | 'discoverOutput' | 'modelThread';
+type SecondaryColumnKind = 'none' | 'sync' | 'modelThread';
 
 export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 
@@ -166,9 +157,6 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 		if (c === 'sync') {
 			return 'sync';
 		}
-		if (c === 'discover') {
-			return 'discoverOutput';
-		}
 		if (c === 'model') {
 			return 'modelThread';
 		}
@@ -191,17 +179,12 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 			this.secondaryBox.setOptions(SYNC_MODE_OPTIONS, 0);
 			this.secondaryBox.setAriaLabel(nls.localize('skipprSyncMode', 'Sync mode'));
 			this.secondaryBox.setEnabled(true);
-		} else if (kind === 'discoverOutput') {
-			this.secondaryBox.setOptions(DISCOVER_OUTPUT_OPTIONS, 1);
-			this.secondaryIndex = 1;
-			this.secondaryBox.setAriaLabel(nls.localize('skipprDiscoverOutput', 'Discover output'));
-			this.secondaryBox.setEnabled(true);
 		} else if (kind === 'modelThread') {
 			this.secondaryBox.setOptions(MODEL_THREAD_OPTIONS, 0);
 			this.secondaryBox.setAriaLabel(nls.localize('skipprModelThread', 'Model thread'));
 			this.secondaryBox.setEnabled(true);
 		} else {
-			// doctor, sync-all, test: no command-specific second column (CLI has no matching flags here).
+			// discover, doctor, sync-all, test: no command-specific second column (CLI flags live elsewhere or use defaults).
 			this.secondaryBox.setOptions(SECONDARY_PLACEHOLDER_OPTIONS, 0);
 			this.secondaryBox.setAriaLabel(nls.localize('skipprSecondaryNone', 'No command options'));
 			this.secondaryBox.setEnabled(false);
@@ -230,11 +213,6 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 
 	private getPipeline(): string {
 		return this.pipeStrings[this.pipeIndex]?.trim() ?? '';
-	}
-
-	private getDiscoverOutput(): string {
-		const i = this.secondaryIndex;
-		return DISCOVER_OUTPUT_VALUES[i] ?? 'json';
 	}
 
 	private getModelNoResume(): boolean {
@@ -294,11 +272,6 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 				this.secondaryBox.setOptions(SYNC_MODE_OPTIONS, si);
 				this.secondaryIndex = si;
 				this.secondaryBox.setEnabled(true);
-			} else if (showSecondary && sk === 'discoverOutput') {
-				const di = Math.min(this.secondaryIndex, DISCOVER_OUTPUT_OPTIONS.length - 1);
-				this.secondaryBox.setOptions(DISCOVER_OUTPUT_OPTIONS, di);
-				this.secondaryIndex = di;
-				this.secondaryBox.setEnabled(true);
 			} else if (showSecondary && sk === 'modelThread') {
 				const mi = Math.min(this.secondaryIndex, MODEL_THREAD_OPTIONS.length - 1);
 				this.secondaryBox.setOptions(MODEL_THREAD_OPTIONS, mi);
@@ -310,10 +283,6 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 					const si = Math.min(this.secondaryIndex, SYNC_MODE_OPTIONS.length - 1);
 					this.secondaryBox.setOptions(SYNC_MODE_OPTIONS, si);
 					this.secondaryIndex = si;
-				} else if (sk === 'discoverOutput') {
-					const di = Math.min(this.secondaryIndex, DISCOVER_OUTPUT_OPTIONS.length - 1);
-					this.secondaryBox.setOptions(DISCOVER_OUTPUT_OPTIONS, di);
-					this.secondaryIndex = di;
 				} else if (sk === 'modelThread') {
 					const mi = Math.min(this.secondaryIndex, MODEL_THREAD_OPTIONS.length - 1);
 					this.secondaryBox.setOptions(MODEL_THREAD_OPTIONS, mi);
@@ -345,7 +314,7 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 				this.testBox.setEnabled(false);
 			}
 
-			const showLog = command !== 'doctor' && command !== 'sync-all';
+			const showLog = command !== 'doctor' && command !== 'sync-all' && command !== 'discover';
 			this.logBox.setEnabled(Boolean(model.configPath) && showLog);
 			this.logBox.setOptions(LOG_LEVEL_OPTIONS, Math.min(this.logIndex, LOG_LEVEL_OPTIONS.length - 1));
 
@@ -379,7 +348,7 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 			testWrap.style.display = command === 'test' ? '' : 'none';
 		}
 		if (logWrap) {
-			logWrap.style.display = command === 'doctor' || command === 'sync-all' ? 'none' : '';
+			logWrap.style.display = command === 'doctor' || command === 'sync-all' || command === 'discover' ? 'none' : '';
 		}
 	}
 
@@ -499,15 +468,14 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 		if (command === 'sync') {
 			payload.syncMode = syncMode;
 		}
-		if (command === 'discover') {
-			payload.discoverOutput = this.getDiscoverOutput();
-		}
 		if (command === 'model') {
 			payload.modelNoResume = this.getModelNoResume();
 		}
-		const logLv = this.getExplicitLogLevel();
-		if (logLv) {
-			payload.logLevel = logLv;
+		if (command !== 'discover') {
+			const logLv = this.getExplicitLogLevel();
+			if (logLv) {
+				payload.logLevel = logLv;
+			}
 		}
 		try {
 			await this.commandService.executeCommand(SKIPPR_RUN_TOOLBAR_EXECUTE, payload);

@@ -30,12 +30,10 @@ export function listPipelineDefinitionLines(text: string): Array<{ line: number;
 
     const wsMatch = raw.match(/^(\s*)/);
     const indent = wsMatch ? wsMatch[1].length : 0;
+
     const keyMatch = trimmed.match(/^([a-zA-Z0-9_.-]+)\s*:\s*(.*)$/);
-    if (!keyMatch) {
-      continue;
-    }
-    const key = keyMatch[1];
-    const rest = keyMatch[2];
+    const key = keyMatch?.[1];
+    const rest = keyMatch?.[2] ?? "";
     const valuePart = rest.replace(/\s+#.*$/, "").trim();
 
     if (key === "pipelines") {
@@ -51,6 +49,25 @@ export function listPipelineDefinitionLines(text: string): Array<{ line: number;
 
     if (indent <= sectionIndent) {
       inPipelines = false;
+      continue;
+    }
+
+    if (childIndent === null && indent > sectionIndent) {
+      const listPlain = trimmed.match(/^-\s*([a-zA-Z0-9_.-]+)\s*$/);
+      if (listPlain) {
+        out.push({ line: i, name: listPlain[1] });
+        childIndent = indent;
+        continue;
+      }
+      const listNamed = trimmed.match(/^-\s*name\s*:\s*([a-zA-Z0-9_.-]+)\s*$/i);
+      if (listNamed) {
+        out.push({ line: i, name: listNamed[1] });
+        childIndent = indent;
+        continue;
+      }
+    }
+
+    if (!keyMatch) {
       continue;
     }
 
@@ -81,7 +98,7 @@ export function listPipelineDefinitionLines(text: string): Array<{ line: number;
       continue;
     }
 
-    out.push({ line: i, name: key });
+    out.push({ line: i, name: key! });
   }
 
   return out;
@@ -97,8 +114,8 @@ export class SkipprPipelineCodeLensProvider implements vscode.CodeLensProvider {
       const range = document.lineAt(line).range;
       lenses.push(
         new vscode.CodeLens(range, {
-          title: "$(debug-start) Run…",
-          tooltip: "Run Discover, Sync (once), or Model for this pipeline",
+          title: "$(play) Run Skippr",
+          tooltip: "Discover, Sync (once), Model, or Doctor — same as the Run Skippr title bar (uses this file and skippr.run.extraArgs).",
           command: this.runPickCommandId,
           arguments: [document.uri.fsPath, name]
         })

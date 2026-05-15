@@ -1,4 +1,4 @@
-/** Webview body for the Run Skippr STATUS sidebar panel (last / current run outcome). */
+/** Webview body for the Run sidebar status panel (last / current run outcome). */
 
 export function renderSkipprRunStatusPanelHtml(): string {
   return `<!DOCTYPE html>

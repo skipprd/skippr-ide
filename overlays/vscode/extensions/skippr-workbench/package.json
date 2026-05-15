@@ -12,6 +12,12 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "testing.gutterEnabled": true,
+      "[yaml]": {
+        "editor.codeLens": true
+      }
+    },
     "authentication": [
       {
         "id": "skippr",
@@ -159,12 +165,12 @@
         "command": "skippr.refreshDiagnostics",
         "title": "Skippr: Refresh Config Diagnostics"
       }
-    ],
+      ],
     "views": {
       "debug": [
         {
           "id": "skippr.runStatus",
-          "name": "STATUS",
+          "name": "",
           "type": "webview",
           "order": 50
         }

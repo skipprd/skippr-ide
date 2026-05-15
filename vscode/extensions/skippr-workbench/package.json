@@ -12,6 +12,12 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "testing.gutterEnabled": true,
+      "[yaml]": {
+        "editor.codeLens": true
+      }
+    },
     "authentication": [
       {
         "id": "skippr",
@@ -164,7 +170,7 @@
       "debug": [
         {
           "id": "skippr.runStatus",
-          "name": "STATUS",
+          "name": "",
           "type": "webview",
           "order": 50
         }

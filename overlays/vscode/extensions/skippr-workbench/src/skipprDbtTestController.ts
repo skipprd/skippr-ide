@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { parseShellArgs } from "./skipprCliArgs";
 import { buildCliCommand, cliCommandCwd, formatCliCommand, runSkipprJson } from "./skipprRunner";
 
 export interface SkipprDbtTestDeps {
@@ -11,6 +12,10 @@ export interface SkipprDbtTestDeps {
   revealSkipprOutput: () => void;
   /** Process environment for Skippr CLI (merged workspace + per-pipeline settings). */
   getSpawnEnv: (ref: PipelineRef) => NodeJS.ProcessEnv;
+  /** Log level for `skippr test run --log` (align with Run Skippr / skippr.logLevel). */
+  getLogLevel?: () => string;
+  /** Extra CLI args from `skippr.run.extraArgs` (same as title bar). */
+  getRunExtraArgsText?: () => string;
 }
 
 export interface PipelineRef {
@@ -278,8 +283,10 @@ export async function runDbtTestsForRequest(
   deps: SkipprDbtTestDeps
 ): Promise<void> {
   try {
+    deps.output.show(true);
     const cliPath = await deps.resolveCliPath();
     if (!cliPath) {
+      run.appendOutput("Skippr CLI not found. Install the CLI to run dbt tests.\n");
       vscode.window.showErrorMessage("Skippr CLI not found. Install the CLI to run dbt tests.");
       return;
     }
@@ -320,12 +327,27 @@ export async function runDbtTestsForRequest(
         run.started(it);
       }
       const cwd = deps.getConfigCwd(ref.configFsPath);
-      const args = ["--config", ref.configFsPath, "test", "run", "--pipeline", ref.pipeline, "--output", "jsonl"];
+      const logLevel = (deps.getLogLevel?.() ?? "info").trim() || "info";
+      const args = [
+        "--config",
+        ref.configFsPath,
+        "--log",
+        logLevel,
+        "test",
+        "run",
+        "--pipeline",
+        ref.pipeline,
+        "--output",
+        "jsonl"
+      ];
       for (const s of selects) {
         if (s.trim()) {
           args.push("--select", s.trim());
         }
       }
+      args.push(...parseShellArgs(deps.getRunExtraArgsText?.() ?? ""));
+      run.appendOutput(`$ ${formatCliCommand(cliPath, args)}\n`);
+      run.appendOutput(`cwd: ${cwd}\n\n`);
       const { code, lines, stderr, stdout } = await runSkipprJsonLines(
         cliPath,
         args,
@@ -334,6 +356,7 @@ export async function runDbtTestsForRequest(
         token,
         deps.getSpawnEnv(ref)
       );
+      run.appendOutput(`Finished with exit code ${code ?? "?"}. JSONL events: ${lines.length}.\n`);
       const results = new Map<string, JsonlTestResult>();
       for (const row of lines) {
         if (row.event === "test_result" && row.unique_id) {
@@ -344,8 +367,14 @@ export async function runDbtTestsForRequest(
       const sawGlobalError = testErrors.length > 0;
       const failed = code !== 0 || sawGlobalError;
 
+      if (!failed) {
+        run.appendOutput(`dbt tests completed for pipeline "${ref.pipeline}".\n`);
+      }
+
       if (failed) {
         deps.revealSkipprOutput();
+        run.appendOutput("\n--- CLI stderr / stdout (tail) ---\n");
+        run.appendOutput(clipText(`${stderr}\n${stdout}`, 12000) + "\n");
         logTestRunBanner(
           deps,
           `skippr test run (${ref.pipeline})`,

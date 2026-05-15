@@ -451,10 +451,10 @@ Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
 
 const viewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
 	id: VIEWLET_ID,
-	title: nls.localize2('runSkipprViewContainer', "Run Skippr"),
+	title: nls.localize2('runSkipprViewContainer', "Run"),
 	openCommandActionDescriptor: {
 		id: VIEWLET_ID,
-		mnemonicTitle: nls.localize({ key: 'miViewRunSkippr', comment: ['&& denotes a mnemonic'] }, "Run &&Skippr"),
+		mnemonicTitle: nls.localize({ key: 'miViewRunSkippr', comment: ['&& denotes a mnemonic'] }, "&&Run"),
 		keybindings: { primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyD },
 		order: 3
 	},
@@ -467,7 +467,7 @@ const viewContainer = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewCo
 // Register default debug views
 const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
 viewsRegistry.registerViews([{ id: VARIABLES_VIEW_ID, name: nls.localize2('variables', "Variables"), containerIcon: icons.variablesViewIcon, ctorDescriptor: new SyncDescriptor(VariablesView), order: 10, weight: 40, canToggleVisibility: true, canMoveView: true, focusCommand: { id: 'workbench.debug.action.focusVariablesView' }, when: CONTEXT_DEBUG_UX.isEqualTo('default') }], viewContainer);
-// Skippr IDE: hide Watch / Call Stack / Breakpoints in the Run Skippr sidebar (Variables remain).
+// Skippr IDE: hide Watch / Call Stack / Breakpoints in the Run sidebar (Variables remain).
 const skipprHideClassicDebugSidebarViews = ContextKeyExpr.false();
 viewsRegistry.registerViews([{ id: WATCH_VIEW_ID, name: nls.localize2('watch', "Watch"), containerIcon: icons.watchViewIcon, ctorDescriptor: new SyncDescriptor(WatchExpressionsView), order: 20, weight: 10, canToggleVisibility: true, canMoveView: true, focusCommand: { id: 'workbench.debug.action.focusWatchView' }, when: ContextKeyExpr.and(CONTEXT_DEBUG_UX.isEqualTo('default'), skipprHideClassicDebugSidebarViews) }], viewContainer);
 viewsRegistry.registerViews([{ id: CALLSTACK_VIEW_ID, name: nls.localize2('callStack', "Call Stack"), containerIcon: icons.callStackViewIcon, ctorDescriptor: new SyncDescriptor(CallStackView), order: 30, weight: 30, canToggleVisibility: true, canMoveView: true, focusCommand: { id: 'workbench.debug.action.focusCallStackView' }, when: ContextKeyExpr.and(CONTEXT_DEBUG_UX.isEqualTo('default'), skipprHideClassicDebugSidebarViews) }], viewContainer);
