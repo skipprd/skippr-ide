@@ -224,12 +224,18 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 	}
 
 	private scheduleRefresh(): void {
+		if (this._store.isDisposed) {
+			return;
+		}
 		void this.refreshDelayer.trigger(() => {
 			this.refreshChain = this.refreshChain.then(() => this.refreshFromExtension());
 		});
 	}
 
 	private setPipelineSelectOptions(items: ISelectOptionItem[], selected: number): void {
+		if (this._store.isDisposed) {
+			return;
+		}
 		this.pipeIndex = selected;
 		this.suppressPipeSelect++;
 		try {
@@ -240,11 +246,17 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 	}
 
 	private async refreshFromExtension(): Promise<void> {
+		if (this._store.isDisposed) {
+			return;
+		}
 		const command = this.getCommand();
 		this.updateExtrasVisibility(command);
 		const pipeline = this.needsPipeline(command) ? this.getPipeline() : '';
 		try {
 			const model = await this.commandService.executeCommand<SkipprToolbarModel>(SKIPPR_RUN_TOOLBAR_MODEL, { command, pipeline });
+			if (this._store.isDisposed) {
+				return;
+			}
 			if (!model || typeof model !== 'object') {
 				return;
 			}
@@ -518,6 +530,7 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 	}
 
 	override dispose(): void {
+		this.refreshDelayer.cancel();
 		super.dispose();
 	}
 }

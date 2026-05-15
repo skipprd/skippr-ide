@@ -4,12 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { AbstractRequestService, AuthInfo, Credentials, IRequestService } from '../../../../platform/request/common/request.js';
+import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { INativeHostService } from '../../../../platform/native/common/native.js';
 import { IRequestContext, IRequestOptions } from '../../../../base/parts/request/common/request.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
-import { request } from '../../../../base/parts/request/common/requestImpl.js';
 import { ILoggerService } from '../../../../platform/log/common/log.js';
 import { localize } from '../../../../nls.js';
 import { windowLogGroup } from '../../log/common/logConstants.js';
@@ -19,7 +20,10 @@ export class NativeRequestService extends AbstractRequestService implements IReq
 
 	declare readonly _serviceBrand: undefined;
 
+	private readonly mainRequest: IRequestService;
+
 	constructor(
+		@IMainProcessService mainProcessService: IMainProcessService,
 		@INativeHostService private readonly nativeHostService: INativeHostService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@ILoggerService loggerService: ILoggerService,
@@ -29,13 +33,14 @@ export class NativeRequestService extends AbstractRequestService implements IReq
 		super(logService);
 		this._register(logger);
 		this._register(logService);
+		this.mainRequest = new RequestChannelClient(mainProcessService.getChannel('request'));
 	}
 
 	async request(options: IRequestOptions, token: CancellationToken): Promise<IRequestContext> {
 		if (!options.proxyAuthorization) {
 			options.proxyAuthorization = this.configurationService.inspect<string>('http.proxyAuthorization').userLocalValue;
 		}
-		return this.logAndRequest(options, () => request(options, token, () => navigator.onLine));
+		return this.logAndRequest(options, () => this.mainRequest.request(options, token));
 	}
 
 	async resolveProxy(url: string): Promise<string | undefined> {

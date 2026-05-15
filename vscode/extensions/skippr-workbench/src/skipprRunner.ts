@@ -73,6 +73,7 @@ export interface SkipprJsonCommandResult<T> {
 
 const installerCommand = "curl -fsSL https://install.skippr.io/install.sh | sh -";
 const localCargoCli = "__skippr_local_cargo__";
+const chatCommandTimeoutMs = 10 * 60_000;
 
 export async function resolveSkipprCli(configuredPath: string | undefined): Promise<string | undefined> {
   if (resolveLocalSkipprdManifest()) {
@@ -129,6 +130,13 @@ export interface SkipprChatJsonlRunResult {
   stdout: string;
 }
 
+export interface SkipprChatProgressEvent {
+  kind: "llm" | "tool" | "final" | "summary";
+  status: "running" | "completed" | "failed";
+  label: string;
+  detail?: string;
+}
+
 /** Run `skippr chat send --output jsonl` and collect parsed JSON lines from stdout. */
 export async function runSkipprChatJsonl(
   cliPath: string,
@@ -138,7 +146,8 @@ export async function runSkipprChatJsonl(
   message: string,
   cwd: string,
   output: vscode.LogOutputChannel,
-  spawnEnv: NodeJS.ProcessEnv = process.env
+  spawnEnv: NodeJS.ProcessEnv = process.env,
+  onProgress?: (event: SkipprChatProgressEvent) => void
 ): Promise<SkipprChatJsonlRunResult> {
   const args = [
     "--config",
@@ -176,7 +185,9 @@ export async function runSkipprChatJsonl(
       }
       forwardRunTranscriptLine("skippr-chat", "chat-jsonl", line, "stdout");
       try {
-        lines.push(JSON.parse(line) as unknown);
+        const parsed = JSON.parse(line) as unknown;
+        lines.push(parsed);
+        emitSkipprChatProgress(parsed, onProgress);
       } catch {
         output.warn(`[skippr chat] non-JSON stdout line: ${line}`);
       }
@@ -189,9 +200,31 @@ export async function runSkipprChatJsonl(
     output.info(chunk.trimEnd());
   });
   return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result: SkipprChatJsonlRunResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutHandle);
+      resolve(result);
+    };
+    const timeoutHandle = setTimeout(() => {
+      const message = `Skippr chat timed out after ${Math.round(chatCommandTimeoutMs / 1000)}s without a final response.`;
+      output.warn(`[skippr chat] ${message}`);
+      child.kill("SIGTERM");
+      settle({
+        code: 124,
+        signal: null,
+        elapsedMs: Date.now() - startedAt,
+        lines,
+        stderr: [stderr.trim(), message].filter(Boolean).join("\n"),
+        stdout
+      });
+    }, chatCommandTimeoutMs);
     child.on("error", (error) => {
       output.error(error.message);
-      resolve({
+      settle({
         code: 1,
         signal: null,
         elapsedMs: Date.now() - startedAt,
@@ -204,16 +237,87 @@ export async function runSkipprChatJsonl(
       const tail = buf.trim();
       if (tail) {
         try {
-          lines.push(JSON.parse(tail) as unknown);
+          const parsed = JSON.parse(tail) as unknown;
+          lines.push(parsed);
+          emitSkipprChatProgress(parsed, onProgress);
         } catch {
           if (tail) {
             output.warn(`[skippr chat] non-JSON stdout tail: ${tail}`);
           }
         }
       }
-      resolve({ code, signal, elapsedMs: Date.now() - startedAt, lines, stderr, stdout });
+      settle({ code, signal, elapsedMs: Date.now() - startedAt, lines, stderr, stdout });
     });
   });
+}
+
+function emitSkipprChatProgress(line: unknown, onProgress?: (event: SkipprChatProgressEvent) => void): void {
+  if (!onProgress || !line || typeof line !== "object") {
+    return;
+  }
+  const o = line as Record<string, unknown>;
+  const type = typeof o.type === "string" ? o.type : "";
+  if (type === "tool_start" || type === "tool_end") {
+    const rawName = stringField(o, "clean_name") || stringField(o, "name") || "Tool";
+    const statusText = stringField(o, "status");
+    const failed = type === "tool_end" && statusText === "failed";
+    const detail = failed ? stringField(o, "error") : undefined;
+    onProgress({
+      kind: "tool",
+      status: type === "tool_start" ? "running" : failed ? "failed" : "completed",
+      label: rawName,
+      detail
+    });
+    return;
+  }
+  if (type === "llm_start" || type === "llm_end") {
+    const model = stringField(o, "model") || "LLM";
+    const statusText = stringField(o, "status");
+    onProgress({
+      kind: "llm",
+      status: type === "llm_start" ? "running" : statusText === "failed" ? "failed" : "completed",
+      label: model
+    });
+    return;
+  }
+  if (type === "final") {
+    onProgress({ kind: "final", status: "completed", label: "Final answer" });
+    return;
+  }
+  if (type === "ChatSummary") {
+    onProgress({
+      kind: "summary",
+      status: Boolean(o.ok) ? "completed" : "failed",
+      label: "Skippr chat"
+    });
+  }
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" && field.trim() ? field.trim() : undefined;
+}
+
+function stringFieldFromObject(value: unknown, keys: readonly string[]): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  for (const key of keys) {
+    const direct = stringField(value, key);
+    if (direct) {
+      return direct;
+    }
+  }
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    const nested = stringFieldFromObject(child, keys);
+    if (nested) {
+      return nested;
+    }
+  }
+  return undefined;
 }
 
 function assistantSnippetFromChatJsonlObject(line: unknown): string | undefined {
@@ -221,27 +325,11 @@ function assistantSnippetFromChatJsonlObject(line: unknown): string | undefined 
     return undefined;
   }
   const o = line as Record<string, unknown>;
-  if (o.type === "ChatSummary") {
-    return undefined;
+  if (o.type === "final") {
+    return stringFieldFromObject(o.result, ["markdown", "display", "answer", "text"]);
   }
-  for (const [, v] of Object.entries(o)) {
-    if (!v || typeof v !== "object") {
-      continue;
-    }
-    const inner = v as Record<string, unknown>;
-    if (typeof inner.display === "string" && inner.display.trim()) {
-      return inner.display.trim();
-    }
-    const result = inner.result as Record<string, unknown> | undefined;
-    const payload = result?.payload as Record<string, unknown> | undefined;
-    if (payload) {
-      if (typeof payload.answer === "string" && payload.answer.trim()) {
-        return payload.answer.trim();
-      }
-      if (typeof payload.text === "string" && payload.text.trim()) {
-        return payload.text.trim();
-      }
-    }
+  if (o.type === "assistant" || o.type === "answer" || o.type === "message") {
+    return stringFieldFromObject(o, ["markdown", "display", "answer", "text"]);
   }
   return undefined;
 }
@@ -250,11 +338,13 @@ function assistantSnippetFromChatJsonlObject(line: unknown): string | undefined 
 export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
   ok: boolean;
   threadId?: string;
+  failureSummary?: string;
   assistantMarkdown: string;
 } {
   let ok = false;
   let sawSummary = false;
   let threadId: string | undefined;
+  let failureSummary: string | undefined;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line || typeof line !== "object") {
@@ -266,6 +356,12 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
       ok = Boolean(o.ok);
       if (typeof o.thread_id === "string" && o.thread_id.trim()) {
         threadId = o.thread_id.trim();
+      }
+      if (typeof o.failure_summary === "string" && o.failure_summary.trim()) {
+        failureSummary = o.failure_summary.trim();
+      }
+      if (!failureSummary && typeof o.bootstrap_error === "string" && o.bootstrap_error.trim()) {
+        failureSummary = o.bootstrap_error.trim();
       }
       break;
     }
@@ -281,7 +377,7 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
     }
   }
   const assistantMarkdown = parts.join("\n\n").trim();
-  return { ok, threadId, assistantMarkdown };
+  return { ok, threadId, failureSummary, assistantMarkdown };
 }
 
 export async function runSkipprJson<T>(

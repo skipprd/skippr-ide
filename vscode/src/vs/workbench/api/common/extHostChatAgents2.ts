@@ -910,11 +910,38 @@ export class ExtHostChatAgents2 extends Disposable implements ExtHostChatAgentsS
 		if (!model) {
 			model = await this._languageModels.getDefaultLanguageModel(extension);
 			if (!model) {
+				if (this.isSkipprLocalChatRequest(request, extension)) {
+					return this.createSkipprLocalLanguageModel();
+				}
 				throw new Error('Language model unavailable');
 			}
 		}
 
 		return model;
+	}
+
+	private isSkipprLocalChatRequest(request: IChatAgentRequest, extension: IExtensionDescription): boolean {
+		return extension.identifier.value === 'skippr.skippr-workbench' && request.agentId === 'skippr.chat';
+	}
+
+	private createSkipprLocalLanguageModel(): vscode.LanguageModelChat {
+		return {
+			id: 'skippr-local',
+			name: 'Skippr Local',
+			vendor: 'skippr',
+			family: 'skippr',
+			version: 'local',
+			capabilities: {
+				supportsImageToText: false,
+				supportsToolCalling: false,
+				editToolsHint: undefined
+			},
+			maxInputTokens: 128_000,
+			sendRequest: async function* (): AsyncIterable<vscode.LanguageModelTextPart> {
+				yield new extHostTypes.LanguageModelTextPart('');
+			},
+			countTokens: async () => 0
+		} as unknown as vscode.LanguageModelChat;
 	}
 
 

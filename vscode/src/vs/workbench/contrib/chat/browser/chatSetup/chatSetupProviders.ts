@@ -256,6 +256,10 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private async doInvoke(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService, defaultAccountService: IDefaultAccountService): Promise<IChatAgentResult> {
+		if (defaultChat.chatExtensionId === 'skippr.data-agent' && request.location === ChatAgentLocation.Chat) {
+			return this.invokeLocalSkipprChat(request, progress);
+		}
+
 		if (
 			!this.context.state.completed ||									// Setup not completed
 			this.context.state.disabled ||										// Extension disabled: run setup to enable
@@ -270,6 +274,49 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 
 		return this.doInvokeWithoutSetup(request, progress, chatService, languageModelsService, chatWidgetService, chatAgentService, languageModelToolsService);
+	}
+
+	private async invokeLocalSkipprChat(request: IChatAgentRequest, progress: (part: IChatProgress) => void): Promise<IChatAgentResult> {
+		progress({
+			kind: 'progressMessage',
+			content: new MarkdownString(localize('runningLocalSkipprChat', "Running Skippr chat")),
+			shimmer: true,
+		});
+
+		const command = request.command === 'plan' ? 'plan' : 'ask';
+		const statusMessages = [
+			localize('localSkipprChatStillRunning', "Skippr chat is still running locally..."),
+			localize('localSkipprChatWaiting', "Still waiting for Skippr to produce a final response..."),
+			localize('localSkipprChatLongRunning', "This Skippr chat run is taking longer than expected.")
+		];
+		let statusIndex = 0;
+		const statusHandle = setInterval(() => {
+			progress({
+				kind: 'progressMessage',
+				content: new MarkdownString(statusMessages[Math.min(statusIndex++, statusMessages.length - 1)]),
+				shimmer: true,
+			});
+		}, 15_000);
+		try {
+			const text = await this.commandService.executeCommand<string>('skippr.workbench.internal.runChatCli', {
+				mode: command,
+				prompt: request.message
+			});
+			clearInterval(statusHandle);
+			progress({
+				kind: 'markdownContent',
+				content: new MarkdownString(text || localize('emptyLocalSkipprChatResponse', "(empty response)"))
+			});
+		} catch (error) {
+			clearInterval(statusHandle);
+			this.logService.error('[chat setup] Local Skippr chat failed', error);
+			progress({
+				kind: 'warning',
+				content: new MarkdownString(error instanceof Error ? error.message : String(error))
+			});
+		}
+
+		return { metadata: { command, mode: command } };
 	}
 
 	private async doInvokeWithoutSetup(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService): Promise<IChatAgentResult> {
@@ -347,7 +394,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		if (!whenAgentReady) {
 			agentReady = true;
 		}
-		const whenLanguageModelReady = this.whenLanguageModelReady(languageModelsService, requestModel.modelId)?.then(() => languageModelReady = true);
+		const whenLanguageModelReady = this.isParticipantBackedDefaultAgent(requestModel)
+			? undefined
+			: this.whenLanguageModelReady(languageModelsService, requestModel.modelId)?.then(() => languageModelReady = true);
 		if (!whenLanguageModelReady) {
 			languageModelReady = true;
 		}
@@ -596,6 +645,10 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 
 		return Event.toPromise(Event.filter(languageModelsService.onDidChangeLanguageModels, () => hasModelForRequest()));
+	}
+
+	private isParticipantBackedDefaultAgent(requestModel: IChatRequestModel): boolean {
+		return defaultChat.chatExtensionId === 'skippr.data-agent' && !requestModel.modelId;
 	}
 
 	private whenToolsModelReady(languageModelToolsService: ILanguageModelToolsService, requestModel: IChatRequestModel): Promise<unknown> | void {

@@ -23,6 +23,8 @@ import { Registry } from '../../../../../platform/registry/common/platform.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IActivityService, ProgressBadge } from '../../../../services/activity/common/activity.js';
 import { ILifecycleService } from '../../../../services/lifecycle/common/lifecycle.js';
+import { areSameExtensions } from '../../../../../platform/extensionManagement/common/extensionManagementUtil.js';
+import { EnablementState } from '../../../../services/extensionManagement/common/extensionManagement.js';
 import { IExtensionsWorkbenchService } from '../../../extensions/common/extensions.js';
 import { ChatEntitlement, ChatEntitlementContext, ChatEntitlementRequests, isProUser } from '../../../../services/chat/common/chatEntitlementService.js';
 import { CHAT_OPEN_ACTION_ID } from '../actions/chatActions.js';
@@ -237,8 +239,8 @@ export class ChatSetupController extends Disposable {
 		try {
 			await this.doInstall();
 		} catch (e) {
-			this.logService.error(`[chat setup] install: error ${error}`);
-			error = e;
+			this.logService.error(`[chat setup] install: error ${e}`);
+			error = e instanceof Error ? e : new Error(String(e));
 		}
 
 		if (error) {
@@ -260,6 +262,31 @@ export class ChatSetupController extends Disposable {
 	}
 
 	private async doInstall(): Promise<void> {
+		// Skippr IDE ships `defaultChat.chatExtensionId` as a built-in. Installing by id from the
+		// gallery throws "not found" for built-ins unless listed in builtInExtensionsEnabledWithAutoUpdates.
+		// If the extension is already on disk, only ensure it is enabled.
+		await this.extensionsWorkbenchService.queryLocal();
+		const defaultChatExtension = this.extensionsWorkbenchService.local.find((value) =>
+			areSameExtensions(value.identifier, { id: defaultChat.chatExtensionId })
+		);
+		if (defaultChatExtension?.local) {
+			if (
+				defaultChatExtension.enablementState === EnablementState.DisabledWorkspace ||
+				defaultChatExtension.enablementState === EnablementState.DisabledGlobally
+			) {
+				await this.extensionsWorkbenchService.setEnablement(
+					[defaultChatExtension],
+					defaultChatExtension.enablementState === EnablementState.DisabledWorkspace
+						? EnablementState.EnabledWorkspace
+						: EnablementState.EnabledGlobally
+				);
+				await this.extensionsWorkbenchService.updateRunningExtensions(
+					localize('restartExtensionHost.reason.enable', 'Enabling AI features')
+				);
+			}
+			return;
+		}
+
 		await this.extensionsWorkbenchService.install(defaultChat.chatExtensionId, {
 			enable: true,
 			isApplicationScoped: true, 	// install into all profiles

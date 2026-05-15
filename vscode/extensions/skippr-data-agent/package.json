@@ -11,15 +11,15 @@
   "activationEvents": ["onChatParticipant:skippr.data-agent", "onStartupFinished"],
   "contributes": {
     "configurationDefaults": {
-      "skippr.data-agent.chat.githubMcpServer.enabled": false
+      "skippr.data-agent.chat.externalMcpServer.enabled": false
     },
     "configuration": {
       "title": "Skippr Data Agent",
       "properties": {
-        "skippr.data-agent.chat.githubMcpServer.enabled": {
+        "skippr.data-agent.chat.externalMcpServer.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "GitHub MCP integration in chat (off by default in Skippr IDE)."
+          "description": "External MCP integration in chat (off by default in Skippr IDE)."
         }
       }
     },

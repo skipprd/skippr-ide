@@ -10,6 +10,7 @@ import {
   runSkipprChatJsonl,
   runSkipprJson,
   showSkipprVersion,
+  SkipprChatProgressEvent,
   SkipprProcess,
   SkipprRunKind,
   startSkipprRun,
@@ -59,6 +60,33 @@ const defaultPipelineKey = "skippr.defaultPipeline";
 const logLevelKey = "skippr.logLevel";
 const runCwdKey = "skippr.run.cwd";
 const runExtraArgsKey = "skippr.run.extraArgs";
+const vectorOnOpenStateKey = "skippr.vector.onOpen.lastRun.v1";
+const chatAttachmentMaxBytes = 128 * 1024;
+const chatAttachmentMaxFiles = 8;
+const vectorOnOpenExcludeGlobs = [
+  ".git/**",
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "**/.*/**",
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/out/**",
+  "**/target/**",
+  "**/.next/**",
+  "**/coverage/**",
+  "**/*secret*",
+  "**/*secrets*",
+  "**/*credential*",
+  "**/*credentials*",
+  "**/*token*",
+  "**/*private*",
+  "**/*.pem",
+  "**/*.p8",
+  "**/*.key"
+];
 
 interface AuthSession {
   token: string;
@@ -1088,10 +1116,10 @@ async function resolveChatRunTarget(output: vscode.LogOutputChannel): Promise<{ 
   }
   const config = vscode.workspace.getConfiguration();
   const configuredPipeline = config.get<string>(defaultPipelineKey, "").trim();
-  if (configuredPipeline) {
+  const configShow = await getConfigShow(output);
+  if (configuredPipeline && (!configShow?.pipelines.length || configShow.pipelines.includes(configuredPipeline))) {
     return { pipeline: configuredPipeline, configPath };
   }
-  const configShow = await getConfigShow(output);
   const pipeline = configShow?.default_pipeline ?? configShow?.pipelines[0];
   return pipeline ? { pipeline, configPath } : undefined;
 }
@@ -1100,7 +1128,8 @@ async function runSkipprChatCli(
   modeId: "ask" | "plan",
   prompt: string,
   output: vscode.LogOutputChannel,
-  statusItem: vscode.StatusBarItem
+  statusItem: vscode.StatusBarItem,
+  onProgress?: (event: SkipprChatProgressEvent) => void
 ): Promise<string> {
   const mode = skipprChatModeFor(modeId);
   const target = await resolveChatRunTarget(output);
@@ -1125,7 +1154,8 @@ async function runSkipprChatCli(
     message,
     getConfigCwd(target.configPath),
     output,
-    skipprSpawnEnv(target.configPath, target.pipeline)
+    skipprSpawnEnv(target.configPath, target.pipeline),
+    onProgress
   );
   const parsed = parseSkipprChatResultFromJsonl(jsonl.lines);
   const chatOk = jsonl.code === 0 && !jsonl.signal && parsed.ok;
@@ -1139,7 +1169,9 @@ async function runSkipprChatCli(
   });
   setRunStatusIdle(statusItem);
   if (!chatOk) {
-    throw new Error(`Skippr ${mode.label} failed. See Skippr output for details.`);
+    const stderrTail = jsonl.stderr.trim().split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
+    const detail = parsed.failureSummary || stderrTail || `exit code ${jsonl.code ?? "unknown"}`;
+    throw new Error(`Skippr ${mode.label} failed: ${detail}`);
   }
   const text =
     parsed.assistantMarkdown ||
@@ -1147,10 +1179,110 @@ async function runSkipprChatCli(
   return text;
 }
 
+function renderSkipprChatProgress(event: SkipprChatProgressEvent): string {
+  const status = event.status === "running" ? "Running" : event.status === "completed" ? "Complete" : "Failed";
+  const prefix = event.kind === "tool" ? "Tool" : event.kind === "llm" ? "LLM" : "Skippr";
+  const detail = event.detail ? `: ${event.detail}` : "";
+  return `${prefix} ${status.toLowerCase()}: ${event.label}${detail}`;
+}
+
+function forwardSkipprChatProgress(commandId: unknown, requestId: unknown, event: SkipprChatProgressEvent): void {
+  if (typeof commandId !== "string" || !commandId.trim() || typeof requestId !== "string" || !requestId.trim()) {
+    return;
+  }
+  void vscode.commands.executeCommand(commandId, { requestId, event }).then(undefined, () => undefined);
+}
+
+function isSecretLikePath(fsPath: string): boolean {
+  const normalized = fsPath.replace(/\\/g, "/").toLowerCase();
+  const base = path.posix.basename(normalized);
+  return (
+    base === ".env" ||
+    base.startsWith(".env.") ||
+    normalized.includes("/.env.") ||
+    /(^|[/._-])(secret|secrets|credential|credentials|token|private)([/._-]|$)/.test(normalized) ||
+    /\.(pem|p8|key)$/i.test(base)
+  );
+}
+
+function fileReferenceUri(value: unknown): vscode.Uri | undefined {
+  if (value instanceof vscode.Uri) {
+    return value;
+  }
+  if (value instanceof vscode.Location) {
+    return value.uri;
+  }
+  if (value && typeof value === "object" && "uri" in value) {
+    const uri = (value as { uri?: unknown }).uri;
+    if (uri instanceof vscode.Uri) {
+      return uri;
+    }
+  }
+  return undefined;
+}
+
+async function attachmentMarkdownForRequest(request: vscode.ChatRequest): Promise<string> {
+  const attachments: string[] = [];
+  const skipped: string[] = [];
+  for (const ref of request.references ?? []) {
+    if (attachments.length >= chatAttachmentMaxFiles) {
+      skipped.push("additional files");
+      break;
+    }
+    const uri = fileReferenceUri(ref.value);
+    if (!uri || uri.scheme !== "file") {
+      continue;
+    }
+    if (isSecretLikePath(uri.fsPath)) {
+      skipped.push(path.basename(uri.fsPath));
+      continue;
+    }
+    try {
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.type !== vscode.FileType.File) {
+        continue;
+      }
+      const sizeNote = stat.size > chatAttachmentMaxBytes ? " (large; prefer retrieval)" : "";
+      attachments.push(`- ${uri.fsPath}${sizeNote}`);
+    } catch {
+      skipped.push(path.basename(uri.fsPath));
+    }
+  }
+  if (!attachments.length && !skipped.length) {
+    return "";
+  }
+  const skippedText = skipped.length ? `\n\nSkipped attachments: ${skipped.join(", ")}` : "";
+  return `\n\nAttached files:\n${attachments.join("\n")}\n\nUse retrieval for attached files before reading full files: call vect_query with scope "doc" and query_text containing the user's question plus the attached path(s). Treat vector hits as confident only when they clearly reference the attached path and answer-relevant text. If retrieval is empty, ambiguous, or low-confidence, then use file(get) on the attached file path and answer from the file content.${skippedText}`;
+}
+
+async function promptWithAttachedFiles(request: vscode.ChatRequest): Promise<string> {
+  const attachmentContext = await attachmentMarkdownForRequest(request);
+  return `${request.prompt.trim()}${attachmentContext}`;
+}
+
+async function ensureChatSession(
+  context: vscode.ExtensionContext,
+  statusItem: vscode.StatusBarItem,
+  authProvider: SkipprAuthenticationProvider
+): Promise<AuthSession> {
+  const existing = await ensureSession(context, statusItem, authProvider);
+  if (existing) {
+    return existing;
+  }
+
+  const created = await signIn(context, statusItem, authProvider);
+  if (!created) {
+    throw new Error("Sign in to Skippr to use Skippr Data Agent chat.");
+  }
+  return created;
+}
+
 function registerSkipprChatParticipant(
   context: vscode.ExtensionContext,
   output: vscode.LogOutputChannel,
-  statusItem: vscode.StatusBarItem
+  statusItem: vscode.StatusBarItem,
+  authStatusItem: vscode.StatusBarItem,
+  authProvider: SkipprAuthenticationProvider
 ): void {
   const participant = vscode.chat.createChatParticipant("skippr.chat", async (request, _chatContext, response) => {
     const command = request.command ?? "ask";
@@ -1166,7 +1298,11 @@ function registerSkipprChatParticipant(
       return { metadata: { command } };
     }
 
-    const text = await runSkipprChatCli(command, request.prompt, output, statusItem);
+    await ensureChatSession(context, authStatusItem, authProvider);
+    const prompt = await promptWithAttachedFiles(request);
+    const text = await runSkipprChatCli(command, prompt, output, statusItem, event => {
+      response.progress(renderSkipprChatProgress(event));
+    });
     response.markdown(text);
     return { metadata: { command, mode: command } };
   });
@@ -1249,7 +1385,9 @@ async function runSkipprChatMode(
   });
   setRunStatusIdle(statusItem);
   if (!chatOk) {
-    vscode.window.showErrorMessage(`Skippr ${mode.label} failed. See Skippr output for details.`);
+    const stderrTail = jsonl.stderr.trim().split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
+    const detail = parsed.failureSummary || stderrTail || `exit code ${jsonl.code ?? "unknown"}`;
+    vscode.window.showErrorMessage(`Skippr ${mode.label} failed: ${detail}`);
     return;
   }
   const text =
@@ -1257,6 +1395,80 @@ async function runSkipprChatMode(
     (parsed.threadId ? `Chat turn completed (thread \`${parsed.threadId}\`).` : `${mode.label} completed.`);
   output.info(text);
   vscode.window.showInformationMessage(`Skippr ${mode.label} completed.`);
+}
+
+async function runVectorIngestOnOpen(
+  context: vscode.ExtensionContext,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): Promise<void> {
+  const configPath = activeConfigPath || (await chooseActiveConfig(output));
+  const folder = configPath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(configPath)) : vscode.workspace.workspaceFolders?.[0];
+  if (!configPath || !folder) {
+    return;
+  }
+  const stateKey = `${vectorOnOpenStateKey}:${configPath}:${folder.uri.fsPath}`;
+  if (context.globalState.get<boolean>(stateKey)) {
+    return;
+  }
+  await context.globalState.update(stateKey, true);
+
+  const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+  if (!cliPath) {
+    output.info("Skipping automatic Skippr vector ingest: CLI not configured.");
+    return;
+  }
+
+  const args = [
+    "--config",
+    configPath,
+    "vector",
+    "ingest-docs",
+    "--pipeline",
+    "vector_ingest",
+    "--src-path",
+    folder.uri.fsPath,
+    "--include-glob",
+    "**/*",
+    "--output",
+    "json",
+    ...vectorOnOpenExcludeGlobs.flatMap((glob) => ["--exclude-glob", glob])
+  ];
+
+  const headline = "Vector ingest";
+  output.info(`Starting automatic Skippr vector ingest for ${folder.uri.fsPath}.`);
+  setRunStatusRunning(statusItem, headline);
+  try {
+    const result = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Indexing workspace for Skippr chat",
+        cancellable: false
+      },
+      async (progress) => {
+        progress.report({ message: "Scanning project files and applying excludes..." });
+        const run = await runSkipprJson<unknown>(cliPath, args, folder.uri.fsPath, output, skipprSpawnEnv(configPath, "vector_ingest"));
+        progress.report({ message: "Finalizing vector index..." });
+        return run;
+      }
+    );
+    const ok = result.code === 0;
+    finishRunStatusPanel({
+      headline,
+      code: result.code,
+      signal: result.signal,
+      elapsedMs: result.elapsedMs,
+      logicalOk: ok,
+      detail: ok ? "Workspace vector index refreshed." : "Vector ingest skipped or failed — see output."
+    });
+    if (ok) {
+      output.info("Automatic Skippr vector ingest completed.");
+    } else {
+      output.warn("Automatic Skippr vector ingest skipped or failed. Ensure skippr.yml defines pipelines.vector_ingest and vector_sources.");
+    }
+  } finally {
+    setRunStatusIdle(statusItem);
+  }
 }
 
 async function runPickPipelineAction(
@@ -1656,63 +1868,106 @@ async function fetchAccount(session: AuthSession): Promise<SkipprAccountPayload 
   return response.ok ? ((await response.json()) as SkipprAccountPayload) : undefined;
 }
 
+function renderAccountOverlayHtml(session: AuthSession | undefined, account: SkipprAccountPayload | undefined): string {
+  const plan = account?.profile?.plan ?? "Unknown";
+  const balance = account?.balance?.balance ?? 0;
+  const estimate = account?.monthly_cost_est ?? 0;
+  const eula = account?.eula?.accepted_at
+    ? `Accepted ${account.eula.accepted_at}`
+    : account?.eula?.version ?? "Not accepted";
+  const signedIn = session ? `Signed in as ${session.email}` : "Not signed in";
+  const accountBody = session
+    ? `
+      <div class="grid">
+        <section class="metric"><span>Plan</span><strong>${escapeHtml(plan)}</strong></section>
+        <section class="metric"><span>Balance</span><strong>$${balance.toFixed(2)}</strong></section>
+        <section class="metric"><span>Month estimate</span><strong>$${estimate.toFixed(2)}</strong></section>
+        <section class="metric"><span>EULA</span><strong>${escapeHtml(eula)}</strong></section>
+      </div>
+      ${account ? "" : `<p class="warning">Could not load account details from Skippr. You can refresh or sign in again.</p>`}
+      <div class="actions">
+        <button data-action="refresh">Refresh</button>
+        <button data-action="buyCredits">Buy credits</button>
+        <button data-action="acceptEula">Accept EULA</button>
+        <button data-action="signOut" class="secondary">Sign out</button>
+      </div>`
+    : `
+      <p class="copy">Sign in to connect Skippr Data Agent chat, account, billing, and CLI credentials to the same Skippr session.</p>
+      <div class="actions"><button data-action="signIn">Sign in to Skippr</button></div>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent); font-family: var(--vscode-font-family); }
+    .card { width: min(640px, calc(100vw - 48px)); padding: 28px; border: 1px solid var(--vscode-panel-border); border-radius: 18px; background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-sideBar-background)); box-shadow: 0 18px 60px rgba(0,0,0,.28); }
+    .eyebrow { color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: .12em; font-size: 12px; }
+    h1 { margin: 6px 0 8px; font-size: 24px; }
+    .status, .copy, .warning { color: var(--vscode-descriptionForeground); line-height: 1.5; }
+    .warning { color: var(--vscode-inputValidation-warningForeground); }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 22px 0; }
+    .metric { padding: 14px; border: 1px solid var(--vscode-panel-border); border-radius: 12px; background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-input-background)); }
+    .metric span { display: block; color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 6px; }
+    .metric strong { font-size: 18px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    button { border: 0; border-radius: 6px; padding: 8px 12px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="eyebrow">Skippr Account</div>
+    <h1>Data Agent session</h1>
+    <p class="status">${escapeHtml(signedIn)}</p>
+    ${accountBody}
+  </main>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.addEventListener('click', event => {
+      const button = event.target.closest('button[data-action]');
+      if (button) {
+        vscode.postMessage({ command: button.dataset.action });
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
 async function showAccount(
   context: vscode.ExtensionContext,
   statusItem: vscode.StatusBarItem,
   authProvider: SkipprAuthenticationProvider
 ): Promise<void> {
-  const session = await readAuthSession(context);
-  if (!session) {
-    await signIn(context, statusItem, authProvider);
-    return;
-  }
+  const panel = vscode.window.createWebviewPanel("skippr.account", "Skippr Account", vscode.ViewColumn.Active, {
+    enableScripts: true
+  });
 
-  type AccountAction = "refresh" | "buy" | "eula" | "signout";
+  const refresh = async () => {
+    const session = await ensureSession(context, statusItem, authProvider);
+    const account = session ? await fetchAccount(session) : undefined;
+    panel.webview.html = renderAccountOverlayHtml(session, account);
+  };
 
-  interface AccountQuickItem extends vscode.QuickPickItem {
-    action: AccountAction;
-  }
-
-  for (;;) {
-    const account = await fetchAccount(session);
-    const plan = account?.profile?.plan ?? "Unknown";
-    const balance = account?.balance?.balance ?? 0;
-    const estimate = account?.monthly_cost_est ?? 0;
-    const loadErr = account ? "" : "Could not load account details.";
-    const items: AccountQuickItem[] = [
-      {
-        label: "$(refresh) Refresh account",
-        description: loadErr || "Reload plan, balance, and usage",
-        action: "refresh"
-      },
-      {
-        label: "$(credit-card) Buy credits…",
-        description: "Open checkout for more Skippr credits",
-        action: "buy"
-      },
-      {
-        label: "$(law) Accept EULA",
-        description: account?.eula?.accepted_at ? `Accepted ${account.eula.accepted_at}` : "Accept skippr-eula-2026-04-29",
-        action: "eula"
-      },
-      {
-        label: "$(sign-out) Sign out",
-        description: "Clear Skippr session on this machine",
-        action: "signout"
-      }
-    ];
-    const picked = await vscode.window.showQuickPick<AccountQuickItem>(items, {
-      title: "Skippr Account",
-      placeHolder: `${session.email} · Plan ${plan} · Balance $${balance.toFixed(2)} · Month est. $${estimate.toFixed(2)}`,
-      ignoreFocusOut: true
-    });
-    if (!picked) {
+  panel.webview.onDidReceiveMessage(async (message: { command?: string }) => {
+    const session = await readAuthSession(context);
+    if (message.command === "signIn") {
+      await signIn(context, statusItem, authProvider);
+      await refresh();
       return;
     }
-    if (picked.action === "refresh") {
-      continue;
+    if (!session) {
+      await refresh();
+      return;
     }
-    if (picked.action === "buy") {
+    if (message.command === "refresh") {
+      await refresh();
+      return;
+    }
+    if (message.command === "buyCredits") {
       const amount = await vscode.window.showInputBox({ title: "Buy Skippr Credits", prompt: "Amount in USD", value: "25" });
       const parsed = Number(amount);
       if (Number.isFinite(parsed) && parsed >= 5) {
@@ -1724,24 +1979,28 @@ async function showAccount(
           }
         }
       }
-      continue;
+      await refresh();
+      return;
     }
-    if (picked.action === "eula") {
+    if (message.command === "acceptEula") {
       await apiRequest("/auth/accept-eula", "POST", { version: "skippr-eula-2026-04-29" }, session.token);
-      continue;
+      await refresh();
+      return;
     }
-    if (picked.action === "signout") {
+    if (message.command === "signOut") {
       try {
         await apiRequest("/auth/logout", "POST", undefined, session.token);
       } catch {
-        // ignore
+        // Best-effort logout; still clear local state.
       }
       authProvider.notifySessionRemoved(session);
       await clearAuthSession(context);
       applySignedOutAuthStatusBar(statusItem);
-      return;
+      await refresh();
     }
-  }
+  });
+
+  await refresh();
 }
 
 async function ensureSession(
@@ -1964,12 +2223,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     resolveCliPath: () => resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
     output
   });
-  registerSkipprChatParticipant(context, output, runStatusItem);
+  registerSkipprChatParticipant(context, output, runStatusItem, statusItem, authProvider);
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "skippr.workbench.internal.runChatCli",
-      async (args: { mode: "ask" | "plan"; prompt: string }) => {
-        return await runSkipprChatCli(args.mode, args.prompt, output, runStatusItem);
+      async (args: { mode: "ask" | "plan"; prompt: string; progressCommand?: string; progressRequestId?: string }) => {
+        await ensureChatSession(context, statusItem, authProvider);
+        return await runSkipprChatCli(args.mode, args.prompt, output, runStatusItem, event => {
+          forwardSkipprChatProgress(args.progressCommand, args.progressRequestId, event);
+        });
       }
     )
   );
@@ -2241,7 +2503,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void chooseActiveConfig(output).then(() => refreshConfigStatus(output, runStatusItem));
     })
   );
-  void chooseActiveConfig(output).then(() => refreshConfigStatus(output, runStatusItem));
+  void chooseActiveConfig(output).then(async () => {
+    await refreshConfigStatus(output, runStatusItem);
+    await runVectorIngestOnOpen(context, output, runStatusItem);
+  });
   if (!context.globalState.get<boolean>(splashSeenKey)) {
     void context.globalState.update(splashSeenKey, true);
     void showSplash(context, statusItem, authProvider);
