@@ -131,9 +131,11 @@ export interface SkipprChatJsonlRunResult {
 }
 
 export interface SkipprChatProgressEvent {
-  kind: "llm" | "tool" | "final" | "summary";
+  kind: "phase" | "llm" | "tool" | "final" | "summary" | "approval";
   status: "running" | "completed" | "failed";
   label: string;
+  id?: string;
+  phase?: string;
   detail?: string;
 }
 
@@ -147,7 +149,8 @@ export async function runSkipprChatJsonl(
   cwd: string,
   output: vscode.LogOutputChannel,
   spawnEnv: NodeJS.ProcessEnv = process.env,
-  onProgress?: (event: SkipprChatProgressEvent) => void
+  onProgress?: (event: SkipprChatProgressEvent) => void,
+  threadId?: string
 ): Promise<SkipprChatJsonlRunResult> {
   const args = [
     "--config",
@@ -160,6 +163,7 @@ export async function runSkipprChatJsonl(
     mode,
     "--message",
     message,
+    ...(threadId ? ["--thread", threadId] : []),
     "--output",
     "jsonl"
   ];
@@ -257,31 +261,61 @@ function emitSkipprChatProgress(line: unknown, onProgress?: (event: SkipprChatPr
   }
   const o = line as Record<string, unknown>;
   const type = typeof o.type === "string" ? o.type : "";
+  if (type === "phase") {
+    const phase = stringField(o, "phase");
+    if (!phase) {
+      return;
+    }
+    const fromPhase = stringField(o, "from_phase");
+    onProgress({
+      kind: "phase",
+      status: "running",
+      label: phase,
+      phase,
+      detail: fromPhase && fromPhase !== phase ? `from ${fromPhase}` : undefined
+    });
+    return;
+  }
   if (type === "tool_start" || type === "tool_end") {
     const rawName = stringField(o, "clean_name") || stringField(o, "name") || "Tool";
-    const statusText = stringField(o, "status");
+    const statusText = stringField(o, "status")?.toLowerCase();
     const failed = type === "tool_end" && statusText === "failed";
     const detail = failed ? stringField(o, "error") : undefined;
     onProgress({
       kind: "tool",
       status: type === "tool_start" ? "running" : failed ? "failed" : "completed",
       label: rawName,
+      id: scalarStringField(o, "tool_id"),
+      phase: stringField(o, "phase"),
       detail
     });
     return;
   }
   if (type === "llm_start" || type === "llm_end") {
     const model = stringField(o, "model") || "LLM";
-    const statusText = stringField(o, "status");
+    const statusText = stringField(o, "status")?.toLowerCase();
+    const failed = type === "llm_end" && statusText === "failed";
     onProgress({
       kind: "llm",
-      status: type === "llm_start" ? "running" : statusText === "failed" ? "failed" : "completed",
-      label: model
+      status: type === "llm_start" ? "running" : failed ? "failed" : "completed",
+      label: model,
+      id: scalarStringField(o, "call_id"),
+      phase: stringField(o, "phase"),
+      detail: failed ? stringField(o, "error") : undefined
     });
     return;
   }
   if (type === "final") {
     onProgress({ kind: "final", status: "completed", label: "Final answer" });
+    return;
+  }
+  if (type === "await_approval" || type === "awaitApproval") {
+    onProgress({
+      kind: "approval",
+      status: "running",
+      label: "Approval required",
+      detail: stringField(o, "prompt")
+    });
     return;
   }
   if (type === "ChatSummary") {
@@ -299,6 +333,20 @@ function stringField(value: unknown, key: string): string | undefined {
   }
   const field = (value as Record<string, unknown>)[key];
   return typeof field === "string" && field.trim() ? field.trim() : undefined;
+}
+
+function scalarStringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const field = (value as Record<string, unknown>)[key];
+  if (typeof field === "string") {
+    return field.trim() || undefined;
+  }
+  if (typeof field === "number" || typeof field === "boolean") {
+    return String(field);
+  }
+  return undefined;
 }
 
 function stringFieldFromObject(value: unknown, keys: readonly string[]): string | undefined {
@@ -331,6 +379,10 @@ function assistantSnippetFromChatJsonlObject(line: unknown): string | undefined 
   if (o.type === "assistant" || o.type === "answer" || o.type === "message") {
     return stringFieldFromObject(o, ["markdown", "display", "answer", "text"]);
   }
+  if (o.type === "await_approval" || o.type === "awaitApproval") {
+    const prompt = stringField(o, "prompt") || "Please approve or reject.";
+    return `Approval required: ${prompt}`;
+  }
   return undefined;
 }
 
@@ -340,18 +392,20 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
   threadId?: string;
   failureSummary?: string;
   assistantMarkdown: string;
+  approvalPrompt?: string;
 } {
   let ok = false;
   let sawSummary = false;
   let threadId: string | undefined;
   let failureSummary: string | undefined;
+  let approvalPrompt: string | undefined;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line || typeof line !== "object") {
       continue;
     }
     const o = line as Record<string, unknown>;
-    if (o.type === "ChatSummary") {
+    if (o.type === "ChatSummary" && !sawSummary) {
       sawSummary = true;
       ok = Boolean(o.ok);
       if (typeof o.thread_id === "string" && o.thread_id.trim()) {
@@ -363,7 +417,12 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
       if (!failureSummary && typeof o.bootstrap_error === "string" && o.bootstrap_error.trim()) {
         failureSummary = o.bootstrap_error.trim();
       }
-      break;
+    }
+    if ((o.type === "await_approval" || o.type === "awaitApproval") && !approvalPrompt) {
+      approvalPrompt = stringField(o, "prompt") || "Please approve or reject.";
+      if (typeof o.thread_id === "string" && o.thread_id.trim()) {
+        threadId = o.thread_id.trim();
+      }
     }
   }
   if (!sawSummary && lines.length > 0) {
@@ -377,7 +436,7 @@ export function parseSkipprChatResultFromJsonl(lines: unknown[]): {
     }
   }
   const assistantMarkdown = parts.join("\n\n").trim();
-  return { ok, threadId, failureSummary, assistantMarkdown };
+  return { ok, threadId, failureSummary, assistantMarkdown, approvalPrompt };
 }
 
 export async function runSkipprJson<T>(

@@ -9,9 +9,11 @@ type RunTranscriptPayload = {
 };
 
 type ChatProgressEvent = {
-  kind: "llm" | "tool" | "final" | "summary";
+  kind: "phase" | "llm" | "tool" | "final" | "summary" | "approval";
   status: "running" | "completed" | "failed";
   label: string;
+  id?: string;
+  phase?: string;
   detail?: string;
 };
 
@@ -27,9 +29,43 @@ const chatAttachmentMaxFiles = 8;
 
 function renderChatProgress(event: ChatProgressEvent): string {
   const status = event.status === "running" ? "running" : event.status === "completed" ? "complete" : "failed";
-  const prefix = event.kind === "tool" ? "Tool" : event.kind === "llm" ? "LLM" : "Skippr";
+  const prefix = event.kind === "tool" ? "Tool" : event.kind === "llm" ? "LLM" : event.kind === "phase" ? "Phase" : event.kind === "approval" ? "Approval" : "Skippr";
+  const context = event.phase && event.kind !== "phase" ? ` (${event.phase})` : "";
   const detail = event.detail ? `: ${event.detail}` : "";
-  return `${prefix} ${status}: ${event.label}${detail}`;
+  return `${prefix} ${status}: ${event.label}${context}${detail}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function approvalCardMarkdown(prompt: string): vscode.MarkdownString {
+  const md = new vscode.MarkdownString(
+    `<div style="border:1px solid #3c3c3c;background:#111;padding:8px;border-radius:0;color:#d4d4d4;font-size:12px;line-height:1.35">
+<div style="font-weight:600;color:#fff;margin-bottom:4px">Approval required</div>
+<div>${escapeHtml(prompt)}</div>
+</div>`
+  );
+  md.supportHtml = true;
+  return md;
+}
+
+function renderApprovalCard(response: vscode.ChatResponseStream, approvalId: string, prompt: string): void {
+  response.markdown(approvalCardMarkdown(prompt));
+  response.button({
+    command: "skippr.workbench.internal.chatApprovalDecision",
+    title: "Approve",
+    arguments: [{ approvalId, approved: true }]
+  });
+  response.button({
+    command: "skippr.workbench.internal.chatApprovalDecision",
+    title: "Reject",
+    arguments: [{ approvalId, approved: false }]
+  });
 }
 
 function isSecretLikePath(fsPath: string): boolean {
@@ -60,11 +96,28 @@ function fileReferenceUri(value: unknown): vscode.Uri | undefined {
   return undefined;
 }
 
-async function promptWithAttachedFiles(request: vscode.ChatRequest): Promise<string> {
-  const attachments: string[] = [];
+type ChatContextFile = {
+  name: string;
+  path: string;
+  uri: string;
+  external: boolean;
+  large?: boolean;
+};
+
+type ChatContextEnvelope = {
+  user: string;
+  execution_surface: "ide_chat";
+  context?: {
+    files?: ChatContextFile[];
+    skipped_files?: string[];
+  };
+};
+
+async function chatContextEnvelopeForRequest(request: vscode.ChatRequest): Promise<string> {
+  const files: ChatContextFile[] = [];
   const skipped: string[] = [];
   for (const ref of request.references ?? []) {
-    if (attachments.length >= chatAttachmentMaxFiles) {
+    if (files.length >= chatAttachmentMaxFiles) {
       skipped.push("additional files");
       break;
     }
@@ -81,17 +134,30 @@ async function promptWithAttachedFiles(request: vscode.ChatRequest): Promise<str
       if (stat.type !== vscode.FileType.File) {
         continue;
       }
-      const sizeNote = stat.size > chatAttachmentMaxBytes ? " (large; prefer retrieval)" : "";
-      attachments.push(`- ${uri.fsPath}${sizeNote}`);
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      const rel = folder ? path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/") : uri.fsPath;
+      files.push({
+        name: path.basename(uri.fsPath),
+        path: folder ? `./${rel}` : uri.fsPath,
+        uri: uri.toString(),
+        external: !folder,
+        large: stat.size > chatAttachmentMaxBytes || undefined
+      });
     } catch {
       skipped.push(path.basename(uri.fsPath));
     }
   }
-  if (!attachments.length && !skipped.length) {
-    return request.prompt.trim();
+  const envelope: ChatContextEnvelope = { user: request.prompt.trim(), execution_surface: "ide_chat" };
+  if (files.length || skipped.length) {
+    envelope.context = {};
+    if (files.length) {
+      envelope.context.files = files;
+    }
+    if (skipped.length) {
+      envelope.context.skipped_files = skipped;
+    }
   }
-  const skippedText = skipped.length ? `\n\nSkipped attachments: ${skipped.join(", ")}` : "";
-  return `${request.prompt.trim()}\n\nAttached files:\n${attachments.join("\n")}\n\nUse retrieval for attached files before reading full files: call vect_query with scope "doc" and query_text containing the user's question plus the attached path(s). Treat vector hits as confident only when they clearly reference the attached path and answer-relevant text. If retrieval is empty, ambiguous, or low-confidence, then use file(get) on the attached file path and answer from the file content.${skippedText}`;
+  return JSON.stringify(envelope);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -118,6 +184,10 @@ export function activate(context: vscode.ExtensionContext): void {
       async (payload: ChatProgressPayload) => {
         const response = activeChatProgress.get(payload.requestId);
         if (response) {
+          if (payload.event.kind === "approval" && payload.event.status === "running" && payload.event.id && payload.event.detail) {
+            renderApprovalCard(response, payload.event.id, payload.event.detail);
+            return;
+          }
           response.progress(renderChatProgress(payload.event));
         }
       }
@@ -139,7 +209,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.authentication.getSession("skippr", ["account"], { createIfNone: true });
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       activeChatProgress.set(requestId, response);
-      const prompt = await promptWithAttachedFiles(request);
+      const prompt = await chatContextEnvelopeForRequest(request);
       const text = await (async () => {
         try {
           return await vscode.commands.executeCommand<string>("skippr.workbench.internal.runChatCli", {

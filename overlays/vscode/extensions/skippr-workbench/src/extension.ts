@@ -63,6 +63,8 @@ const runExtraArgsKey = "skippr.run.extraArgs";
 const vectorOnOpenStateKey = "skippr.vector.onOpen.lastRun.v1";
 const chatAttachmentMaxBytes = 128 * 1024;
 const chatAttachmentMaxFiles = 8;
+type SkipprChatApprovalDecision = { approvalId?: string; approved?: boolean };
+const pendingSkipprChatApprovals = new Map<string, (approved: boolean) => void>();
 const vectorOnOpenExcludeGlobs = [
   ".git/**",
   ".env",
@@ -1124,12 +1126,47 @@ async function resolveChatRunTarget(output: vscode.LogOutputChannel): Promise<{ 
   return pipeline ? { pipeline, configPath } : undefined;
 }
 
+function approvalCardMarkdown(prompt: string): vscode.MarkdownString {
+  const md = new vscode.MarkdownString(
+    `<div style="border:1px solid #3c3c3c;background:#111;padding:8px;border-radius:0;color:#d4d4d4;font-size:12px;line-height:1.35">
+<div style="font-weight:600;color:#fff;margin-bottom:4px">Approval required</div>
+<div>${escapeHtml(prompt)}</div>
+</div>`
+  );
+  md.supportHtml = true;
+  return md;
+}
+
+function renderApprovalCard(response: vscode.ChatResponseStream, approvalId: string, prompt: string): void {
+  response.markdown(approvalCardMarkdown(prompt));
+  response.button({
+    command: "skippr.workbench.internal.chatApprovalDecision",
+    title: "Approve",
+    arguments: [{ approvalId, approved: true }]
+  });
+  response.button({
+    command: "skippr.workbench.internal.chatApprovalDecision",
+    title: "Reject",
+    arguments: [{ approvalId, approved: false }]
+  });
+}
+
+function waitForApprovalDecision(approvalId: string): Promise<boolean> {
+  return new Promise(resolve => {
+    pendingSkipprChatApprovals.set(approvalId, approved => {
+      pendingSkipprChatApprovals.delete(approvalId);
+      resolve(approved);
+    });
+  });
+}
+
 async function runSkipprChatCli(
   modeId: "ask" | "plan",
   prompt: string,
   output: vscode.LogOutputChannel,
   statusItem: vscode.StatusBarItem,
-  onProgress?: (event: SkipprChatProgressEvent) => void
+  onProgress?: (event: SkipprChatProgressEvent) => void,
+  canRenderApproval = false
 ): Promise<string> {
   const mode = skipprChatModeFor(modeId);
   const target = await resolveChatRunTarget(output);
@@ -1158,6 +1195,59 @@ async function runSkipprChatCli(
     onProgress
   );
   const parsed = parseSkipprChatResultFromJsonl(jsonl.lines);
+  if (parsed.approvalPrompt && parsed.threadId) {
+    const approvalId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    if (canRenderApproval) {
+      onProgress?.({
+        kind: "approval",
+        status: "running",
+        label: "Approval required",
+        id: approvalId,
+        detail: parsed.approvalPrompt
+      });
+    }
+    const approved = canRenderApproval ? await waitForApprovalDecision(approvalId) : false;
+    onProgress?.({
+      kind: "approval",
+      status: approved ? "completed" : "failed",
+      label: approved ? "Approved" : "Rejected",
+      detail: parsed.approvalPrompt
+    });
+    const approvalMessage = JSON.stringify({
+      user: approved ? "Approval result: approved" : "Approval result: rejected",
+      execution_surface: "ide_chat",
+      context: {
+        approval: {
+          approved,
+          prompt: parsed.approvalPrompt
+        }
+      }
+    });
+    const resumed = await runSkipprChatJsonl(
+      cliPath,
+      target.configPath,
+      target.pipeline,
+      modeId === "ask" ? "ask" : "plan",
+      approvalMessage,
+      getConfigCwd(target.configPath),
+      output,
+      skipprSpawnEnv(target.configPath, target.pipeline),
+      onProgress,
+      parsed.threadId
+    );
+    const resumedParsed = parseSkipprChatResultFromJsonl(resumed.lines);
+    const resumedOk = resumed.code === 0 && !resumed.signal && resumedParsed.ok;
+    setRunStatusIdle(statusItem);
+    if (!resumedOk) {
+      const stderrTail = resumed.stderr.trim().split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
+      const detail = resumedParsed.failureSummary || stderrTail || `exit code ${resumed.code ?? "unknown"}`;
+      throw new Error(`Skippr ${mode.label} approval resume failed: ${detail}`);
+    }
+    return (
+      resumedParsed.assistantMarkdown ||
+      (resumedParsed.threadId ? `Chat turn completed (thread \`${resumedParsed.threadId}\`).` : `${mode.label} completed.`)
+    );
+  }
   const chatOk = jsonl.code === 0 && !jsonl.signal && parsed.ok;
   finishRunStatusPanel({
     headline,
@@ -1181,9 +1271,10 @@ async function runSkipprChatCli(
 
 function renderSkipprChatProgress(event: SkipprChatProgressEvent): string {
   const status = event.status === "running" ? "Running" : event.status === "completed" ? "Complete" : "Failed";
-  const prefix = event.kind === "tool" ? "Tool" : event.kind === "llm" ? "LLM" : "Skippr";
+  const prefix = event.kind === "tool" ? "Tool" : event.kind === "llm" ? "LLM" : event.kind === "phase" ? "Phase" : event.kind === "approval" ? "Approval" : "Skippr";
+  const context = event.phase && event.kind !== "phase" ? ` (${event.phase})` : "";
   const detail = event.detail ? `: ${event.detail}` : "";
-  return `${prefix} ${status.toLowerCase()}: ${event.label}${detail}`;
+  return `${prefix} ${status.toLowerCase()}: ${event.label}${context}${detail}`;
 }
 
 function forwardSkipprChatProgress(commandId: unknown, requestId: unknown, event: SkipprChatProgressEvent): void {
@@ -1221,11 +1312,28 @@ function fileReferenceUri(value: unknown): vscode.Uri | undefined {
   return undefined;
 }
 
-async function attachmentMarkdownForRequest(request: vscode.ChatRequest): Promise<string> {
-  const attachments: string[] = [];
+type ChatContextFile = {
+  name: string;
+  path: string;
+  uri: string;
+  external: boolean;
+  large?: boolean;
+};
+
+type ChatContextEnvelope = {
+  user: string;
+  execution_surface: "ide_chat";
+  context?: {
+    files?: ChatContextFile[];
+    skipped_files?: string[];
+  };
+};
+
+async function chatContextEnvelopeForRequest(request: vscode.ChatRequest): Promise<string> {
+  const files: ChatContextFile[] = [];
   const skipped: string[] = [];
   for (const ref of request.references ?? []) {
-    if (attachments.length >= chatAttachmentMaxFiles) {
+    if (files.length >= chatAttachmentMaxFiles) {
       skipped.push("additional files");
       break;
     }
@@ -1242,22 +1350,30 @@ async function attachmentMarkdownForRequest(request: vscode.ChatRequest): Promis
       if (stat.type !== vscode.FileType.File) {
         continue;
       }
-      const sizeNote = stat.size > chatAttachmentMaxBytes ? " (large; prefer retrieval)" : "";
-      attachments.push(`- ${uri.fsPath}${sizeNote}`);
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      const rel = folder ? path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/") : uri.fsPath;
+      files.push({
+        name: path.basename(uri.fsPath),
+        path: folder ? `./${rel}` : uri.fsPath,
+        uri: uri.toString(),
+        external: !folder,
+        large: stat.size > chatAttachmentMaxBytes || undefined
+      });
     } catch {
       skipped.push(path.basename(uri.fsPath));
     }
   }
-  if (!attachments.length && !skipped.length) {
-    return "";
+  const envelope: ChatContextEnvelope = { user: request.prompt.trim(), execution_surface: "ide_chat" };
+  if (files.length || skipped.length) {
+    envelope.context = {};
+    if (files.length) {
+      envelope.context.files = files;
+    }
+    if (skipped.length) {
+      envelope.context.skipped_files = skipped;
+    }
   }
-  const skippedText = skipped.length ? `\n\nSkipped attachments: ${skipped.join(", ")}` : "";
-  return `\n\nAttached files:\n${attachments.join("\n")}\n\nUse retrieval for attached files before reading full files: call vect_query with scope "doc" and query_text containing the user's question plus the attached path(s). Treat vector hits as confident only when they clearly reference the attached path and answer-relevant text. If retrieval is empty, ambiguous, or low-confidence, then use file(get) on the attached file path and answer from the file content.${skippedText}`;
-}
-
-async function promptWithAttachedFiles(request: vscode.ChatRequest): Promise<string> {
-  const attachmentContext = await attachmentMarkdownForRequest(request);
-  return `${request.prompt.trim()}${attachmentContext}`;
+  return JSON.stringify(envelope);
 }
 
 async function ensureChatSession(
@@ -1299,10 +1415,14 @@ function registerSkipprChatParticipant(
     }
 
     await ensureChatSession(context, authStatusItem, authProvider);
-    const prompt = await promptWithAttachedFiles(request);
+    const prompt = await chatContextEnvelopeForRequest(request);
     const text = await runSkipprChatCli(command, prompt, output, statusItem, event => {
+      if (event.kind === "approval" && event.status === "running" && event.id && event.detail) {
+        renderApprovalCard(response, event.id, event.detail);
+        return;
+      }
       response.progress(renderSkipprChatProgress(event));
-    });
+    }, true);
     response.markdown(text);
     return { metadata: { command, mode: command } };
   });
@@ -2231,7 +2351,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await ensureChatSession(context, statusItem, authProvider);
         return await runSkipprChatCli(args.mode, args.prompt, output, runStatusItem, event => {
           forwardSkipprChatProgress(args.progressCommand, args.progressRequestId, event);
-        });
+        }, Boolean(args.progressCommand && args.progressRequestId));
+      }
+    ),
+    vscode.commands.registerCommand(
+      "skippr.workbench.internal.chatApprovalDecision",
+      async (args?: SkipprChatApprovalDecision) => {
+        const approvalId = typeof args?.approvalId === "string" ? args.approvalId : "";
+        const resolve = approvalId ? pendingSkipprChatApprovals.get(approvalId) : undefined;
+        if (resolve) {
+          resolve(args?.approved === true);
+        }
       }
     )
   );
