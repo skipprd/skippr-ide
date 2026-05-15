@@ -41,6 +41,7 @@ export function workspaceFolderForConfigPath(configFsPath: string | undefined): 
 
 /**
  * Build `process.env` for Skippr spawns: `process.env`, then `skippr.env`, then `skippr.pipelineEnv[pipeline]`.
+ * The Skippr CLI separately loads `.env` / `.env.local` beside `skippr.yml` before resolving `${VAR}` in the manifest.
  */
 export function mergeSkipprSpawnEnv(
   base: NodeJS.ProcessEnv,

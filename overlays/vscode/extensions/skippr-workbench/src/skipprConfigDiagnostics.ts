@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import * as vscode from "vscode";
 import { isSkipprConfigDocument, listPipelineDefinitionLines } from "./skipprPipelineCodeLens";
+import { effectiveEnvForSkipprConfig } from "./skipprDotEnv";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
 import { buildCliCommand, cliCommandCwd, formatCliCommand } from "./skipprRunner";
 import type { SkipprDoctorResult } from "./types";
@@ -44,6 +45,9 @@ export function scanUnresolvedInterpolationDiagnostics(
   const diags: vscode.Diagnostic[] = [];
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx += 1) {
     const line = lines[lineIdx];
+    if (/^\s*#/.test(line)) {
+      continue;
+    }
     INTERP_REGEX.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = INTERP_REGEX.exec(line)) !== null) {
@@ -57,7 +61,7 @@ export function scanUnresolvedInterpolationDiagnostics(
       diags.push(
         new vscode.Diagnostic(
           range,
-          `Environment variable "${varName}" is not set (process env, skippr.env, or skippr.pipelineEnv for a pipeline in this file).`,
+          `Environment variable "${varName}" is not set (process env, .env next to skippr.yml, skippr.env, or skippr.pipelineEnv for a pipeline in this file).`,
           vscode.DiagnosticSeverity.Warning
         )
       );
@@ -68,12 +72,15 @@ export function scanUnresolvedInterpolationDiagnostics(
 
 function doctorDiagnosticsForChecks(checks: SkipprDoctorResult["checks"] | undefined): vscode.Diagnostic[] {
   const failed = checks?.filter((c) => !c.ok) ?? [];
-  if (!failed.length) {
-    return [];
-  }
   const firstLine = new vscode.Range(0, 0, 0, 1);
-  const msg = failed.map((c) => `Skippr doctor: ${c.message}`).join("\n");
-  return [new vscode.Diagnostic(firstLine, msg, vscode.DiagnosticSeverity.Warning)];
+  return failed.map(
+    (c) =>
+      new vscode.Diagnostic(
+        firstLine,
+        `Skippr doctor: ${c.message}`,
+        vscode.DiagnosticSeverity.Warning
+      )
+  );
 }
 
 function runDoctorJson(
@@ -136,7 +143,7 @@ export function registerSkipprConfigDiagnostics(context: vscode.ExtensionContext
           }
           const folder = workspaceFolderForConfigPath(configPath);
           const cwd = configPath ? path.dirname(configPath) : folder?.fsPath ?? "";
-          const env = mergeSkipprSpawnEnv(process.env, folder, undefined);
+          const env = mergeSkipprSpawnEnv(effectiveEnvForSkipprConfig(configPath, process.env), folder, undefined);
           const { code, json } = await runDoctorJson(cliPath, configPath, cwd, env);
           if (code !== 0 || !json?.checks) {
             return;
@@ -157,7 +164,8 @@ export function registerSkipprConfigDiagnostics(context: vscode.ExtensionContext
       return;
     }
     const folder = folderOf(doc);
-    const interp = scanUnresolvedInterpolationDiagnostics(doc.getText(), folder, process.env);
+    const env = effectiveEnvForSkipprConfig(doc.uri.fsPath, process.env);
+    const interp = scanUnresolvedInterpolationDiagnostics(doc.getText(), folder, env);
     const cached = doctorCache.get(doc.uri.fsPath);
     const fromDoctor = cached ? doctorDiagnosticsForChecks(cached.checks) : [];
     collection.set(doc.uri, [...interp, ...fromDoctor]);
@@ -185,6 +193,18 @@ export function registerSkipprConfigDiagnostics(context: vscode.ExtensionContext
           refreshDocument(doc, false);
         }
       }
+    }),
+    vscode.workspace.onDidSaveTextDocument((d) => {
+      const base = path.basename(d.uri.fsPath);
+      if (base !== ".env" && base !== ".env.local") {
+        return;
+      }
+      const dir = path.dirname(d.uri.fsPath);
+      for (const doc of vscode.workspace.textDocuments) {
+        if (isSkipprConfigDocument(doc) && path.dirname(doc.uri.fsPath) === dir) {
+          refreshDocument(doc, false);
+        }
+      }
     })
   );
 
@@ -202,7 +222,7 @@ export function registerSkipprConfigDiagnostics(context: vscode.ExtensionContext
         }
         const folder = folderOf(doc);
         const cwd = path.dirname(doc.uri.fsPath);
-        const env = mergeSkipprSpawnEnv(process.env, folder, undefined);
+        const env = mergeSkipprSpawnEnv(effectiveEnvForSkipprConfig(doc.uri.fsPath, process.env), folder, undefined);
         host.output.info(`$ ${formatCliCommand(cliPath, ["--config", doc.uri.fsPath, "doctor", "--output", "json"])}`);
         const { code, json } = await runDoctorJson(cliPath, doc.uri.fsPath, cwd, env);
         if (code === 0 && json?.checks) {

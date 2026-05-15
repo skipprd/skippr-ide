@@ -487,7 +487,7 @@
           "type": "object",
           "default": {},
           "scope": "resource",
-          "markdownDescription": "Extra environment variables merged into **every** Skippr CLI spawn for this workspace folder (after `process.env`). Use for values shared across pipelines (e.g. `SKIPPR_HOME`). Per-pipeline overrides: `skippr.pipelineEnv`.",
+          "markdownDescription": "Extra environment variables merged into **every** Skippr CLI spawn for this workspace folder (after `process.env` and after `.env` / `.env.local` beside `skippr.yml`). Use for values shared across pipelines (e.g. `SKIPPR_HOME`). Per-pipeline overrides: `skippr.pipelineEnv`.",
           "additionalProperties": {
             "type": "string"
           }
@@ -496,7 +496,7 @@
           "type": "object",
           "default": {},
           "scope": "resource",
-          "markdownDescription": "Map of **pipeline name** → `{ VAR: value }` merged into Skippr spawns when that pipeline is active (after `skippr.env`). Keys must match pipeline names in `skippr.yml`. Set via **Skippr: Edit Pipeline Environment Variables** or `.vscode/settings.json`.",
+          "markdownDescription": "Map of **pipeline name** → `{ VAR: value }` merged into Skippr spawns when that pipeline is active (after `skippr.env` and repo `.env` files). Keys must match pipeline names in `skippr.yml`. Set via **Skippr: Edit Pipeline Environment Variables** or `.vscode/settings.json`.",
           "additionalProperties": {
             "type": "object",
             "additionalProperties": {
