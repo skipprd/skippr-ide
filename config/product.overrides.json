@@ -48,9 +48,9 @@
         "name": "Skippr Enterprise"
       }
     },
-    "providerExtensionId": "skippr.auth-provider",
+    "providerExtensionId": "skippr.skippr-workbench",
     "providerUriSetting": "skippr.auth.baseUrl",
-    "providerScopes": [["openid"], ["profile"], ["email"]],
+    "providerScopes": [["account"]],
     "entitlementUrl": "https://auth.skippr.io/auth/session",
     "entitlementSignupLimitedUrl": "https://auth.skippr.io/auth/session",
     "tokenEntitlementUrl": "https://auth.skippr.io/auth/session",

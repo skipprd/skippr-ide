@@ -50,6 +50,10 @@
     ],
     "commands": [
       {
+        "command": "skippr.auth.refresh",
+        "title": "Skippr: Refresh auth token"
+      },
+      {
         "command": "skippr.configureConnection",
         "title": "Skippr: Configure Connection"
       },

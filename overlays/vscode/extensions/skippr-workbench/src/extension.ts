@@ -33,6 +33,8 @@ import {
   SkipprPanelPayload,
   SkipprRunEvent
 } from "./types";
+import { clearSkipprCliCredentialsFile, writeSkipprCliCredentialsFile } from "./skipprCliCredentials";
+import { runEmailOtpAuthQuickInput } from "./skipprOverlayUi";
 import { renderSkipprRunStatusPanelHtml } from "./skipprRunStatusPanelHtml";
 
 const SKIPPR_RUN_STATUS_VIEW_ID = "skippr.runStatus";
@@ -1552,6 +1554,15 @@ async function saveAuthSession(context: vscode.ExtensionContext, session: AuthSe
   await context.secrets.store(authTokenKey, session.token);
   await context.secrets.store(authRefreshTokenKey, session.refreshToken);
   await context.secrets.store(authEmailKey, session.email);
+  const written = await writeSkipprCliCredentialsFile({
+    access_token: session.token,
+    refresh_token: session.refreshToken
+  });
+  if (!written.ok) {
+    vscode.window.showWarningMessage(
+      `Skippr could not sync CLI credentials to ~/.skippr/credentials.json: ${written.message}`
+    );
+  }
 }
 
 async function readAuthSession(context: vscode.ExtensionContext): Promise<AuthSession | undefined> {
@@ -1568,6 +1579,7 @@ async function clearAuthSession(context: vscode.ExtensionContext): Promise<void>
   await context.secrets.delete(authTokenKey);
   await context.secrets.delete(authRefreshTokenKey);
   await context.secrets.delete(authEmailKey);
+  await clearSkipprCliCredentialsFile();
 }
 
 async function apiRequest(path: string, method: string, body?: unknown, token?: string): Promise<Response> {
@@ -1620,377 +1632,23 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-type AuthFlowState = "email" | "code" | "loading" | "success";
-type AuthFlowLayout = "standalone" | "welcome";
-
-function createAuthFlowHtml(layout: AuthFlowLayout, state: AuthFlowState, email = "", error = ""): string {
-  const safeEmail = escapeHtml(email);
-  const safeError = escapeHtml(error);
-  const stepLabel = state === "code" ? "Check your inbox" : state === "success" ? "Signed in" : "Welcome back";
-  const body =
-    state === "success"
-      ? `<div class="success">You are signed in as <strong>${safeEmail}</strong>.</div>
-         <button id="close" class="primary">Continue</button>`
-      : state === "code"
-        ? `<p class="muted">We sent a 6-digit verification code to <strong>${safeEmail}</strong>.</p>
-           <label for="code">Verification code</label>
-           <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="123456" autofocus />
-           <button id="verify" class="primary">Verify and sign in</button>
-           <button id="back" class="secondary">Use a different email</button>`
-        : state === "loading"
-          ? `<div class="loader"></div><p class="muted">Contacting Skippr Auth...</p>`
-          : `<p class="muted">Sign in with your email. We'll send you a short verification code.</p>
-             <label for="email">Email address</label>
-             <input id="email" type="email" autocomplete="email" placeholder="you@example.com" value="${safeEmail}" autofocus />
-             <button id="send" class="primary">Send verification code</button>`;
-
-  const welcomeIntro =
-    layout === "welcome"
-      ? `<section class="welcome-blurb">
-    <div class="hero">Skippr IDE</div>
-    <div class="subtitle">Build reliable data platforms with Skippr Data Agent and Skippr Data Engineer Agent workflows.</div>
-    <ul>
-      <li>Discover and profile data sources</li>
-      <li>Sync data pipelines and monitor changes</li>
-      <li>Author and validate models with lineage context</li>
-      <li>Use Skippr Data Agent flows to plan and deliver data engineering work</li>
-    </ul>
-  </section>`
-      : "";
-
-  const welcomeFooter =
-    layout === "welcome"
-      ? `<section class="footer-actions">
-    <button id="discover" class="secondary wide">Open Discover</button>
-    <button id="continue" class="secondary wide">Continue Without Login</button>
-  </section>`
-      : "";
-
-  const bodyLayoutClass = layout === "welcome" ? "welcome-auth" : "standalone-auth";
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      color: var(--vscode-foreground);
-      background:
-        radial-gradient(circle at top left, rgba(84, 160, 255, 0.18), transparent 32rem),
-        var(--vscode-editor-background);
-      font-family: var(--vscode-font-family);
-    }
-    body.standalone-auth {
-      display: grid;
-      place-items: center;
-    }
-    body.welcome-auth {
-      padding: 28px 20px 40px;
-    }
-    .stack {
-      width: min(520px, calc(100vw - 40px));
-      margin: 0 auto;
-      display: flex;
-      flex-direction: column;
-      gap: 22px;
-    }
-    .welcome-blurb .hero { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
-    .welcome-blurb .subtitle { color: var(--vscode-descriptionForeground); margin-bottom: 16px; line-height: 1.5; }
-    .welcome-blurb ul { margin: 0; padding-left: 20px; line-height: 1.7; }
-    .card {
-      width: 100%;
-      max-width: 440px;
-      margin: 0 auto;
-      padding: 28px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 18px;
-      background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-sideBar-background));
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
-    }
-    .mark {
-      width: 42px;
-      height: 42px;
-      display: grid;
-      place-items: center;
-      border-radius: 12px;
-      margin-bottom: 18px;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      font-weight: 700;
-      letter-spacing: 0.02em;
-    }
-    h1 { margin: 0 0 6px; font-size: 24px; }
-    .eyebrow {
-      color: var(--vscode-descriptionForeground);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      margin-bottom: 6px;
-    }
-    .muted { color: var(--vscode-descriptionForeground); line-height: 1.5; }
-    label { display: block; margin-top: 22px; margin-bottom: 8px; font-weight: 600; }
-    input {
-      width: 100%;
-      padding: 12px 13px;
-      border-radius: 10px;
-      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-      background: var(--vscode-input-background);
-      color: var(--vscode-input-foreground);
-      font: inherit;
-      outline: none;
-    }
-    input:focus {
-      border-color: var(--vscode-focusBorder);
-      box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder) 30%, transparent);
-    }
-    button {
-      width: 100%;
-      margin-top: 16px;
-      padding: 11px 14px;
-      border: 0;
-      border-radius: 10px;
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    button.wide { width: 100%; }
-    .primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-    .primary:hover { background: var(--vscode-button-hoverBackground); }
-    .secondary {
-      color: var(--vscode-foreground);
-      background: var(--vscode-button-secondaryBackground);
-    }
-    .error {
-      margin-top: 16px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      color: var(--vscode-errorForeground);
-      background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
-    }
-    .success {
-      margin: 22px 0 8px;
-      padding: 14px;
-      border-radius: 12px;
-      background: color-mix(in srgb, var(--vscode-testing-iconPassed) 16%, transparent);
-    }
-    .loader {
-      width: 32px;
-      height: 32px;
-      border: 3px solid color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
-      border-top-color: var(--vscode-button-background);
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      margin: 24px 0 10px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .footer-actions {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      width: 100%;
-      max-width: 440px;
-      margin: 0 auto;
-    }
-  </style>
-</head>
-<body class="${bodyLayoutClass}">
-  <div class="stack">
-    ${welcomeIntro}
-    <main class="card">
-      <div class="mark">S</div>
-      <div class="eyebrow">${stepLabel}</div>
-      <h1>Sign in to Skippr</h1>
-      ${body}
-      ${safeError ? `<div class="error">${safeError}</div>` : ""}
-    </main>
-    ${welcomeFooter}
-  </div>
-  <script>
-    const vscode = acquireVsCodeApi();
-    const emailEl = document.getElementById("email");
-    const codeEl = document.getElementById("code");
-    document.getElementById("send")?.addEventListener("click", () => vscode.postMessage({ command: "email", email: emailEl?.value ?? "" }));
-    document.getElementById("verify")?.addEventListener("click", () => vscode.postMessage({ command: "code", code: codeEl?.value ?? "" }));
-    document.getElementById("back")?.addEventListener("click", () => vscode.postMessage({ command: "back" }));
-    document.getElementById("close")?.addEventListener("click", () => vscode.postMessage({ command: "close" }));
-    document.getElementById("discover")?.addEventListener("click", () => vscode.postMessage({ command: "openDiscover" }));
-    document.getElementById("continue")?.addEventListener("click", () => vscode.postMessage({ command: "skipWelcome" }));
-    emailEl?.addEventListener("keydown", event => { if (event.key === "Enter") document.getElementById("send")?.click(); });
-    codeEl?.addEventListener("keydown", event => { if (event.key === "Enter") document.getElementById("verify")?.click(); });
-  </script>
-</body>
-</html>`;
-}
-
-async function runEmailOtpAuthWebview(
-  panel: vscode.WebviewPanel,
-  context: vscode.ExtensionContext,
-  statusItem: vscode.StatusBarItem,
-  layout: AuthFlowLayout
-): Promise<AuthSession | undefined> {
-  let email = "";
-  let settled = false;
-  const paint = (nextState: AuthFlowState, em = email, err = "") => {
-    panel.webview.html = createAuthFlowHtml(layout, nextState, em, err);
-  };
-  paint("email");
-
-  return new Promise((resolve) => {
-    const finish = (value: AuthSession | undefined) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(value);
-    };
-
-    panel.onDidDispose(() => finish(undefined));
-
-    panel.webview.onDidReceiveMessage(async (message: { command: string; email?: string; code?: string }) => {
-      if (message.command === "openDiscover") {
-        await vscode.commands.executeCommand("skippr.open.discover");
-        panel.dispose();
-        finish(undefined);
-        return;
-      }
-      if (message.command === "skipWelcome") {
-        panel.dispose();
-        finish(undefined);
-        return;
-      }
-      if (message.command === "close") {
-        panel.dispose();
-        if (!settled) {
-          finish(undefined);
-        }
-        return;
-      }
-      if (message.command === "back") {
-        paint("email", email);
-        return;
-      }
-      if (message.command === "email") {
-        email = (message.email ?? "").trim();
-        if (!email) {
-          paint("email", email, "Enter your email address.");
-          return;
-        }
-        paint("loading", email);
-        const signInResponse = await apiRequest("/auth/sign-in", "POST", { email });
-        paint(
-          signInResponse.ok ? "code" : "email",
-          email,
-          signInResponse.ok ? "" : "We couldn't start sign-in. Check the email and try again."
-        );
-        return;
-      }
-      if (message.command === "code") {
-        const code = (message.code ?? "").trim();
-        if (!code) {
-          paint("code", email, "Enter the verification code.");
-          return;
-        }
-        paint("loading", email);
-        const confirmResponse = await apiRequest("/auth/confirm", "POST", { email, code });
-        if (!confirmResponse.ok) {
-          paint("code", email, "That code is invalid or expired.");
-          return;
-        }
-        const tokenPayload = (await confirmResponse.json()) as { token: string; refresh_token: string };
-        const session: AuthSession = {
-          token: tokenPayload.token,
-          refreshToken: tokenPayload.refresh_token,
-          email
-        };
-        await saveAuthSession(context, session);
-        applySignedInAuthStatusBar(statusItem, email);
-        paint("success", email);
-        finish(session);
-      }
-    });
-  });
-}
-
 async function signIn(
   context: vscode.ExtensionContext,
   statusItem: vscode.StatusBarItem,
   authProvider: SkipprAuthenticationProvider,
   suppressProviderSessionEvent = false
 ): Promise<AuthSession | undefined> {
-  const panel = vscode.window.createWebviewPanel("skippr.signIn", "Sign in to Skippr", vscode.ViewColumn.Active, {
-    enableScripts: true
-  });
-  const session = await runEmailOtpAuthWebview(panel, context, statusItem, "standalone");
-  if (session && !suppressProviderSessionEvent) {
+  const raw = await runEmailOtpAuthQuickInput({ apiRequest });
+  if (!raw) {
+    return undefined;
+  }
+  const session: AuthSession = { token: raw.token, refreshToken: raw.refreshToken, email: raw.email };
+  await saveAuthSession(context, session);
+  applySignedInAuthStatusBar(statusItem, session.email);
+  if (!suppressProviderSessionEvent) {
     authProvider.notifySessionCreated(session);
   }
   return session;
-}
-
-function renderAccountHtml(session: AuthSession, account?: SkipprAccountPayload, error = ""): string {
-  const plan = account?.profile?.plan ?? "Unknown";
-  const balance = account?.balance?.balance ?? 0;
-  const eulaVersion = account?.eula?.version ?? "Not accepted";
-  const usage = account?.daily_costs_est?.map((day) => `<li><span>${escapeHtml(day.date)}</span><strong>$${day.cost.toFixed(2)}</strong></li>`).join("") ?? "";
-  const recentUsage = account?.recent_usage?.length ?? 0;
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { margin: 0; padding: 24px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
-    .shell { max-width: 760px; margin: 0 auto; }
-    .hero { padding: 24px; border: 1px solid var(--vscode-panel-border); border-radius: 18px; background: color-mix(in srgb, var(--vscode-sideBar-background) 70%, transparent); }
-    .row { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 16px; }
-    .card { flex: 1 1 180px; padding: 16px; border: 1px solid var(--vscode-panel-border); border-radius: 14px; }
-    .label { color: var(--vscode-descriptionForeground); font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; }
-    .value { font-size: 22px; font-weight: 700; margin-top: 6px; }
-    button { margin: 14px 8px 0 0; padding: 9px 12px; border-radius: 9px; border: 0; cursor: pointer; font: inherit; font-weight: 600; }
-    .primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
-    .secondary { color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); }
-    ul { list-style: none; padding: 0; }
-    li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--vscode-panel-border); }
-    .error { color: var(--vscode-errorForeground); margin-top: 12px; }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <section class="hero">
-      <div class="label">Skippr Account</div>
-      <h1>${escapeHtml(session.email)}</h1>
-      ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-      <div class="row">
-        <div class="card"><div class="label">Plan</div><div class="value">${escapeHtml(plan)}</div></div>
-        <div class="card"><div class="label">Balance</div><div class="value">$${balance.toFixed(2)}</div></div>
-        <div class="card"><div class="label">Month Estimate</div><div class="value">$${(account?.monthly_cost_est ?? 0).toFixed(2)}</div></div>
-      </div>
-      <button id="refresh" class="secondary">Refresh</button>
-      <button id="buy" class="primary">Buy Credits</button>
-      <button id="eula" class="secondary">Accept EULA</button>
-      <button id="signout" class="secondary">Sign Out</button>
-    </section>
-    <section>
-      <h2>Usage</h2>
-      <p class="label">Recent usage events: ${recentUsage}</p>
-      <ul>${usage || "<li><span>No recent daily costs</span><strong>$0.00</strong></li>"}</ul>
-      <p class="label">EULA: ${escapeHtml(eulaVersion)} ${account?.eula?.accepted_at ? `(${escapeHtml(account.eula.accepted_at)})` : ""}</p>
-      ${account?.subscription ? `<p class="label">Subscription: ${escapeHtml(account.subscription.status ?? "")} ${escapeHtml(account.subscription.price_id ?? "")}</p>` : ""}
-    </section>
-  </div>
-  <script>
-    const vscode = acquireVsCodeApi();
-    document.getElementById("refresh")?.addEventListener("click", () => vscode.postMessage({ command: "refresh" }));
-    document.getElementById("buy")?.addEventListener("click", () => vscode.postMessage({ command: "buy" }));
-    document.getElementById("eula")?.addEventListener("click", () => vscode.postMessage({ command: "eula" }));
-    document.getElementById("signout")?.addEventListener("click", () => vscode.postMessage({ command: "signout" }));
-  </script>
-</body>
-</html>`;
 }
 
 async function fetchAccount(session: AuthSession): Promise<SkipprAccountPayload | undefined> {
@@ -2008,14 +1666,53 @@ async function showAccount(
     await signIn(context, statusItem, authProvider);
     return;
   }
-  const panel = vscode.window.createWebviewPanel("skippr.account", "Skippr Account", vscode.ViewColumn.Active, { enableScripts: true });
-  let account = await fetchAccount(session);
-  panel.webview.html = renderAccountHtml(session, account, account ? "" : "Could not load account details.");
-  panel.webview.onDidReceiveMessage(async (message: { command: string }) => {
-    if (message.command === "refresh") {
-      account = await fetchAccount(session);
-      panel.webview.html = renderAccountHtml(session, account, account ? "" : "Could not load account details.");
-    } else if (message.command === "buy") {
+
+  type AccountAction = "refresh" | "buy" | "eula" | "signout";
+
+  interface AccountQuickItem extends vscode.QuickPickItem {
+    action: AccountAction;
+  }
+
+  for (;;) {
+    const account = await fetchAccount(session);
+    const plan = account?.profile?.plan ?? "Unknown";
+    const balance = account?.balance?.balance ?? 0;
+    const estimate = account?.monthly_cost_est ?? 0;
+    const loadErr = account ? "" : "Could not load account details.";
+    const items: AccountQuickItem[] = [
+      {
+        label: "$(refresh) Refresh account",
+        description: loadErr || "Reload plan, balance, and usage",
+        action: "refresh"
+      },
+      {
+        label: "$(credit-card) Buy credits…",
+        description: "Open checkout for more Skippr credits",
+        action: "buy"
+      },
+      {
+        label: "$(law) Accept EULA",
+        description: account?.eula?.accepted_at ? `Accepted ${account.eula.accepted_at}` : "Accept skippr-eula-2026-04-29",
+        action: "eula"
+      },
+      {
+        label: "$(sign-out) Sign out",
+        description: "Clear Skippr session on this machine",
+        action: "signout"
+      }
+    ];
+    const picked = await vscode.window.showQuickPick<AccountQuickItem>(items, {
+      title: "Skippr Account",
+      placeHolder: `${session.email} · Plan ${plan} · Balance $${balance.toFixed(2)} · Month est. $${estimate.toFixed(2)}`,
+      ignoreFocusOut: true
+    });
+    if (!picked) {
+      return;
+    }
+    if (picked.action === "refresh") {
+      continue;
+    }
+    if (picked.action === "buy") {
       const amount = await vscode.window.showInputBox({ title: "Buy Skippr Credits", prompt: "Amount in USD", value: "25" });
       const parsed = Number(amount);
       if (Number.isFinite(parsed) && parsed >= 5) {
@@ -2027,11 +1724,13 @@ async function showAccount(
           }
         }
       }
-    } else if (message.command === "eula") {
+      continue;
+    }
+    if (picked.action === "eula") {
       await apiRequest("/auth/accept-eula", "POST", { version: "skippr-eula-2026-04-29" }, session.token);
-      account = await fetchAccount(session);
-      panel.webview.html = renderAccountHtml(session, account);
-    } else if (message.command === "signout") {
+      continue;
+    }
+    if (picked.action === "signout") {
       try {
         await apiRequest("/auth/logout", "POST", undefined, session.token);
       } catch {
@@ -2040,9 +1739,9 @@ async function showAccount(
       authProvider.notifySessionRemoved(session);
       await clearAuthSession(context);
       applySignedOutAuthStatusBar(statusItem);
-      panel.dispose();
+      return;
     }
-  });
+  }
 }
 
 async function ensureSession(
@@ -2170,12 +1869,31 @@ async function showSplash(
   statusItem: vscode.StatusBarItem,
   authProvider: SkipprAuthenticationProvider
 ): Promise<void> {
-  const panel = vscode.window.createWebviewPanel("skippr.splash", "Welcome to Skippr IDE", vscode.ViewColumn.Active, {
-    enableScripts: true
-  });
-  const session = await runEmailOtpAuthWebview(panel, context, statusItem, "welcome");
+  type WelcomeItem = vscode.QuickPickItem & { slug: "signin" | "discover" | "continue" };
+  const picked = await vscode.window.showQuickPick<WelcomeItem>(
+    [
+      { label: "$(sign-in) Sign in to Skippr", description: "Email verification code", slug: "signin" },
+      { label: "$(compass) Open Discover", description: "Browse data sources and pipelines", slug: "discover" },
+      {
+        label: "$(debug-step-over) Continue without signing in",
+        description: "You can sign in later from the status bar",
+        slug: "continue"
+      }
+    ],
+    { title: "Welcome to Skippr IDE", ignoreFocusOut: true }
+  );
+  if (!picked) {
+    return;
+  }
+  if (picked.slug === "discover") {
+    await vscode.commands.executeCommand("skippr.open.discover");
+    return;
+  }
+  if (picked.slug === "continue") {
+    return;
+  }
+  const session = await signIn(context, statusItem, authProvider, false);
   if (session) {
-    authProvider.notifySessionCreated(session);
     vscode.window.showInformationMessage(`Signed in to Skippr as ${session.email}.`);
   }
 }
@@ -2288,6 +2006,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await clearAuthSession(context);
       applySignedOutAuthStatusBar(statusItem);
       vscode.window.showInformationMessage("Signed out from Skippr.");
+    }),
+    vscode.commands.registerCommand("skippr.auth.refresh", async () => {
+      const existing = await readAuthSession(context);
+      if (!existing) {
+        return;
+      }
+      const refreshResponse = await tryApiRequest("/auth/refresh", "POST", { refresh_token: existing.refreshToken });
+      if (refreshResponse === null) {
+        vscode.window.showWarningMessage("Skippr: could not reach auth to refresh token.");
+        return;
+      }
+      if (!refreshResponse.ok) {
+        authProvider.notifySessionRemoved(existing);
+        await clearAuthSession(context);
+        applySignedOutAuthStatusBar(statusItem);
+        vscode.window.showWarningMessage("Skippr: refresh failed. Sign in again.");
+        return;
+      }
+      const refreshed = (await refreshResponse.json()) as { token: string; refresh_token: string };
+      const next: AuthSession = {
+        token: refreshed.token,
+        refreshToken: refreshed.refresh_token,
+        email: existing.email
+      };
+      await saveAuthSession(context, next);
+      authProvider.notifySessionUpdated(next);
+      applySignedInAuthStatusBar(statusItem, existing.email);
     }),
     vscode.commands.registerCommand("skippr.openSplash", async () => {
       await showSplash(context, statusItem, authProvider);
