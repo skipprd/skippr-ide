@@ -101,6 +101,7 @@ export interface ISnapshotEntry {
 
 export interface IChatEditingSession extends IDisposable {
 	readonly isGlobalEditingSession: boolean;
+	readonly supportsInlineDiffReview?: boolean;
 	readonly supportsKeepUndo: boolean;
 	readonly chatSessionResource: URI;
 	readonly onDidDispose: Event<void>;

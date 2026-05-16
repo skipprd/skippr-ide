@@ -274,8 +274,6 @@ function writeSettings(userDataDir, mockServer, overrides) {
 		// delay that pollutes perf measurements.
 		'chat.mcp.discovery.enabled': false,
 		'chat.mcp.enabled': false,
-		'skippr.data-agent.chat.githubMcpServer.enabled': false,
-		'skippr.data-agent.chat.cli.mcp.enabled': false,
 		// Auto-approve all tool invocations (YOLO mode) so tool call
 		// scenarios don't block on confirmation dialogs.
 		'chat.tools.global.autoApprove': true,

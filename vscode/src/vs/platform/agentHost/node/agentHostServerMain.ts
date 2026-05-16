@@ -51,6 +51,7 @@ import { AgentPluginManager } from './agentPluginManager.js';
 import { IAgentPluginManager } from '../common/agentPluginManager.js';
 import { registerPendingEditContentProvider } from './pendingEditContentStore.js';
 import { AgentHostGitService, IAgentHostGitService } from './agentHostGitService.js';
+import { SkipprCliAgent } from './skipprCliAgent.js';
 
 /** Log to stderr so messages appear in the terminal alongside the process. */
 function log(msg: string): void {
@@ -190,6 +191,8 @@ async function main(): Promise<void> {
 		diServices.set(IAgentHostTerminalManager, agentService.terminalManager);
 		diServices.set(IAgentConfigurationService, agentService.configurationService);
 		diServices.set(IAgentHostGitService, gitService);
+		const skipprAgent = disposables.add(instantiationService.createInstance(SkipprCliAgent));
+		agentService.registerProvider(skipprAgent);
 	}
 
 	if (options.enableMockAgent) {

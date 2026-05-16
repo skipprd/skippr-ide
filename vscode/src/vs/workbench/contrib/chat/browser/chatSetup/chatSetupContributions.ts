@@ -64,6 +64,7 @@ const defaultChat = {
 	upgradePlanUrl: product.defaultChatAgent?.upgradePlanUrl ?? '',
 	chatRefreshTokenCommand: product.defaultChatAgent?.chatRefreshTokenCommand ?? '',
 };
+const useAgentHostSkipprChat = defaultChat.chatExtensionId === 'skippr.data-agent';
 
 const SIGN_IN_TITLE_BAR_ACTION_ID = 'workbench.action.chat.signInIndicator';
 
@@ -99,7 +100,11 @@ export class ChatSetupContribution extends Disposable implements IWorkbenchContr
 		this.registerActions(context, requests, controller);
 		this.registerSignInTitleBarEntry(actionViewItemService);
 		this.registerUrlLinkHandler();
-		this.checkExtensionInstallation(context);
+		if (useAgentHostSkipprChat) {
+			context.update({ completed: true });
+		} else {
+			this.checkExtensionInstallation(context);
+		}
 	}
 
 	private registerSetupAgents(context: ChatEntitlementContext, controller: Lazy<ChatSetupController>): void {
@@ -113,7 +118,7 @@ export class ChatSetupContribution extends Disposable implements IWorkbenchContr
 
 			// Agent + Tools
 			{
-				if (!context.state.hidden && !context.state.disabledInWorkspace) {
+				if (!useAgentHostSkipprChat && !context.state.hidden && !context.state.disabledInWorkspace) {
 
 					// Default Agents (always, even if installed to allow for speedy requests right on startup)
 					if (!defaultAgentDisposables.value) {

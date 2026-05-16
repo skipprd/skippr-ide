@@ -10,7 +10,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/
 import { ToolCallStatus, ToolCallConfirmationReason, ToolResultContentType, TurnState, ResponsePartKind, type ActiveTurn, type ICompletedToolCall, type ToolCallRunningState, type Turn, type ToolCallResponsePart, ToolCallCancellationReason } from '../../../../../../platform/agentHost/common/state/sessionState.js';
 import { IChatToolInvocationSerialized, type IChatMarkdownContent } from '../../../common/chatService/chatService.js';
 import { ToolDataSource, ToolInvocationPresentation } from '../../../common/tools/languageModelToolsService.js';
-import { turnsToHistory as rawTurnsToHistory, activeTurnToProgress as rawActiveTurnToProgress, toolCallStateToInvocation as rawToolCallStateToInvocation, finalizeToolInvocation as rawFinalizeToolInvocation, updateRunningToolSpecificData as rawUpdateRunningToolSpecificData } from '../../../browser/agentSessions/agentHost/stateToProgressAdapter.js';
+import { fileEditsToExternalEdits, turnsToHistory as rawTurnsToHistory, activeTurnToProgress as rawActiveTurnToProgress, toolCallStateToInvocation as rawToolCallStateToInvocation, finalizeToolInvocation as rawFinalizeToolInvocation, updateRunningToolSpecificData as rawUpdateRunningToolSpecificData } from '../../../browser/agentSessions/agentHost/stateToProgressAdapter.js';
 
 // ---- Helper factories -------------------------------------------------------
 
@@ -96,6 +96,34 @@ function updateRunningToolSpecificData(existing: Parameters<typeof rawUpdateRunn
 suite('stateToProgressAdapter', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('structured file edit content becomes an external file edit', () => {
+		const tc = createCompletedToolCall({
+			toolName: 'local_ide',
+			toolCallId: 'tc-local',
+			content: [{
+				type: ToolResultContentType.FileEdit,
+				before: {
+					uri: 'file:///workspace/example.txt',
+					content: { uri: 'session-db://session/tc-local/before/example.txt' },
+				},
+				after: {
+					uri: 'file:///workspace/example.txt',
+					content: { uri: 'session-db://session/tc-local/after/example.txt' },
+				},
+				diff: { added: 1, removed: 1 },
+			}],
+		});
+
+		const edits = fileEditsToExternalEdits(tc);
+
+		assert.strictEqual(edits.length, 1);
+		assert.strictEqual(edits[0].resource.toString(), 'file:///workspace/example.txt');
+		assert.strictEqual(edits[0].diff?.added, 1);
+		assert.strictEqual(edits[0].diff?.removed, 1);
+		assert.strictEqual(edits[0].beforeContentUri?.toString(), 'session-db://session/tc-local/before/example.txt');
+		assert.strictEqual(edits[0].afterContentUri?.toString(), 'session-db://session/tc-local/after/example.txt');
+	});
 
 	suite('turnsToHistory', () => {
 

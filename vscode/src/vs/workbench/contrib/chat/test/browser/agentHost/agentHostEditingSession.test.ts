@@ -162,6 +162,7 @@ suite('AgentHostEditingSession', () => {
 		const session = createSession(store, new Map());
 
 		assert.strictEqual(session.supportsKeepUndo, true);
+		assert.strictEqual(session.supportsInlineDiffReview, true);
 		assert.strictEqual(session.isGlobalEditingSession, false);
 		assert.strictEqual(session.state.get(), ChatEditingSessionState.Idle);
 		assert.deepStrictEqual(session.entries.get(), []);
@@ -186,11 +187,49 @@ suite('AgentHostEditingSession', () => {
 
 		const entry = session.entries.get()[0];
 		assert.strictEqual(entry.lastModifyingRequestId, 'req-1');
-		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Accepted);
+		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
 		assert.strictEqual(entry.linesAdded?.get(), 5);
 		assert.strictEqual(entry.linesRemoved?.get(), 2);
 		assert.strictEqual(session.canUndo.get(), true);
 		assert.strictEqual(session.canRedo.get(), false);
+	});
+
+	test('addToolCallEdits hydrates local_ide patch output as a modified entry', () => {
+		const session = createSession(store, new Map());
+
+		session.addToolCallEdits('req-1', {
+			...makeToolCall({
+				toolCallId: 'tc-local',
+				filePath: '/workspace/file.ts',
+				beforeURI: 'unused://before',
+				afterURI: 'unused://after',
+				added: 1,
+				removed: 1,
+			}),
+			toolName: 'local_ide',
+			content: [{
+				type: ToolResultContentType.Text,
+				text: JSON.stringify({
+					ok: true,
+					path: '/workspace/file.ts',
+					absolute_path: '/workspace/file.ts',
+					before_sha256: 'before',
+					after_sha256: 'after',
+					before_content: 'old\n',
+					after_content: 'new\n',
+					lines_added: 1,
+					lines_removed: 1,
+					no_op: false,
+				}),
+			}],
+		});
+
+		const entry = session.entries.get()[0];
+		assert.ok(entry);
+		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
+		assert.strictEqual(entry.modifiedURI.toString(), 'file:///workspace/file.ts');
+		assert.strictEqual(entry.linesAdded?.get(), 1);
+		assert.strictEqual(entry.linesRemoved?.get(), 1);
 	});
 
 	test('addToolCallEdits ignores non-completed tool calls', () => {
@@ -569,15 +608,49 @@ suite('AgentHostEditingSession', () => {
 		});
 	});
 
-	suite('accept/reject are no-ops', () => {
-		test('accept does not throw', async () => {
-			const session = createSession(store, new Map());
-			await session.accept(URI.file('/test'));
+	suite('accept/reject', () => {
+		test('accept marks entry accepted and keeps current file content', async () => {
+			const beforeContentUri = toAgentHostUri(URI.parse('content://before'), 'local');
+			const fileUri = toAgentHostUri(URI.file('/workspace/file.ts'), 'local');
+			const contentMap = new Map<string, string>();
+			contentMap.set(beforeContentUri.toString(), 'before-content');
+			contentMap.set(fileUri.toString(), 'after-content');
+			const session = createSession(store, contentMap);
+
+			session.addToolCallEdits('req-1', makeToolCall({
+				toolCallId: 'tc-1',
+				filePath: '/workspace/file.ts',
+				beforeURI: 'content://before',
+				afterURI: 'content://after',
+			}));
+
+			const entry = session.entries.get()[0];
+			await session.accept(entry.modifiedURI);
+
+			assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Accepted);
+			assert.strictEqual(contentMap.get(fileUri.toString()), 'after-content');
 		});
 
-		test('reject does not throw', async () => {
-			const session = createSession(store, new Map());
-			await session.reject(URI.file('/test'));
+		test('reject marks entry rejected and restores before-content', async () => {
+			const beforeContentUri = toAgentHostUri(URI.parse('content://before'), 'local');
+			const fileUri = toAgentHostUri(URI.file('/workspace/file.ts'), 'local');
+			const contentMap = new Map<string, string>();
+			contentMap.set(beforeContentUri.toString(), 'before-content');
+			contentMap.set(fileUri.toString(), 'after-content');
+			const session = createSession(store, contentMap);
+
+			session.addToolCallEdits('req-1', makeToolCall({
+				toolCallId: 'tc-1',
+				filePath: '/workspace/file.ts',
+				beforeURI: 'content://before',
+				afterURI: 'content://after',
+			}));
+
+			const entry = session.entries.get()[0];
+			await session.reject(entry.modifiedURI);
+
+			assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Rejected);
+			assert.strictEqual(contentMap.get(fileUri.toString()), 'before-content');
 		});
 	});
 

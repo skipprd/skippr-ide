@@ -886,11 +886,7 @@ export function fileEditsToExternalEdits(tc: ToolCallState): IToolCallFileEdit[]
 	if (tc.status !== ToolCallStatus.Completed) {
 		return [];
 	}
-	const edits = getToolFileEdits(tc);
-	if (edits.length === 0) {
-		return [];
-	}
-	return mapFileEdits(edits, tc.toolCallId);
+	return mapFileEdits(getToolFileEdits(tc), tc.toolCallId);
 }
 
 /**

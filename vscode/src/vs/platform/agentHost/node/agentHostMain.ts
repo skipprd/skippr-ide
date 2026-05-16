@@ -51,6 +51,7 @@ import { AgentPluginManager } from './agentPluginManager.js';
 import { AgentHostGitService, IAgentHostGitService } from './agentHostGitService.js';
 import { registerPendingEditContentProvider } from './pendingEditContentStore.js';
 import { join } from '../../../base/common/path.js';
+import { SkipprCliAgent } from './skipprCliAgent.js';
 
 // Entry point for the agent host utility process.
 // Sets up IPC, logging, and registers agent providers.
@@ -116,6 +117,8 @@ function startAgentHost(): void {
 
 		diServices.set(IAgentHostTerminalManager, agentService.terminalManager);
 		diServices.set(IAgentConfigurationService, agentService.configurationService);
+		const skipprAgent = disposables.add(instantiationService.createInstance(SkipprCliAgent));
+		agentService.registerProvider(skipprAgent);
 	} catch (err) {
 		logService.error('Failed to create AgentService', err);
 		throw err;

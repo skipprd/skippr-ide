@@ -7,13 +7,16 @@ import { Sequencer } from '../../../../../../base/common/async.js';
 import { VSBuffer } from '../../../../../../base/common/buffer.js';
 import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { MarkdownString } from '../../../../../../base/common/htmlContent.js';
-import { Disposable, DisposableStore } from '../../../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap, DisposableStore } from '../../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../../base/common/network.js';
 import { constObservable, derived, derivedOpts, IObservable, IReader, ObservablePromise, observableValue, transaction } from '../../../../../../base/common/observable.js';
 import { isEqual } from '../../../../../../base/common/resources.js';
-import { isDefined } from '../../../../../../base/common/types.js';
+import { assertType, isDefined } from '../../../../../../base/common/types.js';
 import { URI } from '../../../../../../base/common/uri.js';
-import { IDocumentDiff } from '../../../../../../editor/common/diff/documentDiffProvider.js';
+import { getCodeEditor } from '../../../../../../editor/browser/editorBrowser.js';
+import { EditOperation, ISingleEditOperation } from '../../../../../../editor/common/core/editOperation.js';
+import { IDocumentDiff, nullDocumentDiff } from '../../../../../../editor/common/diff/documentDiffProvider.js';
+import { DetailedLineRangeMapping } from '../../../../../../editor/common/diff/rangeMapping.js';
 import { ITextModel } from '../../../../../../editor/common/model.js';
 import { IEditorWorkerService } from '../../../../../../editor/common/services/editorWorker.js';
 import { ITextModelService } from '../../../../../../editor/common/services/resolverService.js';
@@ -31,6 +34,7 @@ import { MultiDiffEditorInput } from '../../../../multiDiffEditor/browser/multiD
 import { IChatProgress, IChatWorkspaceEdit } from '../../../common/chatService/chatService.js';
 import { ChatEditingSessionState, emptySessionEntryDiff, getMultiDiffSourceUri, IChatEditingSession, IEditSessionDiffStats, IEditSessionEntryDiff, IModifiedFileEntry, IModifiedFileEntryChangeHunk, IModifiedFileEntryEditorIntegration, IStreamingEdits, ModifiedFileEntryState } from '../../../common/editing/chatEditingService.js';
 import { IChatRequestDisablement, IChatResponseModel } from '../../../common/model/chatModel.js';
+import { ChatEditingCodeEditorIntegration, IDocumentDiff2 } from '../../chatEditing/chatEditingCodeEditorIntegration.js';
 import { fileEditsToExternalEdits, type IToolCallFileEdit } from './stateToProgressAdapter.js';
 
 // ---- Internal data model ----------------------------------------------------
@@ -44,24 +48,88 @@ interface IAgentHostCheckpoint {
 
 // ---- Modified file entry ----------------------------------------------------
 
-class AgentHostModifiedFileEntry implements IModifiedFileEntry {
+class AgentHostEditorIntegration extends Disposable implements IModifiedFileEntryEditorIntegration {
+
+	private readonly _delegate = observableValue<IModifiedFileEntryEditorIntegration | undefined>(this, undefined);
+	readonly currentIndex: IObservable<number> = derived(this, reader => this._delegate.read(reader)?.currentIndex.read(reader) ?? -1);
+	private readonly _ready: Promise<void>;
+
+	constructor(
+		private readonly _entry: AgentHostModifiedFileEntry,
+		editor: IEditorPane,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+	) {
+		super();
+
+		const codeEditor = getCodeEditor(editor.getControl());
+		assertType(codeEditor);
+
+		this._ready = this._entry.getDocumentDiffInfo()
+			.then(diffInfo => {
+				if (this._store.isDisposed) {
+					return;
+				}
+				const delegate = this._register(this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this._entry, codeEditor, diffInfo, false));
+				this._delegate.set(delegate, undefined);
+			})
+			.catch(err => this._entry.logDiffError(err));
+	}
+
+	reveal(firstOrLast: boolean, preserveFocus?: boolean): void {
+		this._delegate.get()?.reveal(firstOrLast, preserveFocus);
+	}
+
+	next(wrap: boolean): boolean {
+		return this._delegate.get()?.next(wrap) ?? false;
+	}
+
+	previous(wrap: boolean): boolean {
+		return this._delegate.get()?.previous(wrap) ?? false;
+	}
+
+	enableAccessibleDiffView(): void {
+		this._delegate.get()?.enableAccessibleDiffView();
+	}
+
+	async acceptNearestChange(change?: IModifiedFileEntryChangeHunk): Promise<void> {
+		await this._ready;
+		return this._delegate.get()?.acceptNearestChange(change);
+	}
+
+	async rejectNearestChange(change?: IModifiedFileEntryChangeHunk): Promise<void> {
+		await this._ready;
+		return this._delegate.get()?.rejectNearestChange(change);
+	}
+
+	async toggleDiff(change: IModifiedFileEntryChangeHunk | undefined, show?: boolean): Promise<void> {
+		await this._ready;
+		return this._delegate.get()?.toggleDiff(change, show);
+	}
+}
+
+class AgentHostModifiedFileEntry extends Disposable implements IModifiedFileEntry {
 
 	readonly entryId: string;
 	readonly originalURI: URI;
 	readonly modifiedURI: URI;
 	readonly lastModifyingRequestId: string;
 
-	readonly state = constObservable(ModifiedFileEntryState.Accepted);
+	private readonly _state = observableValue<ModifiedFileEntryState>(this, ModifiedFileEntryState.Modified);
+	readonly state: IObservable<ModifiedFileEntryState> = this._state;
 	readonly isCurrentlyBeingModifiedBy = constObservable<{ responseModel: IChatResponseModel; undoStopId: string | undefined } | undefined>(undefined);
 	readonly lastModifyingResponse = constObservable<IChatResponseModel | undefined>(undefined);
 	readonly rewriteRatio = constObservable(1);
 	readonly waitsForLastEdits = constObservable(false);
-	readonly reviewMode = constObservable(false);
+	readonly reviewMode = constObservable(true);
 	readonly autoAcceptController = constObservable<{ total: number; remaining: number; cancel(): void } | undefined>(undefined);
-	readonly changesCount = constObservable(0);
-	readonly diffInfo?: IObservable<IDocumentDiff>;
-	readonly linesAdded?: IObservable<number>;
-	readonly linesRemoved?: IObservable<number>;
+	private readonly _documentDiffInfo = observableValue<IDocumentDiff2 | undefined>(this, undefined);
+	readonly changesCount: IObservable<number> = this._documentDiffInfo.map(diff => diff?.changes.length ?? 0);
+	readonly diffInfo: IObservable<IDocumentDiff> = this._documentDiffInfo.map(diff => diff ?? nullDocumentDiff);
+	readonly linesAdded: IObservable<number>;
+	readonly linesRemoved: IObservable<number>;
+	private readonly _editorIntegrations = this._register(new DisposableMap<IEditorPane, IModifiedFileEntryEditorIntegration>());
+	private _modelRefsPromise: Promise<{ originalModel: ITextModel; modifiedModel: ITextModel }> | undefined;
+	private _isDisposed = false;
 
 	constructor(
 		resource: URI,
@@ -69,34 +137,233 @@ class AgentHostModifiedFileEntry implements IModifiedFileEntry {
 		lastModifyingRequestId: string,
 		added: number,
 		removed: number,
+		private readonly _textModelService: ITextModelService,
+		private readonly _editorWorkerService: IEditorWorkerService,
+		private readonly _fileService: IFileService,
+		private readonly _instantiationService: IInstantiationService,
+		private readonly _logService: ILogService,
 	) {
+		super();
 		this.entryId = `agenthost-${resource.toString()}`;
 		this.modifiedURI = resource;
 		this.originalURI = beforeContentUri;
 		this.lastModifyingRequestId = lastModifyingRequestId;
-		if (added > 0 || removed > 0) {
-			this.linesAdded = constObservable(added);
-			this.linesRemoved = constObservable(removed);
+		this.linesAdded = this._documentDiffInfo.map(diff => diff ? countDiffLines(diff).added : added);
+		this.linesRemoved = this._documentDiffInfo.map(diff => diff ? countDiffLines(diff).removed : removed);
+		this._updateDiffInfo().catch(err => this.logDiffError(err));
+	}
+
+	async accept(): Promise<void> {
+		if (this._state.get() !== ModifiedFileEntryState.Modified) {
+			return;
+		}
+		const models = await this._tryGetModels();
+		if (models && typeof models.originalModel.setValue === 'function' && typeof models.modifiedModel.createSnapshot === 'function') {
+			models.originalModel.setValue(models.modifiedModel.createSnapshot());
+		}
+		transaction(tx => this._state.set(ModifiedFileEntryState.Accepted, tx));
+		await this._updateDiffInfo();
+	}
+
+	async reject(): Promise<void> {
+		if (this._state.get() !== ModifiedFileEntryState.Modified) {
+			return;
+		}
+		const content = await readSnapshotContent(this.originalURI, this._fileService);
+		await this._fileService.writeFile(this.modifiedURI, content.value);
+
+		const models = await this._tryGetModels();
+		if (models) {
+			this._replaceModifiedModelContents(models.modifiedModel, content.value.toString());
+		}
+		transaction(tx => this._state.set(ModifiedFileEntryState.Rejected, tx));
+		await this._updateDiffInfo();
+	}
+
+	enableReviewModeUntilSettled(): void {
+		// Agent-host entries are always reviewable until accepted or rejected.
+	}
+
+	getEditorIntegration(editor: IEditorPane): IModifiedFileEntryEditorIntegration {
+		let value = this._editorIntegrations.get(editor);
+		if (!value) {
+			value = this._instantiationService.createInstance(AgentHostEditorIntegration, this, editor);
+			this._editorIntegrations.set(editor, value);
+		}
+		return value;
+	}
+
+	async getDiffInfo(): Promise<IDocumentDiff> {
+		await this._updateDiffInfo();
+		return this._documentDiffInfo.get() ?? nullDocumentDiff;
+	}
+
+	async getDocumentDiffInfo(): Promise<IObservable<IDocumentDiff2>> {
+		await this._ensureModels();
+		await this._updateDiffInfo();
+		return this._documentDiffInfo.map(diff => diff ?? this._createDocumentDiff2(nullDocumentDiff));
+	}
+
+	logDiffError(err: unknown): void {
+		if (this._isDisposed) {
+			return;
+		}
+		this._logService.warn('[AgentHostModifiedFileEntry] inline diff setup failed', err);
+	}
+
+	private async _keepHunk(change: DetailedLineRangeMapping): Promise<boolean> {
+		if (!this._documentDiffInfo.get()?.changes.includes(change)) {
+			return false;
+		}
+
+		const { originalModel, modifiedModel } = await this._ensureModels();
+		const edits: ISingleEditOperation[] = [];
+		for (const edit of getInnerChanges(change)) {
+			edits.push(EditOperation.replace(edit.originalRange, modifiedModel.getValueInRange(edit.modifiedRange)));
+		}
+		if (edits.length === 0) {
+			return false;
+		}
+
+		originalModel.pushEditOperations(null, edits, () => null);
+		await this._updateDiffInfo();
+		if (this._documentDiffInfo.get()?.identical) {
+			transaction(tx => this._state.set(ModifiedFileEntryState.Accepted, tx));
+			await this._updateDiffInfo();
+		}
+		return true;
+	}
+
+	private async _undoHunk(change: DetailedLineRangeMapping): Promise<boolean> {
+		if (!this._documentDiffInfo.get()?.changes.includes(change)) {
+			return false;
+		}
+
+		const { originalModel, modifiedModel } = await this._ensureModels();
+		const edits: ISingleEditOperation[] = [];
+		for (const edit of getInnerChanges(change)) {
+			edits.push(EditOperation.replace(edit.modifiedRange, originalModel.getValueInRange(edit.originalRange)));
+		}
+		if (edits.length === 0) {
+			return false;
+		}
+
+		modifiedModel.pushEditOperations(null, edits, () => null);
+		await this._fileService.writeFile(this.modifiedURI, VSBuffer.fromString(modifiedModel.getValue()));
+		await this._updateDiffInfo();
+		if (this._documentDiffInfo.get()?.identical) {
+			transaction(tx => this._state.set(ModifiedFileEntryState.Rejected, tx));
+			await this._updateDiffInfo();
+		}
+		return true;
+	}
+
+	private async _tryGetModels(): Promise<{ originalModel: ITextModel; modifiedModel: ITextModel } | undefined> {
+		try {
+			return await this._ensureModels();
+		} catch (err) {
+			this.logDiffError(err);
+			return undefined;
 		}
 	}
 
-	async accept(): Promise<void> { /* no-op */ }
-	async reject(): Promise<void> { /* no-op */ }
-	enableReviewModeUntilSettled(): void { /* no-op */ }
+	private async _ensureModels(): Promise<{ originalModel: ITextModel; modifiedModel: ITextModel }> {
+		this._modelRefsPromise ??= (async () => {
+			const originalRef = await this._textModelService.createModelReference(this.originalURI);
+			if (this._isDisposed) {
+				originalRef.dispose();
+				throw new Error('Agent host modified file entry was disposed');
+			}
+			this._register(originalRef);
+			const modifiedRef = await this._textModelService.createModelReference(this.modifiedURI);
+			if (this._isDisposed) {
+				modifiedRef.dispose();
+				throw new Error('Agent host modified file entry was disposed');
+			}
+			this._register(modifiedRef);
+			return {
+				originalModel: originalRef.object.textEditorModel,
+				modifiedModel: modifiedRef.object.textEditorModel,
+			};
+		})();
+		return this._modelRefsPromise;
+	}
 
-	getEditorIntegration(_editor: IEditorPane): IModifiedFileEntryEditorIntegration {
+	private async _updateDiffInfo(): Promise<void> {
+		if (this._state.get() !== ModifiedFileEntryState.Modified) {
+			const models = await this._tryGetModels();
+			this._documentDiffInfo.set(models ? this._createDocumentDiff2(nullDocumentDiff, models) : undefined, undefined);
+			return;
+		}
+
+		const models = await this._ensureModels();
+		const originalVersion = models.originalModel.getVersionId();
+		const modifiedVersion = models.modifiedModel.getVersionId();
+		const diff = await this._editorWorkerService.computeDiff(
+			models.originalModel.uri,
+			models.modifiedModel.uri,
+			{ ignoreTrimWhitespace: false, computeMoves: false, maxComputationTimeMs: 3000 },
+			'advanced',
+		);
+
+		if (models.originalModel.getVersionId() !== originalVersion || models.modifiedModel.getVersionId() !== modifiedVersion) {
+			return;
+		}
+
+		this._documentDiffInfo.set(this._createDocumentDiff2(diff ?? nullDocumentDiff, models), undefined);
+	}
+
+	private _createDocumentDiff2(diff: IDocumentDiff, models?: { originalModel: ITextModel; modifiedModel: ITextModel }): IDocumentDiff2 {
+		const resolvedModels = models ?? this._getLoadedModels();
 		return {
-			currentIndex: observableValue('currentIndex', 0),
-			reveal(): void { /* no-op */ },
-			next(): boolean { return false; },
-			previous(): boolean { return false; },
-			enableAccessibleDiffView(): void { /* no-op */ },
-			async acceptNearestChange(_change?: IModifiedFileEntryChangeHunk): Promise<void> { /* no-op */ },
-			async rejectNearestChange(_change?: IModifiedFileEntryChangeHunk): Promise<void> { /* no-op */ },
-			async toggleDiff(_change: IModifiedFileEntryChangeHunk | undefined, _show?: boolean): Promise<void> { /* no-op */ },
-			dispose(): void { /* no-op */ },
+			...diff,
+			originalModel: resolvedModels.originalModel,
+			modifiedModel: resolvedModels.modifiedModel,
+			keep: change => this._keepHunk(change),
+			undo: change => this._undoHunk(change),
 		};
 	}
+
+	private _getLoadedModels(): { originalModel: ITextModel; modifiedModel: ITextModel } {
+		const diff = this._documentDiffInfo.get();
+		if (diff) {
+			return { originalModel: diff.originalModel, modifiedModel: diff.modifiedModel };
+		}
+		throw new Error('Agent host diff models have not loaded');
+	}
+
+	private _replaceModifiedModelContents(model: ITextModel, value: string): void {
+		if (typeof model.pushEditOperations === 'function' && typeof model.getFullModelRange === 'function') {
+			model.pushEditOperations(null, [EditOperation.replace(model.getFullModelRange(), value)], () => null);
+		}
+	}
+
+	override dispose(): void {
+		this._isDisposed = true;
+		super.dispose();
+	}
+}
+
+function countDiffLines(diff: IDocumentDiff): { added: number; removed: number } {
+	let added = 0;
+	let removed = 0;
+	for (const change of diff.changes) {
+		added += Math.max(0, change.modified.endLineNumberExclusive - change.modified.startLineNumber);
+		removed += Math.max(0, change.original.endLineNumberExclusive - change.original.startLineNumber);
+	}
+	return { added, removed };
+}
+
+function getInnerChanges(change: DetailedLineRangeMapping) {
+	try {
+		return change.innerChanges ?? change.withInnerChangesFromLineRanges().innerChanges ?? [];
+	} catch {
+		return change.innerChanges ?? [];
+	}
+}
+
+async function readSnapshotContent(uri: URI, fileService: IFileService): Promise<{ value: VSBuffer }> {
+	return fileService.readFile(uri);
 }
 
 // ---- Editing session --------------------------------------------------------
@@ -104,6 +371,7 @@ class AgentHostModifiedFileEntry implements IModifiedFileEntry {
 export class AgentHostEditingSession extends Disposable implements IChatEditingSession {
 
 	readonly supportsKeepUndo = true;
+	readonly supportsInlineDiffReview = true;
 	readonly isGlobalEditingSession = false;
 
 	private readonly _state = observableValue<ChatEditingSessionState>(this, ChatEditingSessionState.Idle);
@@ -285,10 +553,23 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 		return this._entriesObs.read(reader).find(e => isEqual(e.modifiedURI, uri));
 	}
 
-	// ---- Accept / Reject (no-op) --------------------------------------------
+	private _getTargetEntries(uris: readonly URI[]): AgentHostModifiedFileEntry[] {
+		const entries = this._entriesObs.get();
+		if (uris.length === 0) {
+			return entries.filter(entry => entry.state.get() === ModifiedFileEntryState.Modified);
+		}
+		return entries.filter(entry => uris.some(uri => isEqual(uri, entry.modifiedURI)));
+	}
 
-	async accept(..._uris: URI[]): Promise<void> { /* no-op */ }
-	async reject(..._uris: URI[]): Promise<void> { /* no-op */ }
+	// ---- Accept / Reject -----------------------------------------------------
+
+	async accept(...uris: URI[]): Promise<void> {
+		await Promise.all(this._getTargetEntries(uris).map(entry => entry.accept()));
+	}
+
+	async reject(...uris: URI[]): Promise<void> {
+		await Promise.all(this._getTargetEntries(uris).map(entry => entry.reject()));
+	}
 
 	// ---- Snapshots ----------------------------------------------------------
 
@@ -383,7 +664,7 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 			if (!edit.afterContentUri) {
 				return VSBuffer.fromByteArray([]);
 			}
-			const content = await this._fileService.readFile(edit.afterContentUri);
+			const content = await readSnapshotContent(edit.afterContentUri, this._fileService);
 			return content.value;
 		} catch (err) {
 			this._logService.warn(`[AgentHostEditingSession] Failed to fetch snapshot content`, err);
@@ -522,12 +803,14 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 		try {
 			const beforeRef = await this._textModelService.createModelReference(beforeUri);
 			refs.add(beforeRef);
+			const beforeModel = beforeRef.object.textEditorModel;
 			const afterRef = await this._textModelService.createModelReference(afterUri);
 			refs.add(afterRef);
+			const afterModel = afterRef.object.textEditorModel;
 
 			const diff = await this._editorWorkerService.computeDiff(
-				beforeRef.object.textEditorModel.uri,
-				afterRef.object.textEditorModel.uri,
+				beforeModel.uri,
+				afterModel.uri,
 				{ ignoreTrimWhitespace: false, computeMoves: false, maxComputationTimeMs: 3000 },
 				'advanced',
 			);
@@ -695,12 +978,19 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 		this._state.set(ChatEditingSessionState.Disposed, undefined);
 		this._onDidDispose.fire();
 		this._diffCache.clear();
+		for (const entry of this._entriesObs.get()) {
+			entry.dispose();
+		}
 		super.dispose();
 	}
 
 	// ---- Private helpers ----------------------------------------------------
 
 	private _rebuildEntries(): void {
+		for (const entry of this._entriesObs.get()) {
+			entry.dispose();
+		}
+
 		const currentIdx = this._currentCheckpointIndex.get();
 		const resourceMap = new Map<string, { resource: URI; beforeContentUri?: URI; afterContentUri?: URI; requestId: string; added: number; removed: number }>();
 
@@ -733,7 +1023,18 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 		const entries = [...resourceMap.values()]
 			.filter(v => v.beforeContentUri && v.afterContentUri)
 			.map(v =>
-				new AgentHostModifiedFileEntry(v.resource, v.beforeContentUri!, v.requestId, v.added, v.removed)
+				new AgentHostModifiedFileEntry(
+					v.resource,
+					v.beforeContentUri!,
+					v.requestId,
+					v.added,
+					v.removed,
+					this._textModelService,
+					this._editorWorkerService,
+					this._fileService,
+					this._instantiationService,
+					this._logService,
+				)
 			);
 
 		this._entriesObs.set(entries, undefined);
@@ -752,7 +1053,7 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 						case FileEditKind.Delete:
 							// Undo delete → recreate from before-snapshot
 							if (edit.beforeContentUri) {
-								const content = await this._fileService.readFile(edit.beforeContentUri);
+								const content = await readSnapshotContent(edit.beforeContentUri, this._fileService);
 								await this._fileService.writeFile(edit.resource, content.value);
 							}
 							break;
@@ -763,14 +1064,14 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 							}
 							// Also restore before-content if we have it
 							if (edit.beforeContentUri && edit.originalResource) {
-								const content = await this._fileService.readFile(edit.beforeContentUri);
+								const content = await readSnapshotContent(edit.beforeContentUri, this._fileService);
 								await this._fileService.writeFile(edit.originalResource, content.value);
 							}
 							break;
 						case FileEditKind.Edit:
 							// Undo edit → write before-snapshot content
 							if (edit.beforeContentUri) {
-								const content = await this._fileService.readFile(edit.beforeContentUri);
+								const content = await readSnapshotContent(edit.beforeContentUri, this._fileService);
 								await this._fileService.writeFile(edit.resource, content.value);
 							}
 							break;
@@ -781,7 +1082,7 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 						case FileEditKind.Create:
 							// Redo create → recreate from after-snapshot
 							if (edit.afterContentUri) {
-								const content = await this._fileService.readFile(edit.afterContentUri);
+								const content = await readSnapshotContent(edit.afterContentUri, this._fileService);
 								await this._fileService.writeFile(edit.resource, content.value);
 							}
 							break;
@@ -796,14 +1097,14 @@ export class AgentHostEditingSession extends Disposable implements IChatEditingS
 							}
 							// Also apply after-content if we have it
 							if (edit.afterContentUri) {
-								const content = await this._fileService.readFile(edit.afterContentUri);
+								const content = await readSnapshotContent(edit.afterContentUri, this._fileService);
 								await this._fileService.writeFile(edit.resource, content.value);
 							}
 							break;
 						case FileEditKind.Edit:
 							// Redo edit → write after-snapshot content
 							if (edit.afterContentUri) {
-								const content = await this._fileService.readFile(edit.afterContentUri);
+								const content = await readSnapshotContent(edit.afterContentUri, this._fileService);
 								await this._fileService.writeFile(edit.resource, content.value);
 							}
 							break;

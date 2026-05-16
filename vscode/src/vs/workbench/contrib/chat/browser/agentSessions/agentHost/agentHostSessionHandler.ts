@@ -706,6 +706,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 	// ---- Agent registration -------------------------------------------------
 
 	private _registerAgent(): void {
+		const isSkipprAgent = this._config.provider === 'skippr';
 		const agentData: IChatAgentData = {
 			id: this._config.agentId,
 			name: this._config.agentId,
@@ -715,13 +716,13 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			extensionVersion: undefined,
 			extensionPublisherId: 'vscode',
 			extensionDisplayName: this._config.extensionDisplayName ?? 'Agent Host',
-			isDefault: false,
+			isDefault: isSkipprAgent,
 			isDynamic: true,
 			isCore: true,
 			metadata: { themeIcon: getAgentHostIcon(this._productService) },
 			slashCommands: [],
 			locations: [ChatAgentLocation.Chat],
-			modes: [ChatModeKind.Agent],
+			modes: isSkipprAgent ? [ChatModeKind.Ask, ChatModeKind.Edit, ChatModeKind.Agent] : [ChatModeKind.Agent],
 			disambiguation: [],
 		};
 

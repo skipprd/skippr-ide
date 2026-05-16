@@ -15,6 +15,7 @@ import { MarshalledId } from '../../../../../../base/common/marshallingIds.js';
 import { autorun, IReader } from '../../../../../../base/common/observable.js';
 import { isEqual } from '../../../../../../base/common/resources.js';
 import { URI } from '../../../../../../base/common/uri.js';
+import { generateUuid } from '../../../../../../base/common/uuid.js';
 import { localize } from '../../../../../../nls.js';
 import { MenuWorkbenchToolBar } from '../../../../../../platform/actions/browser/toolbar.js';
 import { MenuId } from '../../../../../../platform/actions/common/actions.js';
@@ -46,7 +47,7 @@ import { ChatContextKeys } from '../../../common/actions/chatContextKeys.js';
 import { IChatModel, IChatModelInputState } from '../../../common/model/chatModel.js';
 import { CHAT_PROVIDER_ID } from '../../../common/participants/chatParticipantContribTypes.js';
 import { IChatModelReference, IChatService } from '../../../common/chatService/chatService.js';
-import { IChatSessionsService, localChatSessionType } from '../../../common/chatSessionsService.js';
+import { IChatSessionsService, localChatSessionType, SessionType } from '../../../common/chatSessionsService.js';
 import { LocalChatSessionUri, getChatSessionType } from '../../../common/model/chatUri.js';
 import { ChatAgentLocation, ChatConfiguration, ChatModeKind } from '../../../common/constants.js';
 import { AgentSessionsControl } from '../../agentSessions/agentSessionsControl.js';
@@ -57,6 +58,7 @@ import { IChatViewsWelcomeDescriptor } from '../../viewsWelcome/chatViewsWelcome
 import { IWorkbenchLayoutService, LayoutSettings, Position } from '../../../../../services/layout/browser/layoutService.js';
 import { AgentSessionsViewerOrientation, AgentSessionsViewerPosition } from '../../agentSessions/agentSessions.js';
 import { IProgressService } from '../../../../../../platform/progress/common/progress.js';
+import product from '../../../../../../platform/product/common/product.js';
 import { ChatViewId } from '../../chat.js';
 import { IActivityService, ProgressBadge } from '../../../../../services/activity/common/activity.js';
 import { disposableTimeout } from '../../../../../../base/common/async.js';
@@ -730,7 +732,7 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		if (startNewSession) {
 			ref = modelRef ?? (this.chatService.transferredSessionResource
 				? await this.chatService.acquireOrLoadSession(this.chatService.transferredSessionResource, ChatAgentLocation.Chat, token, 'ChatViewPane#showModel')
-				: this.chatService.startNewLocalSession(ChatAgentLocation.Chat, { debugOwner: 'ChatViewPane#showModel' }));
+				: await this.startNewDefaultChatSession(token));
 			if (!ref) {
 				throw new Error('Could not start chat session');
 			}
@@ -779,6 +781,55 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		}
 
 		return model;
+	}
+
+	private async startNewDefaultChatSession(token: CancellationToken): Promise<IChatModelReference | undefined> {
+		if (product.defaultChatAgent?.chatExtensionId === 'skippr.data-agent') {
+			const canResolve = await this.waitForDefaultChatSessionType(SessionType.AgentHostSkippr, token);
+			if (!canResolve) {
+				return undefined;
+			}
+			return await this.chatService.acquireOrLoadSession(URI.from({
+				scheme: SessionType.AgentHostSkippr,
+				path: `/untitled-${generateUuid()}`,
+			}), ChatAgentLocation.Chat, token, 'ChatViewPane#startNewDefaultChatSession');
+		}
+		return this.chatService.startNewLocalSession(ChatAgentLocation.Chat, { debugOwner: 'ChatViewPane#showModel' });
+	}
+
+	private async waitForDefaultChatSessionType(sessionType: string, token: CancellationToken): Promise<boolean> {
+		while (!token.isCancellationRequested && !this._store.isDisposed) {
+			try {
+				if (await this.chatSessionsService.canResolveChatSession(sessionType)) {
+					return true;
+				}
+			} catch (error) {
+				this.logService.warn(`Failed to resolve default chat session type '${sessionType}'`, error);
+			}
+
+			await new Promise<void>(resolve => {
+				let done = false;
+				const finish = () => {
+					if (done) {
+						return;
+					}
+					done = true;
+					clearTimeout(timeout);
+					listeners.dispose();
+					cancellation.dispose();
+					resolve();
+				};
+				const timeout = setTimeout(finish, 250);
+				const listeners = new DisposableStore();
+				listeners.add(this.chatSessionsService.onDidChangeAvailability(finish));
+				listeners.add(Event.filter(this.chatSessionsService.onDidChangeItemsProviders, event => event.chatSessionType === sessionType)(finish));
+				listeners.add(Event.filter(this.chatSessionsService.onDidChangeContentProviderSchemes, event => event.added.includes(sessionType) || event.removed.includes(sessionType))(finish));
+				const cancellation = token.onCancellationRequested(() => {
+					finish();
+				});
+			});
+		}
+		return false;
 	}
 
 	private async updateWidgetLockState(sessionType: string): Promise<void> {

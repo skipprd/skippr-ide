@@ -9,7 +9,7 @@ import { Schemas } from '../../../../base/common/network.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { PolicyCategory } from '../../../../base/common/policy.js';
 import { SkipprSessionSearchPolicy } from '../../../../base/common/defaultAccount.js';
-import { AgentHostAhpJsonlLoggingSettingId, AgentHostClaudeAgentSdkPathSettingId, AgentHostEnabledSettingId, AgentHostIpcLoggingSettingId } from '../../../../platform/agentHost/common/agentService.js';
+import { AgentHostAhpJsonlLoggingSettingId, AgentHostClaudeAgentSdkPathSettingId, AgentHostEnabledSettingId, AgentHostIpcLoggingSettingId, isSkipprDefaultChatProduct } from '../../../../platform/agentHost/common/agentService.js';
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../../../platform/networkFilter/common/networkFilterService.js';
 import { AgentNetworkDomainSettingId } from '../../../../platform/networkFilter/common/settings.js';
 import { AgentSandboxEnabledValue, AgentSandboxSettingId } from '../../../../platform/sandbox/common/settings.js';
@@ -295,7 +295,7 @@ configurationRegistry.registerConfiguration({
 				]
 			},
 			default: {
-				'panel': 'always',
+				'panel': isSkipprDefaultChatProduct(product) ? 'never' : 'always',
 			},
 			tags: ['experimental'],
 			experiment: {
@@ -306,7 +306,7 @@ configurationRegistry.registerConfiguration({
 		'chat.implicitContext.suggestedContext': {
 			type: 'boolean',
 			markdownDescription: nls.localize('chat.implicitContext.suggestedContext', "Controls whether the new implicit context flow is shown. In Ask and Edit modes, the context will automatically be included. When using an agent, context will be suggested as an attachment. Selections are always included as context."),
-			default: true,
+			default: !isSkipprDefaultChatProduct(product),
 			agentsWindow: { default: false },
 		},
 		'chat.editing.autoAcceptDelay': {
@@ -979,7 +979,7 @@ configurationRegistry.registerConfiguration({
 		[AgentHostEnabledSettingId]: {
 			type: 'boolean',
 			description: nls.localize('chat.agentHost.enabled', "When enabled, some agents run in a separate agent host process."),
-			default: false,
+			default: isSkipprDefaultChatProduct(product),
 			tags: ['experimental', 'advanced'],
 			included: product.quality !== 'stable',
 		},

@@ -34,6 +34,10 @@ export const enum AgentHostIpcChannels {
 /** Configuration key that controls whether the local agent host process is spawned. */
 export const AgentHostEnabledSettingId = 'chat.agentHost.enabled';
 
+export function isSkipprDefaultChatProduct(product: { defaultChatAgent?: { chatExtensionId?: string } }): boolean {
+	return product.defaultChatAgent?.chatExtensionId?.toLowerCase() === 'skippr.data-agent';
+}
+
 /** Configuration key that controls whether per-host IPC traffic output channels are created. */
 export const AgentHostIpcLoggingSettingId = 'chat.agentHost.ipcLoggingEnabled';
 

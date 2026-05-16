@@ -9,7 +9,7 @@ import { Event } from '../../../../../../base/common/event.js';
 import { observableValue } from '../../../../../../base/common/observable.js';
 import { ThemeIcon } from '../../../../../../base/common/themables.js';
 import { localize } from '../../../../../../nls.js';
-import { AgentHostEnabledSettingId, IAgentHostService, type AgentProvider } from '../../../../../../platform/agentHost/common/agentService.js';
+import { AgentHostEnabledSettingId, IAgentHostService, isSkipprDefaultChatProduct, type AgentProvider } from '../../../../../../platform/agentHost/common/agentService.js';
 import { type ProtectedResourceMetadata } from '../../../../../../platform/agentHost/common/state/protocol/state.js';
 import { type AgentInfo, type CustomizationRef, type RootState } from '../../../../../../platform/agentHost/common/state/sessionState.js';
 import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
@@ -17,6 +17,7 @@ import { IDefaultAccountService } from '../../../../../../platform/defaultAccoun
 import { IFileService } from '../../../../../../platform/files/common/files.js';
 import { IInstantiationService } from '../../../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../../../platform/log/common/log.js';
+import product from '../../../../../../platform/product/common/product.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { IWorkbenchContribution } from '../../../../../common/contributions.js';
 import { IAgentHostFileSystemService } from '../../../../../services/agentHost/common/agentHostFileSystemService.js';
@@ -45,7 +46,8 @@ export { AgentHostSessionListController } from './agentHostSessionListController
  * registers each one as a chat session type with its own session handler,
  * list controller, and language model provider.
  *
- * Gated on the `chat.agentHost.enabled` setting.
+ * Gated on the `chat.agentHost.enabled` setting, except in Skippr IDE where
+ * the local agent host is the primary chat runtime.
  */
 export class AgentHostContribution extends Disposable implements IWorkbenchContribution {
 
@@ -85,7 +87,7 @@ export class AgentHostContribution extends Disposable implements IWorkbenchContr
 
 		this._isSessionsWindow = environmentService.isSessionsWindow;
 
-		if (!configurationService.getValue<boolean>(AgentHostEnabledSettingId)) {
+		if (!configurationService.getValue<boolean>(AgentHostEnabledSettingId) && !isSkipprDefaultChatProduct(product)) {
 			return;
 		}
 
@@ -159,7 +161,7 @@ export class AgentHostContribution extends Disposable implements IWorkbenchContr
 		// only agent-host sessions exist there. In VS Code, the same picker
 		// also lists the extension-host harness with the same displayName
 		// (e.g. "Skippr Agent"), so suffix with "- Agent Host" to disambiguate.
-		const displayName = this._isSessionsWindow
+		const displayName = agent.provider === 'skippr' || this._isSessionsWindow
 			? agent.displayName
 			: localize('agentHost.displayName', "{0} - Agent Host", agent.displayName);
 

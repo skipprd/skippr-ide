@@ -1,52 +1,15 @@
 {
   "name": "data-agent",
   "displayName": "Skippr Data Agent",
-  "description": "Default Skippr IDE chat agent — bridges to skippr chat and run transcripts.",
+  "description": "Skippr IDE support extension for authentication and run transcripts.",
   "version": "0.0.1",
   "publisher": "skippr",
   "engines": {
     "vscode": "^1.90.0"
   },
   "main": "./out/extension.js",
-  "activationEvents": ["onChatParticipant:skippr.data-agent", "onStartupFinished"],
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
-    "configurationDefaults": {
-      "skippr.data-agent.chat.githubMcpServer.enabled": false
-    },
-    "configuration": {
-      "title": "Skippr Data Agent",
-      "properties": {
-        "skippr.data-agent.chat.githubMcpServer.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "GitHub MCP integration in chat (off by default in Skippr IDE)."
-        }
-      }
-    },
-    "chatParticipants": [
-      {
-        "id": "skippr.data-agent",
-        "name": "skippr-data",
-        "fullName": "Skippr Data Agent",
-        "description": "Ask, plan, and run Skippr data-engineering workflows via skippr chat.",
-        "isSticky": true,
-        "sampleRequest": "What data is available in this pipeline?",
-        "commands": [
-          {
-            "name": "ask",
-            "description": "Read-only answers over workspace, catalog, lineage, docs, and thread context."
-          },
-          {
-            "name": "plan",
-            "description": "Produce a data-engineering plan without applying changes."
-          },
-          {
-            "name": "model",
-            "description": "Start or attach to the shared Skippr model run."
-          }
-        ]
-      }
-    ],
     "commands": [
       {
         "command": "skippr.dataAgent.output.extensionState",

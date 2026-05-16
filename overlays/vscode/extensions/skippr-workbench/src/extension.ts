@@ -1,16 +1,12 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { isSkipprChatModeId, skipprChatModeFor, SkipprChatModeId } from "./chatModes";
 import { loadPanelPayloadFromRust } from "./rustBridge";
 import {
   installSkipprCli,
   isSkipprRunKind,
   resolveSkipprCli,
-  parseSkipprChatResultFromJsonl,
-  runSkipprChatJsonl,
   runSkipprJson,
   showSkipprVersion,
-  SkipprChatProgressEvent,
   SkipprProcess,
   SkipprRunKind,
   startSkipprRun,
@@ -20,6 +16,7 @@ import {
   SkipprPipelineCodeLensProvider,
   skipprConfigDocumentSelector
 } from "./skipprPipelineCodeLens";
+import { pickSkipprPipelineAction } from "./skipprPipelineActionMenu";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
 import { parseShellArgs } from "./skipprCliArgs";
@@ -58,13 +55,8 @@ const splashDismissedKey = "skippr.splashDismissed.v1";
 const cliPathKey = "skippr.cliPath";
 const defaultPipelineKey = "skippr.defaultPipeline";
 const logLevelKey = "skippr.logLevel";
-const runCwdKey = "skippr.run.cwd";
 const runExtraArgsKey = "skippr.run.extraArgs";
 const vectorOnOpenStateKey = "skippr.vector.onOpen.lastRun.v1";
-const chatAttachmentMaxBytes = 128 * 1024;
-const chatAttachmentMaxFiles = 8;
-type SkipprChatApprovalDecision = { approvalId?: string; approved?: boolean };
-const pendingSkipprChatApprovals = new Map<string, (approved: boolean) => void>();
 const vectorOnOpenExcludeGlobs = [
   ".git/**",
   ".env",
@@ -307,15 +299,6 @@ async function configureConnection(): Promise<void> {
 }
 
 function getRunCwd(): string {
-  const config = vscode.workspace.getConfiguration();
-  const configured = config.get<string>(runCwdKey, "").trim();
-  if (configured) {
-    return configured;
-  }
-  const workspacePath = config.get<string>(workspacePathKey, "").trim();
-  if (workspacePath) {
-    return workspacePath;
-  }
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 }
 
@@ -335,16 +318,18 @@ function getConfigCwd(configPath?: string): string {
 }
 
 async function detectSkipprConfigs(): Promise<string[]> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!root) {
+    return [];
+  }
   const found: string[] = [];
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    for (const name of ["skippr.yml", "skippr.yaml"]) {
-      const uri = vscode.Uri.joinPath(folder.uri, name);
-      try {
-        await vscode.workspace.fs.stat(uri);
-        found.push(uri.fsPath);
-      } catch {
-        // Missing config files are expected in non-Skippr workspaces.
-      }
+  for (const name of ["skippr.yml", "skippr.yaml"]) {
+    const uri = vscode.Uri.joinPath(root, name);
+    try {
+      await vscode.workspace.fs.stat(uri);
+      found.push(uri.fsPath);
+    } catch {
+      // Missing config files are expected in non-Skippr workspaces.
     }
   }
   return found;
@@ -352,7 +337,10 @@ async function detectSkipprConfigs(): Promise<string[]> {
 
 /** `skippr.yml` / `skippr.yaml` next to the effective run CWD (workspace Skippr path / first folder). */
 async function resolveSkipprConfigAtCwd(): Promise<string> {
-  const cwd = getRunCwd();
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) {
+    return "";
+  }
   for (const name of ["skippr.yml", "skippr.yaml"]) {
     const fsPath = path.join(cwd, name);
     try {
@@ -363,6 +351,18 @@ async function resolveSkipprConfigAtCwd(): Promise<string> {
     }
   }
   return "";
+}
+
+function isWorkspaceRootConfigPath(configPath: string | undefined): boolean {
+  if (!configPath) {
+    return false;
+  }
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) {
+    return false;
+  }
+  const normalized = path.resolve(configPath);
+  return normalized === path.join(root, "skippr.yml") || normalized === path.join(root, "skippr.yaml");
 }
 
 async function chooseActiveConfig(output: vscode.LogOutputChannel): Promise<string | undefined> {
@@ -850,6 +850,10 @@ async function runSkipprDoctor(
     await showSetupWebview(output, statusItem);
     return;
   }
+  if (!isWorkspaceRootConfigPath(configPath)) {
+    vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
+    return;
+  }
   const cliPath = await resolveCliOrOfferInstall(output);
   if (!cliPath) {
     return;
@@ -949,6 +953,10 @@ async function runSkipprCommand(
   if (!configPath) {
     vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
     await showSetupWebview(output, statusItem);
+    return;
+  }
+  if (!isWorkspaceRootConfigPath(configPath)) {
+    vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
     return;
   }
 
@@ -1111,412 +1119,6 @@ async function executeRunDebugPanelRun(
   vscode.window.showErrorMessage(`Unknown Skippr panel command: ${cmd || "(empty)"}`);
 }
 
-async function resolveChatRunTarget(output: vscode.LogOutputChannel): Promise<{ pipeline: string; configPath: string } | undefined> {
-  const configPath = activeConfigPath || (await chooseActiveConfig(output));
-  if (!configPath) {
-    return undefined;
-  }
-  const config = vscode.workspace.getConfiguration();
-  const configuredPipeline = config.get<string>(defaultPipelineKey, "").trim();
-  const configShow = await getConfigShow(output);
-  if (configuredPipeline && (!configShow?.pipelines.length || configShow.pipelines.includes(configuredPipeline))) {
-    return { pipeline: configuredPipeline, configPath };
-  }
-  const pipeline = configShow?.default_pipeline ?? configShow?.pipelines[0];
-  return pipeline ? { pipeline, configPath } : undefined;
-}
-
-function approvalCardMarkdown(prompt: string): vscode.MarkdownString {
-  const md = new vscode.MarkdownString(
-    `<div style="border:1px solid #3c3c3c;background:#111;padding:8px;border-radius:0;color:#d4d4d4;font-size:12px;line-height:1.35">
-<div style="font-weight:600;color:#fff;margin-bottom:4px">Approval required</div>
-<div>${escapeHtml(prompt)}</div>
-</div>`
-  );
-  md.supportHtml = true;
-  return md;
-}
-
-function renderApprovalCard(response: vscode.ChatResponseStream, approvalId: string, prompt: string): void {
-  response.markdown(approvalCardMarkdown(prompt));
-  response.button({
-    command: "skippr.workbench.internal.chatApprovalDecision",
-    title: "Approve",
-    arguments: [{ approvalId, approved: true }]
-  });
-  response.button({
-    command: "skippr.workbench.internal.chatApprovalDecision",
-    title: "Reject",
-    arguments: [{ approvalId, approved: false }]
-  });
-}
-
-function waitForApprovalDecision(approvalId: string): Promise<boolean> {
-  return new Promise(resolve => {
-    pendingSkipprChatApprovals.set(approvalId, approved => {
-      pendingSkipprChatApprovals.delete(approvalId);
-      resolve(approved);
-    });
-  });
-}
-
-async function runSkipprChatCli(
-  modeId: "ask" | "plan",
-  prompt: string,
-  output: vscode.LogOutputChannel,
-  statusItem: vscode.StatusBarItem,
-  onProgress?: (event: SkipprChatProgressEvent) => void,
-  canRenderApproval = false
-): Promise<string> {
-  const mode = skipprChatModeFor(modeId);
-  const target = await resolveChatRunTarget(output);
-  if (!target) {
-    throw new Error("No Skippr config or pipeline found. Run Skippr: Setup Workspace, then set a default pipeline.");
-  }
-  const cliPath = await resolveCliOrOfferInstall(output);
-  if (!cliPath) {
-    throw new Error("Skippr CLI was not found.");
-  }
-  const message =
-    modeId === "plan" && !prompt.trim() ? "produce a data-engineering plan" : prompt.trim();
-
-  output.show(true);
-  const headline = `${mode.label} ${target.pipeline}`;
-  setRunStatusRunning(statusItem, headline);
-  const jsonl = await runSkipprChatJsonl(
-    cliPath,
-    target.configPath,
-    target.pipeline,
-    modeId === "ask" ? "ask" : "plan",
-    message,
-    getConfigCwd(target.configPath),
-    output,
-    skipprSpawnEnv(target.configPath, target.pipeline),
-    onProgress
-  );
-  const parsed = parseSkipprChatResultFromJsonl(jsonl.lines);
-  if (parsed.approvalPrompt && parsed.threadId) {
-    const approvalId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    if (canRenderApproval) {
-      onProgress?.({
-        kind: "approval",
-        status: "running",
-        label: "Approval required",
-        id: approvalId,
-        detail: parsed.approvalPrompt
-      });
-    }
-    const approved = canRenderApproval ? await waitForApprovalDecision(approvalId) : false;
-    onProgress?.({
-      kind: "approval",
-      status: approved ? "completed" : "failed",
-      label: approved ? "Approved" : "Rejected",
-      detail: parsed.approvalPrompt
-    });
-    const approvalMessage = JSON.stringify({
-      user: approved ? "Approval result: approved" : "Approval result: rejected",
-      execution_surface: "ide_chat",
-      context: {
-        approval: {
-          approved,
-          prompt: parsed.approvalPrompt
-        }
-      }
-    });
-    const resumed = await runSkipprChatJsonl(
-      cliPath,
-      target.configPath,
-      target.pipeline,
-      modeId === "ask" ? "ask" : "plan",
-      approvalMessage,
-      getConfigCwd(target.configPath),
-      output,
-      skipprSpawnEnv(target.configPath, target.pipeline),
-      onProgress,
-      parsed.threadId
-    );
-    const resumedParsed = parseSkipprChatResultFromJsonl(resumed.lines);
-    const resumedOk = resumed.code === 0 && !resumed.signal && resumedParsed.ok;
-    setRunStatusIdle(statusItem);
-    if (!resumedOk) {
-      const stderrTail = resumed.stderr.trim().split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
-      const detail = resumedParsed.failureSummary || stderrTail || `exit code ${resumed.code ?? "unknown"}`;
-      throw new Error(`Skippr ${mode.label} approval resume failed: ${detail}`);
-    }
-    return (
-      resumedParsed.assistantMarkdown ||
-      (resumedParsed.threadId ? `Chat turn completed (thread \`${resumedParsed.threadId}\`).` : `${mode.label} completed.`)
-    );
-  }
-  const chatOk = jsonl.code === 0 && !jsonl.signal && parsed.ok;
-  finishRunStatusPanel({
-    headline,
-    code: jsonl.code,
-    signal: jsonl.signal,
-    elapsedMs: jsonl.elapsedMs,
-    logicalOk: chatOk,
-    detail: chatOk ? "CLI reported a successful chat turn." : "CLI reported failure — see output."
-  });
-  setRunStatusIdle(statusItem);
-  if (!chatOk) {
-    const stderrTail = jsonl.stderr.trim().split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
-    const detail = parsed.failureSummary || stderrTail || `exit code ${jsonl.code ?? "unknown"}`;
-    throw new Error(`Skippr ${mode.label} failed: ${detail}`);
-  }
-  const text =
-    parsed.assistantMarkdown ||
-    (parsed.threadId ? `Chat turn completed (thread \`${parsed.threadId}\`).` : `${mode.label} completed.`);
-  return text;
-}
-
-function renderSkipprChatProgress(event: SkipprChatProgressEvent): string {
-  const status = event.status === "running" ? "Running" : event.status === "completed" ? "Complete" : "Failed";
-  const prefix = event.kind === "tool" ? "Tool" : event.kind === "llm" ? "LLM" : event.kind === "phase" ? "Phase" : event.kind === "approval" ? "Approval" : "Skippr";
-  const context = event.phase && event.kind !== "phase" ? ` (${event.phase})` : "";
-  const detail = event.detail ? `: ${event.detail}` : "";
-  return `${prefix} ${status.toLowerCase()}: ${event.label}${context}${detail}`;
-}
-
-function forwardSkipprChatProgress(commandId: unknown, requestId: unknown, event: SkipprChatProgressEvent): void {
-  if (typeof commandId !== "string" || !commandId.trim() || typeof requestId !== "string" || !requestId.trim()) {
-    return;
-  }
-  void vscode.commands.executeCommand(commandId, { requestId, event }).then(undefined, () => undefined);
-}
-
-function isSecretLikePath(fsPath: string): boolean {
-  const normalized = fsPath.replace(/\\/g, "/").toLowerCase();
-  const base = path.posix.basename(normalized);
-  return (
-    base === ".env" ||
-    base.startsWith(".env.") ||
-    normalized.includes("/.env.") ||
-    /(^|[/._-])(secret|secrets|credential|credentials|token|private)([/._-]|$)/.test(normalized) ||
-    /\.(pem|p8|key)$/i.test(base)
-  );
-}
-
-function fileReferenceUri(value: unknown): vscode.Uri | undefined {
-  if (value instanceof vscode.Uri) {
-    return value;
-  }
-  if (value instanceof vscode.Location) {
-    return value.uri;
-  }
-  if (value && typeof value === "object" && "uri" in value) {
-    const uri = (value as { uri?: unknown }).uri;
-    if (uri instanceof vscode.Uri) {
-      return uri;
-    }
-  }
-  return undefined;
-}
-
-type ChatContextFile = {
-  name: string;
-  path: string;
-  uri: string;
-  external: boolean;
-  large?: boolean;
-};
-
-type ChatContextEnvelope = {
-  user: string;
-  execution_surface: "ide_chat";
-  context?: {
-    files?: ChatContextFile[];
-    skipped_files?: string[];
-  };
-};
-
-async function chatContextEnvelopeForRequest(request: vscode.ChatRequest): Promise<string> {
-  const files: ChatContextFile[] = [];
-  const skipped: string[] = [];
-  for (const ref of request.references ?? []) {
-    if (files.length >= chatAttachmentMaxFiles) {
-      skipped.push("additional files");
-      break;
-    }
-    const uri = fileReferenceUri(ref.value);
-    if (!uri || uri.scheme !== "file") {
-      continue;
-    }
-    if (isSecretLikePath(uri.fsPath)) {
-      skipped.push(path.basename(uri.fsPath));
-      continue;
-    }
-    try {
-      const stat = await vscode.workspace.fs.stat(uri);
-      if (stat.type !== vscode.FileType.File) {
-        continue;
-      }
-      const folder = vscode.workspace.getWorkspaceFolder(uri);
-      const rel = folder ? path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/") : uri.fsPath;
-      files.push({
-        name: path.basename(uri.fsPath),
-        path: folder ? `./${rel}` : uri.fsPath,
-        uri: uri.toString(),
-        external: !folder,
-        large: stat.size > chatAttachmentMaxBytes || undefined
-      });
-    } catch {
-      skipped.push(path.basename(uri.fsPath));
-    }
-  }
-  const envelope: ChatContextEnvelope = { user: request.prompt.trim(), execution_surface: "ide_chat" };
-  if (files.length || skipped.length) {
-    envelope.context = {};
-    if (files.length) {
-      envelope.context.files = files;
-    }
-    if (skipped.length) {
-      envelope.context.skipped_files = skipped;
-    }
-  }
-  return JSON.stringify(envelope);
-}
-
-async function ensureChatSession(
-  context: vscode.ExtensionContext,
-  statusItem: vscode.StatusBarItem,
-  authProvider: SkipprAuthenticationProvider
-): Promise<AuthSession> {
-  const existing = await ensureSession(context, statusItem, authProvider);
-  if (existing) {
-    return existing;
-  }
-
-  const created = await signIn(context, statusItem, authProvider);
-  if (!created) {
-    throw new Error("Sign in to Skippr to use Skippr Data Agent chat.");
-  }
-  return created;
-}
-
-function registerSkipprChatParticipant(
-  context: vscode.ExtensionContext,
-  output: vscode.LogOutputChannel,
-  statusItem: vscode.StatusBarItem,
-  authStatusItem: vscode.StatusBarItem,
-  authProvider: SkipprAuthenticationProvider
-): void {
-  const participant = vscode.chat.createChatParticipant("skippr.chat", async (request, _chatContext, response) => {
-    const command = request.command ?? "ask";
-    if (command === "model") {
-      response.markdown("Starting or attaching to the shared Skippr model run. Live logs are available in Run/Debug and the Skippr output channel.");
-      const target = await resolveChatRunTarget(output);
-      await runSkipprCommand("model", output, statusItem, target?.pipeline, target?.configPath);
-      response.markdown("Model run is now visible under Run/Debug. Stop/cancel is the only in-flight control.");
-      return { metadata: { command, mode: "agent" } };
-    }
-    if (command !== "ask" && command !== "plan") {
-      response.markdown("Use `/ask`, `/plan`, or `/model` with `@skippr`.");
-      return { metadata: { command } };
-    }
-
-    await ensureChatSession(context, authStatusItem, authProvider);
-    const prompt = await chatContextEnvelopeForRequest(request);
-    const text = await runSkipprChatCli(command, prompt, output, statusItem, event => {
-      if (event.kind === "approval" && event.status === "running" && event.id && event.detail) {
-        renderApprovalCard(response, event.id, event.detail);
-        return;
-      }
-      response.progress(renderSkipprChatProgress(event));
-    }, true);
-    response.markdown(text);
-    return { metadata: { command, mode: command } };
-  });
-  participant.iconPath = new vscode.ThemeIcon("sparkle");
-  participant.followupProvider = {
-    provideFollowups: () => [
-      { prompt: "@skippr /ask What data is available in this pipeline?", label: "Ask about this pipeline" },
-      { prompt: "@skippr /plan Model this pipeline", label: "Plan pipeline modeling" },
-      { prompt: "@skippr /model Model this pipeline", label: "Run model" }
-    ]
-  };
-  context.subscriptions.push(participant);
-}
-
-async function runSkipprChatMode(
-  modeId: SkipprChatModeId,
-  output: vscode.LogOutputChannel,
-  statusItem: vscode.StatusBarItem
-): Promise<void> {
-  const mode = skipprChatModeFor(modeId);
-  if (mode.canRunModel) {
-    await runSkipprCommand("model", output, statusItem);
-    return;
-  }
-
-  if (!mode.cliCommand) {
-    vscode.window.showWarningMessage(`Skippr ${mode.label} is not wired to a CLI command.`);
-    return;
-  }
-
-  const request = await showRunConfigModal(mode.cliCommand, output);
-  if (!request?.pipeline) {
-    return;
-  }
-  const configPath = request.configPath?.trim() || activeConfigPath || (await chooseActiveConfig(output));
-  if (!configPath) {
-    vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
-    return;
-  }
-  const cliPath = await resolveCliOrOfferInstall(output);
-  if (!cliPath) {
-    return;
-  }
-
-  const prompt =
-    mode.id === "ask"
-      ? await vscode.window.showInputBox({ prompt: "Ask Skippr a read-only question about this pipeline." })
-      : await vscode.window.showInputBox({ prompt: "Describe the data-engineering goal to plan.", placeHolder: "Optional" });
-  if (mode.id === "ask" && !prompt?.trim()) {
-    return;
-  }
-
-  const message =
-    mode.id === "ask"
-      ? (prompt?.trim() ?? "")
-      : (prompt?.trim() || "produce a data-engineering plan");
-
-  output.show(true);
-  const headline = `${mode.label} ${request.pipeline}`;
-  setRunStatusRunning(statusItem, headline);
-  const jsonl = await runSkipprChatJsonl(
-    cliPath,
-    configPath,
-    request.pipeline,
-    mode.id === "ask" ? "ask" : "plan",
-    message,
-    getConfigCwd(configPath),
-    output,
-    skipprSpawnEnv(configPath, request.pipeline)
-  );
-  const parsed = parseSkipprChatResultFromJsonl(jsonl.lines);
-  const chatOk = jsonl.code === 0 && !jsonl.signal && parsed.ok;
-  finishRunStatusPanel({
-    headline,
-    code: jsonl.code,
-    signal: jsonl.signal,
-    elapsedMs: jsonl.elapsedMs,
-    logicalOk: chatOk,
-    detail: chatOk ? "CLI reported a successful chat turn." : "CLI reported failure — see output."
-  });
-  setRunStatusIdle(statusItem);
-  if (!chatOk) {
-    const stderrTail = jsonl.stderr.trim().split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
-    const detail = parsed.failureSummary || stderrTail || `exit code ${jsonl.code ?? "unknown"}`;
-    vscode.window.showErrorMessage(`Skippr ${mode.label} failed: ${detail}`);
-    return;
-  }
-  const text =
-    parsed.assistantMarkdown ||
-    (parsed.threadId ? `Chat turn completed (thread \`${parsed.threadId}\`).` : `${mode.label} completed.`);
-  output.info(text);
-  vscode.window.showInformationMessage(`Skippr ${mode.label} completed.`);
-}
-
 async function runVectorIngestOnOpen(
   context: vscode.ExtensionContext,
   output: vscode.LogOutputChannel,
@@ -1604,31 +1206,7 @@ async function runPickPipelineAction(
   const cfg = configFsPath.trim();
   const pipe = pipeline.trim();
   const wsExtra = vscode.workspace.getConfiguration().get<string>(runExtraArgsKey, "").trim();
-  const picked = await vscode.window.showQuickPick(
-    [
-      {
-        label: "$(search) Discover",
-        description: "Discover namespaces (same as Run Skippr title bar)",
-        command: "discover" as const
-      },
-      {
-        label: "$(sync) Sync",
-        description: "One bounded sync pass (sync-once)",
-        command: "sync" as const
-      },
-      {
-        label: "$(circuit-board) Model",
-        description: "Run Skippr model for this pipeline",
-        command: "model" as const
-      },
-      {
-        label: "$(pass) Doctor",
-        description: "Validate environment and configuration",
-        command: "doctor" as const
-      }
-    ],
-    { title: `Run Skippr — ${pipe}`, placeHolder: "Choose action (uses skippr.run.extraArgs from settings)" }
-  );
+  const picked = await pickSkipprPipelineAction(pipe);
   if (!picked) {
     return false;
   }
@@ -1654,6 +1232,10 @@ async function runSkipprTestFromCliPanel(
   statusItem: vscode.StatusBarItem,
   opts: { configPath: string; pipeline: string; logLevel: string; testSelect: string; extraArgsText: string }
 ): Promise<void> {
+  if (!isWorkspaceRootConfigPath(opts.configPath)) {
+    vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
+    return;
+  }
   const cliPath = await resolveCliOrOfferInstall(output);
   if (!cliPath) {
     return;
@@ -2624,29 +2206,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     resolveCliPath: () => resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
     output
   });
-  registerSkipprChatParticipant(context, output, runStatusItem, statusItem, authProvider);
-  context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "skippr.workbench.internal.runChatCli",
-      async (args: { mode: "ask" | "plan"; prompt: string; progressCommand?: string; progressRequestId?: string }) => {
-        await ensureChatSession(context, statusItem, authProvider);
-        return await runSkipprChatCli(args.mode, args.prompt, output, runStatusItem, event => {
-          forwardSkipprChatProgress(args.progressCommand, args.progressRequestId, event);
-        }, Boolean(args.progressCommand && args.progressRequestId));
-      }
-    ),
-    vscode.commands.registerCommand(
-      "skippr.workbench.internal.chatApprovalDecision",
-      async (args?: SkipprChatApprovalDecision) => {
-        const approvalId = typeof args?.approvalId === "string" ? args.approvalId : "";
-        const resolve = approvalId ? pendingSkipprChatApprovals.get(approvalId) : undefined;
-        if (resolve) {
-          resolve(args?.approved === true);
-        }
-      }
-    )
-  );
-
   registerSkipprPipelineTestControllers(context, {
     output,
     resolveCliPath: () => resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
@@ -2816,22 +2375,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       skipprConfigDocumentSelector,
       new SkipprPipelineCodeLensProvider("skippr.run.pickPipelineAction")
     ),
-    vscode.commands.registerCommand("skippr.chat.runMode", async (modeId: unknown) => {
-      if (!isSkipprChatModeId(modeId)) {
-        vscode.window.showErrorMessage("Invalid Skippr chat mode. Expected ask, plan, or agent.");
-        return;
-      }
-      await runSkipprChatMode(modeId, output, runStatusItem);
-    }),
-    vscode.commands.registerCommand("skippr.chat.ask", async () => {
-      await runSkipprChatMode("ask", output, runStatusItem);
-    }),
-    vscode.commands.registerCommand("skippr.chat.plan", async () => {
-      await runSkipprChatMode("plan", output, runStatusItem);
-    }),
-    vscode.commands.registerCommand("skippr.chat.runModelSubagent", async () => {
-      await runSkipprChatMode("agent", output, runStatusItem);
-    }),
     vscode.commands.registerCommand("skippr.run.stopSyncPipeline", () => {
       stopActiveRun(runStatusItem, output);
     }),

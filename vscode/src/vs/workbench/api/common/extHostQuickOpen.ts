@@ -278,6 +278,7 @@ export function createExtHostQuickOpen(mainContext: IMainContext, workspace: IEx
 		private _enabled = true;
 		private _busy = false;
 		private _ignoreFocusOut = true;
+		private _hideInput = false;
 		private _value = '';
 		private _valueSelection: readonly [number, number] | undefined = undefined;
 		private _placeholder: string | undefined;
@@ -353,6 +354,15 @@ export function createExtHostQuickOpen(mainContext: IMainContext, workspace: IEx
 		set ignoreFocusOut(ignoreFocusOut: boolean) {
 			this._ignoreFocusOut = ignoreFocusOut;
 			this.update({ ignoreFocusOut });
+		}
+
+		get hideInput() {
+			return this._hideInput;
+		}
+
+		set hideInput(hideInput: boolean) {
+			this._hideInput = hideInput;
+			this.update({ hideInput });
 		}
 
 		get value() {

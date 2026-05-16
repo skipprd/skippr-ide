@@ -339,9 +339,10 @@ class ChatEditingOverlayController {
 				return undefined;
 			}
 
-			// Directly query global editing sessions (inline chat has its own overlay)
+			// Inline chat has its own overlay; include global sessions and agent-host
+			// sessions that expose applied edits for inline review.
 			for (const session of chatEditingService.editingSessionsObs.read(r)) {
-				if (!session.isGlobalEditingSession) {
+				if (!session.isGlobalEditingSession && !session.supportsInlineDiffReview) {
 					continue;
 				}
 				const entry = session.readEntry(uri, r);

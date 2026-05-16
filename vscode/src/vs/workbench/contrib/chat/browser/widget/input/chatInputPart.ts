@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as dom from '../../../../../../base/browser/dom.js';
-import { addDisposableListener } from '../../../../../../base/browser/dom.js';
+import { addDisposableListener, EventLike } from '../../../../../../base/browser/dom.js';
 import { DEFAULT_FONT_FAMILY } from '../../../../../../base/browser/fonts.js';
 import { IHistoryNavigationWidget } from '../../../../../../base/browser/history.js';
 import { hasModifierKeys, StandardKeyboardEvent } from '../../../../../../base/browser/keyboardEvent.js';
@@ -146,6 +146,7 @@ const CachedLanguageModelsKey = 'chat.cachedLanguageModels.v2';
 const CHAT_INPUT_PICKER_COLLAPSE_WIDTH = 480;
 const PERMISSION_LEVEL_OPTION_ID = 'permissionLevel';
 const SKIPPR_CHAT_MODE_STORAGE_KEY = 'skippr.chat.mode';
+const ATTACH_CONTEXT_ACTION_ID = 'workbench.action.chat.attachContext';
 type SkipprChatModeId = 'ask' | 'plan' | 'agent';
 
 export interface IChatInputStyles {
@@ -2490,6 +2491,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 						return new HiddenActionViewItem(action);
 					}
 					return this.instantiationService.createInstance(ChatSessionPickersContainerActionItem, action, widgets);
+				} else if (action.id === ATTACH_CONTEXT_ACTION_ID) {
+					return new AttachContextActionViewItem(action, widget, options);
 				}
 				return undefined;
 			}
@@ -3944,6 +3947,25 @@ class ChatSessionPickersContainerActionItem extends ActionViewItem {
 			widget.dispose();
 		}
 		super.dispose();
+	}
+}
+
+class AttachContextActionViewItem extends ActionViewItem {
+	constructor(
+		action: IAction,
+		private readonly widget: IChatWidget,
+		options?: IActionViewItemOptions
+	) {
+		super(null, action, options ?? {});
+	}
+
+	override onClick(event: EventLike, preserveFocus = false): void {
+		this.setActionContext({
+			widget: this.widget,
+			anchor: this.label ?? this.element,
+			preserveFocus,
+		});
+		super.onClick(event, preserveFocus);
 	}
 }
 

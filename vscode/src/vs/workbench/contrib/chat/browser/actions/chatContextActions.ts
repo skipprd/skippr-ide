@@ -5,12 +5,13 @@
 
 import { asArray } from '../../../../../base/common/arrays.js';
 import { DeferredPromise, isThenable } from '../../../../../base/common/async.js';
-import { CancellationTokenSource } from '../../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { DisposableStore, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { autorun, observableValue } from '../../../../../base/common/observable.js';
+import { basename } from '../../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { isObject } from '../../../../../base/common/types.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -18,12 +19,18 @@ import { ServicesAccessor } from '../../../../../editor/browser/editorExtensions
 import { Range } from '../../../../../editor/common/core/range.js';
 import { EditorContextKeys } from '../../../../../editor/common/editorContextKeys.js';
 import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
+import { ILanguageService } from '../../../../../editor/common/languages/language.js';
+import { IModelService } from '../../../../../editor/common/services/model.js';
+import { getIconClasses } from '../../../../../editor/common/services/getIconClasses.js';
 import { AbstractGotoSymbolQuickAccessProvider, IGotoSymbolQuickPickItem } from '../../../../../editor/contrib/quickAccess/browser/gotoSymbolQuickAccess.js';
 import { localize, localize2 } from '../../../../../nls.js';
+import { ActionListItemKind, IActionListDelegate, IActionListItem } from '../../../../../platform/actionWidget/browser/actionList.js';
+import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
 import { Action2, MenuId, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
+import { ILabelService } from '../../../../../platform/label/common/label.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
@@ -36,6 +43,9 @@ import { ResourceContextKey } from '../../../../common/contextkeys.js';
 import { EditorResourceAccessor, isEditorCommandsContext, SideBySideEditor } from '../../../../common/editor.js';
 import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
+import { QueryBuilder } from '../../../../services/search/common/queryBuilder.js';
+import { ISearchService } from '../../../../services/search/common/search.js';
 import { ExplorerFolderContext } from '../../../files/common/files.js';
 import { CTX_INLINE_CHAT_V2_ENABLED } from '../../../inlineChat/common/inlineChat.js';
 import { AnythingQuickAccessProvider } from '../../../search/browser/anythingQuickAccess.js';
@@ -439,6 +449,10 @@ interface IContextPickItemItem extends IQuickPickItem {
 	item: IChatContextValueItem | IChatContextPickerItem;
 }
 
+type IAttachContextWidgetItem =
+	| { kind: 'context'; pick: IContextPickItemItem }
+	| { kind: 'file'; pick: IQuickPickItemWithResource };
+
 /** These are the types we get from "platform QP" */
 type IQuickPickServicePickItem = IGotoSymbolQuickPickItem | ISymbolQuickPickItem | IQuickPickItemWithResource;
 
@@ -466,10 +480,11 @@ function isIQuickPickItemWithResource(obj: unknown): obj is IQuickPickItemWithRe
 
 
 export class AttachContextAction extends Action2 {
+	static readonly ID = 'workbench.action.chat.attachContext';
 
 	constructor() {
 		super({
-			id: 'workbench.action.chat.attachContext',
+			id: AttachContextAction.ID,
 			title: localize2('workbench.action.chat.attachContext.label.2', "Add Context..."),
 			icon: Codicon.add,
 			category: CHAT_CATEGORY,
@@ -527,7 +542,7 @@ export class AttachContextAction extends Action2 {
 		const keybindingService = accessor.get(IKeybindingService);
 		const contextPickService = accessor.get(IChatContextPickService);
 
-		const context = args[0] as { widget?: IChatWidget; placeholder?: string } | undefined;
+		const context = args[0] as { widget?: IChatWidget; placeholder?: string; anchor?: HTMLElement } | undefined;
 		const widget = context?.widget ?? widgetService.lastFocusedWidget;
 		if (!widget) {
 			return;
@@ -550,7 +565,153 @@ export class AttachContextAction extends Action2 {
 			});
 		}
 
-		instantiationService.invokeFunction(this._show.bind(this), widget, quickPickItems, context?.placeholder);
+		if (context?.anchor) {
+			instantiationService.invokeFunction(this._showWidget.bind(this), widget, quickPickItems, context.anchor);
+		} else {
+			instantiationService.invokeFunction(this._show.bind(this), widget, quickPickItems, context?.placeholder);
+		}
+	}
+
+	private _showWidget(accessor: ServicesAccessor, widget: IChatWidget, additionPicks: IContextPickItemItem[], anchor: HTMLElement): void {
+		const actionWidgetService = accessor.get(IActionWidgetService);
+		const instantiationService = accessor.get(IInstantiationService);
+		const queryBuilder = instantiationService.createInstance(QueryBuilder);
+		const searchService = accessor.get(ISearchService);
+		const workspaceContextService = accessor.get(IWorkspaceContextService);
+		const editorGroupsService = accessor.get(IEditorGroupsService);
+		const labelService = accessor.get(ILabelService);
+		const modelService = accessor.get(IModelService);
+		const languageService = accessor.get(ILanguageService);
+
+		const toActionItems = (query = '', token = CancellationToken.None): Promise<readonly IActionListItem<IAttachContextWidgetItem>[]> => {
+			const contextItems = additionPicks.map((pick): IActionListItem<IAttachContextWidgetItem> => ({
+				kind: ActionListItemKind.Action,
+				label: pick.label,
+				description: pick.description,
+				keybinding: pick.keybinding,
+				group: { title: localize('chatContext.contextGroup', "Context"), icon: pick.item.icon },
+				item: { kind: 'context', pick },
+			}));
+
+			const fileItemsPromise = query
+				? this._queryFileItems(query, token, queryBuilder, searchService, workspaceContextService, labelService, modelService, languageService)
+				: Promise.resolve(this._openEditorFileItems(editorGroupsService, labelService, modelService, languageService));
+
+			return fileItemsPromise.then(fileItems => [...contextItems, ...fileItems]);
+		};
+
+		const delegate: IActionListDelegate<IAttachContextWidgetItem> = {
+			onSelect: item => {
+				actionWidgetService.hide();
+				if (item.kind === 'context') {
+					void this._handleContextWidgetPick(accessor, widget, item.pick);
+				} else {
+					void instantiationService.invokeFunction(this._handleQPPick.bind(this), widget, false, item.pick);
+				}
+			},
+			onFilter: (query, token) => toActionItems(query, token),
+			onHide: () => widget.focusInput(),
+		};
+
+		toActionItems().then(items => {
+			actionWidgetService.show<IAttachContextWidgetItem>(
+				'chat.attachContext',
+				false,
+				items,
+				delegate,
+				anchor,
+				undefined,
+				[],
+				{
+					getAriaLabel: item => item.label ?? '',
+					getWidgetAriaLabel: () => localize('chatContext.attachWidget.ariaLabel', "Add Context"),
+				},
+				{ showFilter: true, filterPlaceholder: localize('chatContext.attachWidget.filter', "Search files or context...") },
+			);
+		});
+	}
+
+	private _openEditorFileItems(
+		editorGroupsService: IEditorGroupsService,
+		labelService: ILabelService,
+		modelService: IModelService,
+		languageService: ILanguageService,
+	): IActionListItem<IAttachContextWidgetItem>[] {
+		const seen = new Set<string>();
+		const items: IActionListItem<IAttachContextWidgetItem>[] = [];
+		for (const group of editorGroupsService.groups) {
+			for (const editor of group.editors) {
+				const resource = EditorResourceAccessor.getCanonicalUri(editor, { supportSideBySide: SideBySideEditor.PRIMARY });
+				if (!resource || seen.has(resource.toString())) {
+					continue;
+				}
+				seen.add(resource.toString());
+				if (![Schemas.file, Schemas.vscodeRemote, Schemas.untitled, Schemas.vscodeUserData].includes(resource.scheme)) {
+					continue;
+				}
+				items.push(this._fileActionItem(resource, labelService, modelService, languageService, localize('chatContext.openFilesGroup', "Open Files")));
+			}
+		}
+		return items;
+	}
+
+	private async _queryFileItems(
+		query: string,
+		token: CancellationToken,
+		queryBuilder: QueryBuilder,
+		searchService: ISearchService,
+		workspaceContextService: IWorkspaceContextService,
+		labelService: ILabelService,
+		modelService: IModelService,
+		languageService: ILanguageService,
+	): Promise<IActionListItem<IAttachContextWidgetItem>[]> {
+		if (!query.trim()) {
+			return [];
+		}
+		const folders = workspaceContextService.getWorkspace().folders;
+		if (folders.length === 0) {
+			return [];
+		}
+		const fileQuery = queryBuilder.file(folders, {
+			filePattern: query,
+			maxResults: 30,
+		});
+		const { results } = await searchService.fileSearch(fileQuery, token);
+		return results.map(result => this._fileActionItem(result.resource, labelService, modelService, languageService, localize('chatContext.filesGroup', "Files")));
+	}
+
+	private _fileActionItem(
+		resource: URI,
+		labelService: ILabelService,
+		modelService: IModelService,
+		languageService: ILanguageService,
+		groupTitle: string,
+	): IActionListItem<IAttachContextWidgetItem> {
+		const label = basename(resource);
+		return {
+			kind: ActionListItemKind.Action,
+			label,
+			description: labelService.getUriLabel(resource, { relative: true }),
+			group: { title: groupTitle, icon: Codicon.file },
+			item: {
+				kind: 'file',
+				pick: {
+					label,
+					resource,
+					iconClasses: getIconClasses(modelService, languageService, resource),
+				},
+			},
+		};
+	}
+
+	private async _handleContextWidgetPick(accessor: ServicesAccessor, widget: IChatWidget, item: IContextPickItemItem): Promise<void> {
+		const quickInputService = accessor.get(IQuickInputService);
+		const commandService = accessor.get(ICommandService);
+		if (item.item.type === 'valuePick') {
+			await this._handleContextPick(item.item, widget);
+		} else {
+			await this._handleContextPickerItem(quickInputService, commandService, item.item, widget);
+		}
 	}
 
 	private _show(accessor: ServicesAccessor, widget: IChatWidget, additionPicks: IContextPickItemItem[] | undefined, placeholder?: string) {

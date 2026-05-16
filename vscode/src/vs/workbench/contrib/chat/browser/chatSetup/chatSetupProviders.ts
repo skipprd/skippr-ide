@@ -29,7 +29,7 @@ import { ChatModel, ChatRequestModel, IChatRequestModel, IChatRequestVariableDat
 import { ChatMode } from '../../common/chatModes.js';
 import { ChatRequestAgentPart, ChatRequestToolPart } from '../../common/requestParser/chatParserTypes.js';
 import { IChatProgress, IChatService } from '../../common/chatService/chatService.js';
-import { IChatRequestToolEntry, IChatRequestVariableEntry } from '../../common/attachments/chatVariableEntries.js';
+import { IChatRequestToolEntry } from '../../common/attachments/chatVariableEntries.js';
 import { ChatAgentLocation, ChatConfiguration, ChatModeKind } from '../../common/constants.js';
 import { ILanguageModelsService } from '../../common/languageModels.js';
 import { CHAT_OPEN_ACTION_ID, CHAT_SETUP_ACTION_ID } from '../actions/chatActions.js';
@@ -64,123 +64,6 @@ const defaultChat = {
 	outputChannelId: product.defaultChatAgent?.chatExtensionOutputId ?? '',
 	outputExtensionStateCommand: product.defaultChatAgent?.chatExtensionOutputExtensionStateCommand ?? '',
 };
-
-type SkipprChatContextFile = {
-	name: string;
-	path: string;
-	uri: string;
-	external: boolean;
-};
-
-type SkipprChatProgressEvent = {
-	kind: 'phase' | 'llm' | 'tool' | 'final' | 'summary' | 'approval';
-	status: 'running' | 'completed' | 'failed';
-	label: string;
-	id?: string;
-	phase?: string;
-	detail?: string;
-};
-
-type SkipprChatProgressPayload = {
-	requestId?: unknown;
-	event?: unknown;
-};
-
-const SKIPPR_CHAT_SETUP_PROGRESS_COMMAND_ID = 'skippr.chatSetup.internal.chatProgress';
-const localSkipprChatProgress = new Map<string, (event: SkipprChatProgressEvent) => void>();
-
-function asSkipprChatProgressEvent(value: unknown): SkipprChatProgressEvent | undefined {
-	if (!value || typeof value !== 'object') {
-		return undefined;
-	}
-	const event = value as Record<string, unknown>;
-	const kind = event.kind;
-	const status = event.status;
-	const label = event.label;
-	if (
-		(kind !== 'phase' && kind !== 'llm' && kind !== 'tool' && kind !== 'final' && kind !== 'summary' && kind !== 'approval')
-		|| (status !== 'running' && status !== 'completed' && status !== 'failed')
-		|| typeof label !== 'string'
-		|| !label.trim()
-	) {
-		return undefined;
-	}
-	return {
-		kind,
-		status,
-		label: label.trim(),
-		id: typeof event.id === 'string' && event.id.trim() ? event.id.trim() : undefined,
-		phase: typeof event.phase === 'string' && event.phase.trim() ? event.phase.trim() : undefined,
-		detail: typeof event.detail === 'string' && event.detail.trim() ? event.detail.trim() : undefined,
-	};
-}
-
-function renderSkipprChatProgress(event: SkipprChatProgressEvent): MarkdownString {
-	const status = event.status === 'running'
-		? localize('skipprChatProgressRunning', "running")
-		: event.status === 'completed'
-			? localize('skipprChatProgressComplete', "complete")
-			: localize('skipprChatProgressFailed', "failed");
-	const prefix = event.kind === 'tool'
-		? localize('skipprChatProgressTool', "Tool")
-		: event.kind === 'llm'
-			? localize('skipprChatProgressLlm', "LLM")
-			: event.kind === 'phase'
-				? localize('skipprChatProgressPhase', "Phase")
-				: event.kind === 'approval'
-					? localize('skipprChatProgressApproval', "Approval")
-					: localize('skipprChatProgressSkippr', "Skippr");
-	const context = event.phase && event.kind !== 'phase' ? ` (${event.phase})` : '';
-	const detail = event.detail ? `: ${event.detail}` : '';
-	return new MarkdownString().appendText(`${prefix} ${status}: ${event.label}${context}${detail}`);
-}
-
-function isSecretLikeSkipprChatPath(fsPath: string): boolean {
-	const normalized = fsPath.replace(/\\/g, '/').toLowerCase();
-	const base = normalized.split('/').at(-1) ?? normalized;
-	return base === '.env'
-		|| base.startsWith('.env.')
-		|| normalized.includes('/.env.')
-		|| /(^|[/._-])(secret|secrets|credential|credentials|token|private)([/._-]|$)/.test(normalized)
-		|| /\.(pem|p8|key)$/i.test(base);
-}
-
-function skipprChatContextEnvelope(request: IChatAgentRequest): string {
-	const files: SkipprChatContextFile[] = [];
-	const skippedFiles: string[] = [];
-	for (const variable of request.variables.variables) {
-		const uri = IChatRequestVariableEntry.toUri(variable);
-		if (!uri || uri.scheme !== 'file') {
-			continue;
-		}
-		const fsPath = uri.fsPath;
-		const name = fsPath.split(/[\\/]/).at(-1) || variable.name || fsPath;
-		if (isSecretLikeSkipprChatPath(fsPath)) {
-			skippedFiles.push(name);
-			continue;
-		}
-		files.push({
-			name,
-			path: fsPath,
-			uri: uri.toString(),
-			external: true,
-		});
-	}
-	const envelope: { user: string; execution_surface: 'ide_chat'; context?: { files?: SkipprChatContextFile[]; skipped_files?: string[] } } = {
-		user: request.message,
-		execution_surface: 'ide_chat',
-	};
-	if (files.length || skippedFiles.length) {
-		envelope.context = {};
-		if (files.length) {
-			envelope.context.files = files;
-		}
-		if (skippedFiles.length) {
-			envelope.context.skipped_files = skippedFiles;
-		}
-	}
-	return JSON.stringify(envelope);
-}
 
 const ToolsAgentContextKey = ContextKeyExpr.and(
 	ContextKeyExpr.equals(`config.${ChatConfiguration.AgentEnabled}`, true),
@@ -283,7 +166,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			extensionPublisherId: nullExtensionDescription.publisher
 		}));
 
-		const agent = disposables.add(instantiationService.createInstance(SetupAgent, context, controller, location));
+		const agent = disposables.add(instantiationService.createInstance(SetupAgent, context, controller, location, mode));
 		disposables.add(chatAgentService.registerAgentImplementation(id, agent));
 		if (mode === ChatModeKind.Agent) {
 			chatAgentService.updateAgent(id, { themeIcon: Codicon.tools });
@@ -307,6 +190,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		private readonly context: ChatEntitlementContext,
 		private readonly controller: Lazy<ChatSetupController>,
 		private readonly location: ChatAgentLocation,
+		_mode: ChatModeKind,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ILogService private readonly logService: ILogService,
 		@ITelemetryService private readonly telemetryService: ITelemetryService,
@@ -358,18 +242,6 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			}
 		}));
 
-		this._register(CommandsRegistry.registerCommand(SKIPPR_CHAT_SETUP_PROGRESS_COMMAND_ID, (_accessor, payload: SkipprChatProgressPayload) => {
-			const requestId = typeof payload?.requestId === 'string' ? payload.requestId : undefined;
-			if (!requestId) {
-				return;
-			}
-			const event = asSkipprChatProgressEvent(payload.event);
-			if (!event) {
-				return;
-			}
-			const sink = localSkipprChatProgress.get(requestId);
-			sink?.(event);
-		}));
 	}
 
 	async invoke(request: IChatAgentRequest, progress: (parts: IChatProgress[]) => void): Promise<IChatAgentResult> {
@@ -386,10 +258,6 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private async doInvoke(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService, defaultAccountService: IDefaultAccountService): Promise<IChatAgentResult> {
-		if (defaultChat.chatExtensionId === 'skippr.data-agent' && request.location === ChatAgentLocation.Chat) {
-			return this.invokeLocalSkipprChat(request, progress);
-		}
-
 		if (
 			!this.context.state.completed ||									// Setup not completed
 			this.context.state.disabled ||										// Extension disabled: run setup to enable
@@ -404,66 +272,6 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 
 		return this.doInvokeWithoutSetup(request, progress, chatService, languageModelsService, chatWidgetService, chatAgentService, languageModelToolsService);
-	}
-
-	private async invokeLocalSkipprChat(request: IChatAgentRequest, progress: (part: IChatProgress) => void): Promise<IChatAgentResult> {
-		progress({
-			kind: 'progressMessage',
-			content: new MarkdownString(localize('runningLocalSkipprChat', "Running Skippr chat")),
-			shimmer: true,
-		});
-
-		const command = request.command === 'plan' ? 'plan' : 'ask';
-		const progressRequestId = `chat-setup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-		let lastStreamProgressAt = Date.now();
-		localSkipprChatProgress.set(progressRequestId, event => {
-			lastStreamProgressAt = Date.now();
-			progress({
-				kind: 'progressMessage',
-				content: renderSkipprChatProgress(event),
-				shimmer: event.status === 'running',
-			});
-		});
-		const statusMessages = [
-			localize('localSkipprChatStillRunning', "Skippr chat is still running locally..."),
-			localize('localSkipprChatWaiting', "Still waiting for Skippr to produce a final response..."),
-			localize('localSkipprChatLongRunning', "This Skippr chat run is taking longer than expected.")
-		];
-		let statusIndex = 0;
-		const statusHandle = setInterval(() => {
-			if (Date.now() - lastStreamProgressAt < 15_000) {
-				return;
-			}
-			progress({
-				kind: 'progressMessage',
-				content: new MarkdownString(statusMessages[Math.min(statusIndex++, statusMessages.length - 1)]),
-				shimmer: true,
-			});
-		}, 15_000);
-		try {
-			const text = await this.commandService.executeCommand<string>('skippr.workbench.internal.runChatCli', {
-				mode: command,
-				prompt: skipprChatContextEnvelope(request),
-				progressCommand: SKIPPR_CHAT_SETUP_PROGRESS_COMMAND_ID,
-				progressRequestId,
-			});
-			clearInterval(statusHandle);
-			localSkipprChatProgress.delete(progressRequestId);
-			progress({
-				kind: 'markdownContent',
-				content: new MarkdownString(text || localize('emptyLocalSkipprChatResponse', "(empty response)"))
-			});
-		} catch (error) {
-			clearInterval(statusHandle);
-			localSkipprChatProgress.delete(progressRequestId);
-			this.logService.error('[chat setup] Local Skippr chat failed', error);
-			progress({
-				kind: 'warning',
-				content: new MarkdownString(error instanceof Error ? error.message : String(error))
-			});
-		}
-
-		return { metadata: { command, mode: command } };
 	}
 
 	private async doInvokeWithoutSetup(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService): Promise<IChatAgentResult> {
