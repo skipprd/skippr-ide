@@ -105,7 +105,10 @@ export function listPipelineDefinitionLines(text: string): Array<{ line: number;
 }
 
 export class SkipprPipelineCodeLensProvider implements vscode.CodeLensProvider {
-  constructor(private readonly runPickCommandId: string) {}
+  constructor(
+    private readonly defaultRunCommandId: string,
+    private readonly menuCommandId: string
+  ) {}
 
   provideCodeLenses(document: vscode.TextDocument): vscode.ProviderResult<vscode.CodeLens[]> {
     const defs = listPipelineDefinitionLines(document.getText());
@@ -114,10 +117,16 @@ export class SkipprPipelineCodeLensProvider implements vscode.CodeLensProvider {
       const range = document.lineAt(line).range;
       lenses.push(
         new vscode.CodeLens(range, {
-          title: "$(play) Run Skippr",
-          tooltip: "Discover, Sync (once), Model, or Doctor — same as the Run Skippr title bar (uses this file and skippr.run.extraArgs).",
-          command: this.runPickCommandId,
-          arguments: [document.uri.fsPath, name]
+          title: "$(play) Run",
+          tooltip: "Run one bounded sync pass for this pipeline",
+          command: this.defaultRunCommandId,
+          arguments: [document.uri.fsPath, name, "sync"]
+        }),
+        new vscode.CodeLens(range, {
+          title: "$(chevron-down)",
+          tooltip: "Choose a Skippr command for this pipeline",
+          command: this.menuCommandId,
+          arguments: [document.uri.fsPath, name, line]
         })
       );
     }

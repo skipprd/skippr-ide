@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 import { isSkipprConfigDocument, listPipelineDefinitionLines } from "./skipprPipelineCodeLens";
 import { effectiveEnvForSkipprConfig } from "./skipprDotEnv";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
-import { buildCliCommand, cliCommandCwd, formatCliCommand } from "./skipprRunner";
+import { buildCliCommand, formatCliCommand, skipprProjectRoot } from "./skipprRunner";
 import type { SkipprDoctorResult } from "./types";
 
 const INTERP_REGEX = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
@@ -90,9 +90,10 @@ function runDoctorJson(
   env: NodeJS.ProcessEnv
 ): Promise<{ code: number | null; json?: SkipprDoctorResult }> {
   const args = ["--config", configPath, "--log", "error", "doctor", "--output", "json"];
+  const projectCwd = skipprProjectRoot(configPath, cwd);
   const [command, ...commandArgs] = buildCliCommand(cliPath, args);
   return new Promise((resolve) => {
-    const child = spawn(command, commandArgs, { cwd: cliCommandCwd(cliPath) ?? cwd, env, shell: false });
+    const child = spawn(command, commandArgs, { cwd: projectCwd, env, shell: false });
     let stdout = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {

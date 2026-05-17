@@ -92,12 +92,49 @@
         "title": "Skippr: Model Pipeline"
       },
       {
+        "command": "skippr.run.modelDirectPipeline",
+        "title": "Skippr: Direct Model Pipeline"
+      },
+      {
         "command": "skippr.run.doctor",
         "title": "Skippr: Doctor"
       },
       {
         "command": "skippr.run.pickPipelineAction",
         "title": "Skippr: Run pipeline…"
+      },
+      {
+        "command": "skippr.showPipelineRunMenu",
+        "title": "Skippr: Show pipeline run menu"
+      },
+      {
+        "command": "skippr.run.lens.discover",
+        "title": "Discover",
+        "icon": "$(search)"
+      },
+      {
+        "command": "skippr.run.lens.sync",
+        "title": "Sync (once)",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "skippr.run.lens.model",
+        "title": "Model",
+        "icon": "$(circuit-board)"
+      },
+      {
+        "command": "skippr.run.lens.modelDirect",
+        "title": "Direct Model",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "skippr.run.lens.doctor",
+        "title": "Doctor",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "skippr.run.lensWithArgs",
+        "title": "Skippr: Run pipeline action"
       },
       {
         "command": "skippr.run.stopSyncPipeline",
@@ -136,7 +173,41 @@
         "title": "Skippr: Refresh Config Diagnostics"
       }
       ],
+    "viewsContainers": {
+      "auxiliarybar": [
+        {
+          "id": "skippr.schema.sidebar",
+          "title": "Schema",
+          "icon": "media/skippr.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "skippr.run.timeline.panel",
+          "title": "Run",
+          "icon": "media/skippr.svg"
+        },
+        {
+          "id": "skippr.run.schema.panel",
+          "title": "Schema Changes",
+          "icon": "media/skippr.svg"
+        },
+        {
+          "id": "skippr.run.deadletters.panel",
+          "title": "Deadletters",
+          "icon": "media/skippr.svg"
+        }
+      ]
+    },
     "views": {
+      "skippr.schema.sidebar": [
+        {
+          "id": "skippr.schemaView",
+          "name": "Schema",
+          "type": "webview",
+          "order": 1
+        }
+      ],
       "debug": [
         {
           "id": "skippr.runStatus",
@@ -144,12 +215,40 @@
           "type": "webview",
           "order": 50
         }
+      ],
+      "skippr.run.timeline.panel": [
+        {
+          "id": "skippr.runTimeline",
+          "name": "Run",
+          "type": "webview",
+          "order": 1
+        }
+      ],
+      "skippr.run.schema.panel": [
+        {
+          "id": "skippr.runSchemaChanges",
+          "name": "Schema Changes",
+          "type": "webview",
+          "order": 1
+        }
+      ],
+      "skippr.run.deadletters.panel": [
+        {
+          "id": "skippr.runDeadletters",
+          "name": "Deadletters",
+          "type": "webview",
+          "order": 1
+        }
       ]
     },
     "submenus": [
       {
         "id": "skippr.debug.toolbar",
         "label": "Skippr"
+      },
+      {
+        "id": "skippr.pipelineRun",
+        "label": "Run Skippr"
       }
     ],
     "menus": {
@@ -158,6 +257,28 @@
           "submenu": "skippr.debug.toolbar",
           "group": "navigation@8",
           "when": "debuggersAvailable"
+        }
+      ],
+      "skippr.pipelineRun": [
+        {
+          "command": "skippr.run.lens.discover",
+          "group": "1@1"
+        },
+        {
+          "command": "skippr.run.lens.sync",
+          "group": "1@2"
+        },
+        {
+          "command": "skippr.run.lens.model",
+          "group": "1@3"
+        },
+        {
+          "command": "skippr.run.lens.modelDirect",
+          "group": "1@3.5"
+        },
+        {
+          "command": "skippr.run.lens.doctor",
+          "group": "1@4"
         }
       ],
       "skippr.debug.toolbar": [
@@ -171,6 +292,34 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "skippr.showPipelineRunMenu",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lens.discover",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lens.sync",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lens.model",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lens.modelDirect",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lens.doctor",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lensWithArgs",
+          "when": "false"
+        },
         {
           "command": "skippr.auth.signIn"
         },
@@ -203,6 +352,9 @@
         },
         {
           "command": "skippr.run.modelPipeline"
+        },
+        {
+          "command": "skippr.run.modelDirectPipeline"
         },
         {
           "command": "skippr.run.doctor"
@@ -259,8 +411,8 @@
               },
               "skipprKind": {
                 "type": "string",
-                "enum": ["discover", "sync", "sync-once", "sync-all-once", "model", "doctor", "test"],
-                "description": "discover; sync or sync-once for one sync pass; sync-all-once; model; doctor; test (dbt)."
+                "enum": ["discover", "sync", "sync-once", "sync-all-once", "model", "model-direct", "doctor", "test"],
+                "description": "discover; sync or sync-once for one sync pass; sync-all-once; model; model-direct; doctor; test (dbt)."
               },
               "pipeline": {
                 "type": "string",
@@ -310,6 +462,15 @@
             "request": "launch",
             "name": "Skippr: Model",
             "skipprKind": "model",
+            "configPath": "${workspaceFolder}/skippr.yml",
+            "logLevel": "info",
+            "pipeline": "${config:skippr.defaultPipeline}"
+          },
+          {
+            "type": "skippr",
+            "request": "launch",
+            "name": "Skippr: Direct Model",
+            "skipprKind": "model-direct",
             "configPath": "${workspaceFolder}/skippr.yml",
             "logLevel": "info",
             "pipeline": "${config:skippr.defaultPipeline}"
@@ -372,6 +533,18 @@
             }
           },
           {
+            "label": "Skippr: Direct Model",
+            "description": "Run Skippr model with the direct dbt workspace agent.",
+            "body": {
+              "type": "skippr",
+              "request": "launch",
+              "name": "Skippr: Direct Model",
+              "skipprKind": "model-direct",
+              "configPath": "${workspaceFolder}/skippr.yml",
+              "pipeline": "${config:skippr.defaultPipeline}"
+            }
+          },
+          {
             "label": "Skippr: Doctor",
             "description": "Run skippr doctor for the workspace config.",
             "body": {
@@ -421,7 +594,12 @@
         "skippr.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Optional advanced override for the Skippr CLI path. Leave empty to auto-detect skippr or skipprd on PATH."
+          "description": "Optional advanced override for the Skippr CLI path. Leave empty to use an installed skippr binary on PATH; see skippr.dev.useLocalSkipprd to build from a local skipprd checkout."
+        },
+        "skippr.dev.useLocalSkipprd": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, run skippr via `cargo run` from a detected local skipprd repo instead of an installed skippr binary. Turn off to force an installed release binary. Requires CodeArtifact auth (CARGO_REGISTRIES_REACT_CARGO_TOKEN) or a sibling ../react checkout."
         },
         "skippr.defaultPipeline": {
           "type": "string",
@@ -437,7 +615,7 @@
         "skippr.run.cwd": {
           "type": "string",
           "default": "",
-          "description": "Working directory for Skippr run commands. Defaults to the configured Skippr workspace path or the first VS Code workspace folder."
+          "description": "Fallback working directory when no --config path is available. When a skippr.yml path is passed, the IDE always runs Skippr from that file's directory (the project root)."
         },
         "skippr.run.extraArgs": {
           "type": "string",

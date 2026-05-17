@@ -478,6 +478,48 @@ registerAction2(class extends Action2 {
 	}
 });
 
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.forceRunPanels',
+			title: localize2('skipprForceRunPanels', "Force Skippr Run Panels"),
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const viewDescriptorService = accessor.get(IViewDescriptorService);
+		const runContainerIds = [
+			'skippr.run.timeline.panel',
+			'skippr.run.schema.panel',
+			'skippr.run.deadletters.panel'
+		];
+
+		for (const [index, id] of runContainerIds.entries()) {
+			const container = viewDescriptorService.getViewContainerById(id);
+			if (container) {
+				viewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Panel, index, 'skippr.forceRunPanels');
+			}
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.forceSchemaSidebar',
+			title: localize2('skipprForceSchemaSidebar', "Force Skippr Schema Sidebar"),
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const viewDescriptorService = accessor.get(IViewDescriptorService);
+		const container = viewDescriptorService.getViewContainerById('skippr.schema.sidebar');
+		if (container) {
+			viewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.AuxiliaryBar, undefined, 'skippr.forceSchemaSidebar');
+		}
+	}
+});
+
 // ------------------- Editor Tabs Layout --------------------------------
 
 export abstract class AbstractSetShowTabsAction extends Action2 {

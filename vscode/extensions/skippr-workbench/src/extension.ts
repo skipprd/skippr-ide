@@ -6,6 +6,7 @@ import {
   isSkipprRunKind,
   resolveSkipprCli,
   runSkipprJson,
+  skipprProjectRoot,
   showSkipprVersion,
   SkipprProcess,
   SkipprRunKind,
@@ -16,7 +17,8 @@ import {
   SkipprPipelineCodeLensProvider,
   skipprConfigDocumentSelector
 } from "./skipprPipelineCodeLens";
-import { pickSkipprPipelineAction } from "./skipprPipelineActionMenu";
+import { takePendingPipelineLensRun, type SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
+import { openSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
 import { parseShellArgs } from "./skipprCliArgs";
@@ -34,8 +36,19 @@ import {
 import { clearSkipprCliCredentialsFile, writeSkipprCliCredentialsFile } from "./skipprCliCredentials";
 import { runEmailOtpAuthQuickInput } from "./skipprOverlayUi";
 import { renderSkipprRunStatusPanelHtml } from "./skipprRunStatusPanelHtml";
+import { renderSkipprRunDetailsPanelHtml, SkipprRunDetailsViewKind } from "./skipprRunDetailsPanelHtml";
+import { renderSkipprSchemaPanelHtml } from "./skipprSchemaPanelHtml";
+import { SkipprRunHistory } from "./skipprRunHistory";
+import { SkipprObservedRun, SkipprObservedRunStatus, SkipprRunStateStore } from "./skipprRunState";
 
 const SKIPPR_RUN_STATUS_VIEW_ID = "skippr.runStatus";
+const SKIPPR_RUN_TIMELINE_VIEW_ID = "skippr.runTimeline";
+const SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID = "skippr.runSchemaChanges";
+const SKIPPR_RUN_DEADLETTERS_VIEW_ID = "skippr.runDeadletters";
+const SKIPPR_RUN_TIMELINE_CONTAINER_ID = "skippr.run.timeline.panel";
+const SKIPPR_SCHEMA_VIEW_ID = "skippr.schemaView";
+const SKIPPR_SCHEMA_CONTAINER_ID = "skippr.schema.sidebar";
+const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
 
 const panelSpecs: Array<{ id: SkipprPanelId; name: SkipprPanelName; command: string }> = [
   { id: "skippr.discover", name: "Discover", command: "skippr.open.discover" },
@@ -308,13 +321,13 @@ function getLogLevel(): string {
 
 function skipprSpawnEnv(configPath: string | undefined, pipeline: string | undefined): NodeJS.ProcessEnv {
   const folder = workspaceFolderForConfigPath(configPath);
-  return mergeSkipprSpawnEnv(process.env, folder, pipeline);
+  return mergeSkipprSpawnEnv(process.env, folder, pipeline, configPath);
 }
 
 const SKIPPR_RUN_TOOLBAR_CONTEXT_KEY = "skippr.runToolbarInTitle";
 
 function getConfigCwd(configPath?: string): string {
-  return configPath ? path.dirname(configPath) : getRunCwd();
+  return skipprProjectRoot(configPath, getRunCwd());
 }
 
 async function detectSkipprConfigs(): Promise<string[]> {
@@ -492,7 +505,8 @@ async function getCachedConfigShow(
         ["--config", trimmed, "config", "show"],
         getConfigCwd(trimmed),
         output,
-        skipprSpawnEnv(trimmed, undefined)
+        skipprSpawnEnv(trimmed, undefined),
+        trimmed
       );
       const value = result.value;
       if (fetchGeneration === configShowCacheGeneration) {
@@ -533,7 +547,8 @@ async function fetchTestSelectOptionsForRunDebug(
     ["--config", cfg, "test", "list", "--pipeline", pipe, "--output", "json"],
     getConfigCwd(cfg),
     output,
-    skipprSpawnEnv(cfg, pipe)
+    skipprSpawnEnv(cfg, pipe),
+    cfg
   );
   const rows = result.value?.tests;
   if (!Array.isArray(rows)) {
@@ -561,6 +576,8 @@ function runKindLabel(kind: SkipprRunnableKind): string {
       return "Start Sync";
     case "model":
       return "Model";
+    case "model-direct":
+      return "Direct Model";
   }
 }
 
@@ -669,6 +686,8 @@ function describeRunEvent(event: SkipprRunEvent): string {
       return `Discover started: ${event.pipeline ?? "pipeline"}`;
     case "namespace_discovered":
       return `Discovered ${event.namespace ?? "namespace"} (${event.field_count ?? 0} fields)`;
+    case "schema_evolved":
+      return `Schema evolved: ${event.namespace ?? "namespace"} (${event.fields_added?.length ?? 0} added)`;
     case "discover_complete":
       return `Discover complete: ${event.pipeline ?? "pipeline"} (${event.namespaces_discovered ?? 0} namespaces)`;
     case "sync_start":
@@ -685,10 +704,34 @@ function describeRunEvent(event: SkipprRunEvent): string {
       return `Sync complete: ${event.pipeline ?? "pipeline"} rows=${event.total_rows ?? 0}`;
     case "sync_error":
       return `Sync error: ${event.error ?? "unknown error"}`;
+    case "tool_start":
+      return `Tool started: ${event.clean_name ?? event.name ?? "tool"}`;
+    case "tool_end":
+      return `Tool ${event.status ?? "finished"}: ${event.clean_name ?? event.name ?? "tool"}`;
     case "model_start":
       return `Model started: ${event.pipeline ?? "pipeline"}`;
     case "model_thread_resumed":
       return `Model resumed thread ${event.thread_id ?? "unknown"}`;
+    case "model_preflight":
+      return event.model_preflight?.ok
+        ? `Model preflight passed: ${event.model_preflight.command ?? "dbt"}`
+        : `Model preflight failed: ${event.model_preflight?.remediation ?? event.error ?? "dbt environment issue"}`;
+    case "model_authoring_start":
+      return `Model authoring started`;
+    case "model_file_changed":
+      return `Model files changed: ${event.changed_files?.length ?? 0}`;
+    case "model_review_ready":
+      return event.summary ?? `Model review ready: ${event.total_count ?? event.changed_files?.length ?? 0} files`;
+    case "model_validation_start":
+      return `Model validation started`;
+    case "model_validation":
+      return event.validation?.ok
+        ? `Model validation passed`
+        : `Model validation failed: ${event.validation?.message ?? event.error ?? "unknown error"}`;
+    case "model_validation_complete":
+      return event.validation?.ok
+        ? `Model validation passed`
+        : `Model validation failed: ${event.validation?.message ?? event.error ?? "unknown error"}`;
     case "model_phase_changed":
       return `Model phase: ${event.phase ?? "unknown"}`;
     case "model_complete":
@@ -725,6 +768,15 @@ interface RunStatusPanelPayload {
 }
 
 let runStatusWebviewView: vscode.WebviewView | undefined;
+const runDetailsWebviewViews = new Map<string, vscode.WebviewView>();
+let schemaWebviewView: vscode.WebviewView | undefined;
+let observabilityStore: SkipprRunStateStore | undefined;
+let runHistory: SkipprRunHistory | undefined;
+let pendingHistorySave: SkipprObservedRun | undefined;
+let historySaveTimer: ReturnType<typeof setTimeout> | undefined;
+let historyRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+const HISTORY_SAVE_DEBOUNCE_MS = 750;
+const HISTORY_REFRESH_DEBOUNCE_MS = 300;
 let runStatusPanelLast: RunStatusPanelPayload = {
   type: "status",
   phase: "idle",
@@ -737,6 +789,91 @@ let activeRunStatusStartedAt: number | undefined;
 function postRunStatusPanel(payload: RunStatusPanelPayload): void {
   runStatusPanelLast = payload;
   void runStatusWebviewView?.webview.postMessage(payload);
+}
+
+function postObservability(): void {
+  const snapshot = observabilityStore?.snapshot();
+  if (!snapshot) {
+    return;
+  }
+  void runStatusWebviewView?.webview.postMessage(snapshot);
+  for (const webviewView of runDetailsWebviewViews.values()) {
+    void webviewView.webview.postMessage(snapshot);
+  }
+  void schemaWebviewView?.webview.postMessage(snapshot);
+}
+
+function scheduleRefreshRunHistory(): void {
+  if (historyRefreshTimer) {
+    clearTimeout(historyRefreshTimer);
+  }
+  historyRefreshTimer = setTimeout(() => {
+    historyRefreshTimer = undefined;
+    void refreshRunHistory();
+  }, HISTORY_REFRESH_DEBOUNCE_MS);
+}
+
+async function refreshRunHistory(): Promise<void> {
+  if (!runHistory || !observabilityStore) {
+    return;
+  }
+  try {
+    observabilityStore.setHistory(await runHistory.recentRuns());
+  } catch {
+    // History is optional; runs must still work if sqlite is unavailable.
+  }
+}
+
+function scheduleHistorySave(run: SkipprObservedRun): void {
+  pendingHistorySave = run;
+  if (historySaveTimer) {
+    clearTimeout(historySaveTimer);
+  }
+  historySaveTimer = setTimeout(() => {
+    historySaveTimer = undefined;
+    const snapshot = pendingHistorySave;
+    pendingHistorySave = undefined;
+    if (!snapshot) {
+      return;
+    }
+    void runHistory?.saveRun(snapshot).then(() => scheduleRefreshRunHistory(), () => undefined);
+  }, HISTORY_SAVE_DEBOUNCE_MS);
+}
+
+function flushHistorySave(run: SkipprObservedRun): void {
+  if (historySaveTimer) {
+    clearTimeout(historySaveTimer);
+    historySaveTimer = undefined;
+  }
+  pendingHistorySave = undefined;
+  void runHistory?.saveRun(run).then(() => scheduleRefreshRunHistory(), () => undefined);
+}
+
+async function openHistoricalRun(runId: string | undefined): Promise<void> {
+  if (!runId || !runHistory || !observabilityStore) {
+    return;
+  }
+  try {
+    const run = await runHistory.loadRun(runId);
+    observabilityStore.selectRun(run);
+    await showRunDetailsPanel();
+  } catch {
+    // Already logged by the history layer.
+  }
+}
+
+async function showRunDetailsPanel(): Promise<void> {
+  await runWorkbenchCommand("skippr.workbench.forceRunPanels");
+  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_RUN_TIMELINE_CONTAINER_ID}`);
+  await runWorkbenchCommand(`${SKIPPR_RUN_TIMELINE_VIEW_ID}.focus`);
+  postObservability();
+}
+
+async function showSchemaPanel(): Promise<void> {
+  await runWorkbenchCommand("skippr.workbench.forceSchemaSidebar");
+  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_SCHEMA_CONTAINER_ID}`);
+  await runWorkbenchCommand(`${SKIPPR_SCHEMA_VIEW_ID}.focus`);
+  postObservability();
 }
 
 function finishRunStatusPanel(outcome: {
@@ -786,9 +923,63 @@ function registerSkipprRunStatusView(context: vscode.ExtensionContext): void {
           webviewView.webview.html = renderSkipprRunStatusPanelHtml();
           runStatusWebviewView = webviewView;
           postRunStatusPanel(runStatusPanelLast);
+          postObservability();
+          webviewView.webview.onDidReceiveMessage((message: { command?: string; runId?: string }) => {
+            if (message.command === "openRun") {
+              void openHistoricalRun(message.runId);
+            }
+          });
           webviewView.onDidDispose(() => {
             if (runStatusWebviewView === webviewView) {
               runStatusWebviewView = undefined;
+            }
+          });
+        }
+      },
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
+}
+
+function registerSkipprRunDetailsView(
+  context: vscode.ExtensionContext,
+  viewId: string,
+  viewKind: SkipprRunDetailsViewKind
+): void {
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      viewId,
+      {
+        resolveWebviewView(webviewView: vscode.WebviewView): void {
+          webviewView.webview.options = { enableScripts: true };
+          webviewView.webview.html = renderSkipprRunDetailsPanelHtml(viewKind);
+          runDetailsWebviewViews.set(viewId, webviewView);
+          postObservability();
+          webviewView.onDidDispose(() => {
+            if (runDetailsWebviewViews.get(viewId) === webviewView) {
+              runDetailsWebviewViews.delete(viewId);
+            }
+          });
+        }
+      },
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
+}
+
+function registerSkipprSchemaView(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SKIPPR_SCHEMA_VIEW_ID,
+      {
+        resolveWebviewView(webviewView: vscode.WebviewView): void {
+          webviewView.webview.options = { enableScripts: true };
+          webviewView.webview.html = renderSkipprSchemaPanelHtml();
+          schemaWebviewView = webviewView;
+          postObservability();
+          webviewView.onDidDispose(() => {
+            if (schemaWebviewView === webviewView) {
+              schemaWebviewView = undefined;
             }
           });
         }
@@ -804,11 +995,16 @@ function setRunStatusIdle(statusItem: vscode.StatusBarItem): void {
   statusItem.tooltip = "Run Skippr discover or sync commands";
 }
 
+function revealRunAndDebugView(): void {
+  void vscode.commands.executeCommand(RUN_AND_DEBUG_VIEW_COMMAND).then(undefined, () => undefined);
+}
+
 function setRunStatusRunning(statusItem: vscode.StatusBarItem, label: string): void {
   statusItem.command = "skippr.run.stopSyncPipeline";
   statusItem.text = `$(sync~spin) ${label}`;
   statusItem.tooltip = "Skippr is running. Click to stop.";
   if (activeRunStatusStartedAt === undefined) {
+    revealRunAndDebugView();
     activeRunStatusStartedAt = Date.now();
   }
   postRunStatusPanel({
@@ -867,7 +1063,14 @@ async function runSkipprDoctor(
   args.push("doctor", "--output", "json", ...extra);
   output.show(true);
   setRunStatusRunning(statusItem, "Doctor");
-  const result = await runSkipprJson<SkipprDoctorResult>(cliPath, args, getConfigCwd(configPath), output, skipprSpawnEnv(configPath, undefined));
+  const result = await runSkipprJson<SkipprDoctorResult>(
+    cliPath,
+    args,
+    getConfigCwd(configPath),
+    output,
+    skipprSpawnEnv(configPath, undefined),
+    configPath
+  );
   const summary = result.value;
   const doctorLogicalOk = Boolean(result.code === 0 && summary?.ok);
   finishRunStatusPanel({
@@ -909,6 +1112,13 @@ type RunSkipprCliFlags = {
   modelNoResume?: boolean;
 };
 
+function runOutcomeStatus(code: number | null, signal: string | null | undefined): SkipprObservedRunStatus {
+  if (signal) {
+    return "stopped";
+  }
+  return code === 0 ? "success" : "error";
+}
+
 async function runSkipprCommand(
   kind: SkipprRunKind,
   output: vscode.LogOutputChannel,
@@ -920,7 +1130,7 @@ async function runSkipprCommand(
   cliFlags?: RunSkipprCliFlags
 ): Promise<void> {
   if (activeRun) {
-    if (kind === "model") {
+    if (kind === "model" || kind === "model-direct") {
       output.show(true);
       output.info(`Attached to active ${activeRun.label}. Stop/cancel is the only in-flight control surface.`);
       vscode.window.showInformationMessage(`Attached to active ${activeRun.label}.`);
@@ -975,33 +1185,64 @@ async function runSkipprCommand(
       pipeline,
       logLevel: requestedLogLevel?.trim() || request?.logLevel?.trim() || getLogLevel(),
       discoverOutput: kind === "discover" ? cliFlags?.discoverOutput : undefined,
-      modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined,
+      modelNoResume: kind === "model" || kind === "model-direct" ? cliFlags?.modelNoResume : undefined,
       extraArgs: extraCliArgs ?? [],
       spawnEnv: skipprSpawnEnv(configPath, pipeline)
     },
     {
       onEvent: (event) => {
-        const message = describeRunEvent(event);
-        output.info(message);
-        setRunStatusRunning(statusItem, message);
+        const observed = observabilityStore?.recordEvent(event);
+        if (event.event !== "sync_status") {
+          const message = describeRunEvent(event);
+          output.info(message);
+          setRunStatusRunning(statusItem, message);
+        }
+        if (observed && event.event !== "sync_status") {
+          scheduleHistorySave(observed);
+          if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
+            void showRunDetailsPanel();
+            void showSchemaPanel();
+          }
+        }
       },
       onLog: (line) => output.info(line)
     }
   );
 
   activeRun = run;
-  setRunStatusRunning(statusItem, run.label);
+  observabilityStore?.startRun({
+    command: kind,
+    label: run.label,
+    pipeline,
+    configPath
+  });
+  void showRunDetailsPanel();
+  if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
+    void showSchemaPanel();
+  }
+  const runDisplayName = pipeline ?? run.label;
+  setRunStatusRunning(statusItem, runDisplayName);
   const result = await run.done;
   if (activeRun === run) {
     activeRun = undefined;
   }
 
   finishRunStatusPanel({
-    headline: run.label,
+    headline: runDisplayName,
     code: result.code,
     signal: result.signal,
     elapsedMs: result.elapsedMs
   });
+  const finishedRun = observabilityStore?.finishRun({
+    status: runOutcomeStatus(result.code, result.signal),
+    exitCode: result.code,
+    signal: result.signal,
+    elapsedMs: result.elapsedMs,
+    detail: result.lastEvent?.error ?? result.errorDetail
+  });
+  if (finishedRun) {
+    flushHistorySave(finishedRun);
+  }
   setRunStatusIdle(statusItem);
 
   if (result.code === 0) {
@@ -1116,6 +1357,16 @@ async function executeRunDebugPanelRun(
     });
     return;
   }
+  if (cmd === "model-direct") {
+    if (!pipeline) {
+      vscode.window.showWarningMessage("Choose a pipeline for Skippr direct model.");
+      return;
+    }
+    await runSkipprCommand("model-direct", output, statusItem, pipeline, configPath, logLevel, extraCliArgs, {
+      modelNoResume: message.modelNoResume === true
+    });
+    return;
+  }
   vscode.window.showErrorMessage(`Unknown Skippr panel command: ${cmd || "(empty)"}`);
 }
 
@@ -1169,7 +1420,14 @@ async function runVectorIngestOnOpen(
       },
       async (progress) => {
         progress.report({ message: "Scanning project files and applying excludes..." });
-        const run = await runSkipprJson<unknown>(cliPath, args, folder.uri.fsPath, output, skipprSpawnEnv(configPath, "vector_ingest"));
+        const run = await runSkipprJson<unknown>(
+          cliPath,
+          args,
+          getConfigCwd(configPath),
+          output,
+          skipprSpawnEnv(configPath, "vector_ingest"),
+          configPath
+        );
         progress.report({ message: "Finalizing vector index..." });
         return run;
       }
@@ -1193,28 +1451,41 @@ async function runVectorIngestOnOpen(
   }
 }
 
-async function runPickPipelineAction(
-  configFsPath: unknown,
-  pipeline: unknown,
+async function runLensPipelineCommand(
+  command: SkipprPipelineRunCommand,
   output: vscode.LogOutputChannel,
   statusItem: vscode.StatusBarItem
-): Promise<boolean> {
+): Promise<void> {
+  const ctx = takePendingPipelineLensRun();
+  if (!ctx) {
+    vscode.window.showErrorMessage("Skippr: no pipeline run context. Click a run action on a pipeline in skippr.yml.");
+    return;
+  }
+  await runLensPipelineWithArgs(ctx.configPath, ctx.pipeline, command, output, statusItem);
+}
+
+async function runLensPipelineWithArgs(
+  configFsPath: unknown,
+  pipeline: unknown,
+  command: unknown,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): Promise<void> {
   if (typeof configFsPath !== "string" || typeof pipeline !== "string" || !pipeline.trim()) {
     vscode.window.showErrorMessage("Skippr: missing pipeline or config path.");
-    return false;
+    return;
   }
-  const cfg = configFsPath.trim();
-  const pipe = pipeline.trim();
+  const cmd = command as SkipprPipelineRunCommand;
+  if (cmd !== "discover" && cmd !== "sync" && cmd !== "model" && cmd !== "model-direct" && cmd !== "doctor") {
+    vscode.window.showErrorMessage("Skippr: unknown run action.");
+    return;
+  }
   const wsExtra = vscode.workspace.getConfiguration().get<string>(runExtraArgsKey, "").trim();
-  const picked = await pickSkipprPipelineAction(pipe);
-  if (!picked) {
-    return false;
-  }
   await executeRunDebugPanelRun(
     {
-      command: picked.command,
-      pipeline: pipe,
-      configPath: cfg,
+      command: cmd,
+      pipeline: pipeline.trim(),
+      configPath: configFsPath.trim(),
       logLevel: getLogLevel(),
       extraArgs: wsExtra,
       syncMode: "once",
@@ -1224,6 +1495,21 @@ async function runPickPipelineAction(
     output,
     statusItem
   );
+}
+
+async function runPickPipelineAction(
+  configFsPath: unknown,
+  pipeline: unknown,
+  line: unknown,
+  output: vscode.LogOutputChannel,
+  _statusItem: vscode.StatusBarItem
+): Promise<boolean> {
+  if (typeof configFsPath !== "string" || typeof pipeline !== "string" || !pipeline.trim()) {
+    vscode.window.showErrorMessage("Skippr: missing pipeline or config path.");
+    return false;
+  }
+  const lineIndex = typeof line === "number" && Number.isFinite(line) ? line : 0;
+  await openSkipprPipelineRunMenu(configFsPath.trim(), pipeline.trim(), lineIndex);
   return true;
 }
 
@@ -1352,7 +1638,7 @@ async function runSkipprDebugConfiguration(
   if (!isSkipprRunKind(skipprKind)) {
     output.error(`Invalid Skippr debug configuration kind: ${String(rawKind)}`);
     vscode.window.showErrorMessage(
-      "Invalid Skippr debug configuration. Expected skipprKind discover, sync-once, sync-all-once, sync, model, doctor, or test."
+      "Invalid Skippr debug configuration. Expected skipprKind discover, sync-once, sync-all-once, sync, model, model-direct, doctor, or test."
     );
     return;
   }
@@ -1439,7 +1725,8 @@ async function showSetupWebview(output: vscode.LogOutputChannel, statusItem: vsc
         ["--config", path.join(folder.fsPath, "skippr.yml"), "init", name.trim(), "--output", "json"],
         folder.fsPath,
         output,
-        mergeSkipprSpawnEnv(process.env, folder, undefined)
+        mergeSkipprSpawnEnv(process.env, folder, undefined, path.join(folder.fsPath, "skippr.yml")),
+        path.join(folder.fsPath, "skippr.yml")
       )
   );
   const initOk = result.code === 0 && Boolean(result.value?.ok);
@@ -2141,7 +2428,13 @@ function maybeOpenEmptyWorkbenchSplash(
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  observabilityStore = new SkipprRunStateStore();
+  context.subscriptions.push(observabilityStore);
   registerSkipprRunStatusView(context);
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_TIMELINE_VIEW_ID, "timeline");
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID, "schema");
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters");
+  registerSkipprSchemaView(context);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   const authProvider = new SkipprAuthenticationProvider(context, statusItem);
   await syncAuthStatusBarFromStoredSecrets(context, statusItem);
@@ -2154,6 +2447,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const output = vscode.window.createOutputChannel("Skippr", { log: true });
   context.subscriptions.push(runStatusItem, output);
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (workspaceRoot) {
+    runHistory = new SkipprRunHistory(workspaceRoot, output);
+    void refreshRunHistory();
+  }
+  observabilityStore.onDidChange(() => postObservability(), undefined, context.subscriptions);
+  void runWorkbenchCommand("skippr.workbench.forceRunPanels");
+  void runWorkbenchCommand("skippr.workbench.forceSchemaSidebar");
   await vscode.commands.executeCommand("setContext", SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true);
   context.subscriptions.push(
     vscode.authentication.registerAuthenticationProvider("skippr", "Skippr", authProvider, {
@@ -2365,15 +2666,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("skippr.run.modelPipeline", async () => {
       await runSkipprCommand("model", output, runStatusItem);
     }),
+    vscode.commands.registerCommand("skippr.run.modelDirectPipeline", async () => {
+      await runSkipprCommand("model-direct", output, runStatusItem);
+    }),
     vscode.commands.registerCommand("skippr.run.doctor", async () => {
       await runSkipprDoctor(output, runStatusItem);
     }),
-    vscode.commands.registerCommand("skippr.run.pickPipelineAction", async (configFsPath: unknown, pipeline: unknown) => {
-      await runPickPipelineAction(configFsPath, pipeline, output, runStatusItem);
+    vscode.commands.registerCommand("skippr.run.pickPipelineAction", async (configFsPath: unknown, pipeline: unknown, line: unknown) => {
+      await runPickPipelineAction(configFsPath, pipeline, line, output, runStatusItem);
     }),
+    vscode.commands.registerCommand("skippr.run.lens.discover", () => runLensPipelineCommand("discover", output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.sync", () => runLensPipelineCommand("sync", output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.model", () => runLensPipelineCommand("model", output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.modelDirect", () => runLensPipelineCommand("model-direct", output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.doctor", () => runLensPipelineCommand("doctor", output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lensWithArgs", (configFsPath: unknown, pipeline: unknown, command: unknown) =>
+      runLensPipelineWithArgs(configFsPath, pipeline, command, output, runStatusItem)
+    ),
     vscode.languages.registerCodeLensProvider(
       skipprConfigDocumentSelector,
-      new SkipprPipelineCodeLensProvider("skippr.run.pickPipelineAction")
+      new SkipprPipelineCodeLensProvider("skippr.run.lensWithArgs", "skippr.run.pickPipelineAction")
     ),
     vscode.commands.registerCommand("skippr.run.stopSyncPipeline", () => {
       stopActiveRun(runStatusItem, output);

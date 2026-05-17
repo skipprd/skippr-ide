@@ -46,7 +46,8 @@ export function workspaceFolderForConfigPath(configFsPath: string | undefined): 
 export function mergeSkipprSpawnEnv(
   base: NodeJS.ProcessEnv,
   workspaceFolder: vscode.Uri | undefined,
-  pipeline: string | undefined
+  pipeline: string | undefined,
+  _configPath?: string
 ): NodeJS.ProcessEnv {
   const conf = vscode.workspace.getConfiguration("skippr", workspaceFolder);
   const globalExtra = asStringRecord(conf.get(SKIPPR_ENV_SETTING));

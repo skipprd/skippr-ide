@@ -2,7 +2,14 @@ import { spawn } from "node:child_process";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { parseShellArgs } from "./skipprCliArgs";
-import { buildCliCommand, cliCommandCwd, formatCliCommand, runSkipprJson } from "./skipprRunner";
+import {
+  buildCliCommand,
+  configPathFromCliArgs,
+  formatCliCommand,
+  formatSkipprInvocation,
+  runSkipprJson,
+  skipprProjectRoot
+} from "./skipprRunner";
 
 export interface SkipprDbtTestDeps {
   output: vscode.LogOutputChannel;
@@ -127,7 +134,8 @@ export async function resolveDbtChildrenForPipelineItem(
       ["--config", ref.configFsPath, "test", "list", "--pipeline", ref.pipeline, "--output", "json"],
       cwd,
       deps.output,
-      deps.getSpawnEnv(ref)
+      deps.getSpawnEnv(ref),
+      ref.configFsPath
     );
     const payload = result.value;
     const tests = payload?.tests;
@@ -177,10 +185,11 @@ export function runSkipprJsonLines(
   token: vscode.CancellationToken,
   spawnEnv: NodeJS.ProcessEnv = process.env
 ): Promise<{ code: number | null; lines: JsonlTestResult[]; stderr: string; stdout: string }> {
+  const projectCwd = skipprProjectRoot(configPathFromCliArgs(args), cwd);
   const [command, ...commandArgs] = buildCliCommand(cliPath, args);
-  output.info(`$ ${formatCliCommand(cliPath, args)}`);
+  output.info(`$ ${formatSkipprInvocation(cliPath, args, projectCwd)}`);
   return new Promise((resolve) => {
-    const child = spawn(command, commandArgs, { cwd: cliCommandCwd(cliPath) ?? cwd, env: spawnEnv, shell: false });
+    const child = spawn(command, commandArgs, { cwd: projectCwd, env: spawnEnv, shell: false });
     let stderr = "";
     let stdout = "";
     let buf = "";
