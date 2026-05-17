@@ -171,6 +171,22 @@
       {
         "command": "skippr.refreshDiagnostics",
         "title": "Skippr: Refresh Config Diagnostics"
+      },
+      {
+        "command": "skippr.sql.newQuery",
+        "title": "Skippr: New SQL Query"
+      },
+      {
+        "command": "skippr.sql.runSelection",
+        "title": "Skippr: Run SQL Selection"
+      },
+      {
+        "command": "skippr.sql.runDocument",
+        "title": "Skippr: Run SQL Document"
+      },
+      {
+        "command": "skippr.sql.askDataQuestion",
+        "title": "Skippr: Ask Data Question"
       }
       ],
     "viewsContainers": {
@@ -195,6 +211,11 @@
         {
           "id": "skippr.run.deadletters.panel",
           "title": "Deadletters",
+          "icon": "media/skippr.svg"
+        },
+        {
+          "id": "skippr.query.results.panel",
+          "title": "Results",
           "icon": "media/skippr.svg"
         }
       ]
@@ -236,6 +257,14 @@
         {
           "id": "skippr.runDeadletters",
           "name": "Deadletters",
+          "type": "webview",
+          "order": 1
+        }
+      ],
+      "skippr.query.results.panel": [
+        {
+          "id": "skippr.queryResults",
+          "name": "Results",
           "type": "webview",
           "order": 1
         }
@@ -289,6 +318,25 @@
         {
           "command": "skippr.run.stopSyncPipeline",
           "group": "2_control@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "skippr.sql.runDocument",
+          "group": "navigation@9",
+          "when": "resourceLangId == sql"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "skippr.sql.runSelection",
+          "group": "navigation@9",
+          "when": "editorLangId == sql"
+        },
+        {
+          "command": "skippr.sql.runDocument",
+          "group": "navigation@10",
+          "when": "editorLangId == sql"
         }
       ],
       "commandPalette": [

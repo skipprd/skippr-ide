@@ -38,6 +38,12 @@ import { runEmailOtpAuthQuickInput } from "./skipprOverlayUi";
 import { renderSkipprRunStatusPanelHtml } from "./skipprRunStatusPanelHtml";
 import { renderSkipprRunDetailsPanelHtml, SkipprRunDetailsViewKind } from "./skipprRunDetailsPanelHtml";
 import { renderSkipprSchemaPanelHtml } from "./skipprSchemaPanelHtml";
+import {
+  renderSkipprQueryResultsPanelHtml,
+  SkipprQueryChart,
+  SkipprQueryData,
+  SkipprQueryResultsPanelPayload
+} from "./skipprQueryResultsPanelHtml";
 import { SkipprRunHistory } from "./skipprRunHistory";
 import { SkipprObservedRun, SkipprObservedRunStatus, SkipprRunStateStore } from "./skipprRunState";
 
@@ -46,6 +52,8 @@ const SKIPPR_RUN_TIMELINE_VIEW_ID = "skippr.runTimeline";
 const SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID = "skippr.runSchemaChanges";
 const SKIPPR_RUN_DEADLETTERS_VIEW_ID = "skippr.runDeadletters";
 const SKIPPR_RUN_TIMELINE_CONTAINER_ID = "skippr.run.timeline.panel";
+const SKIPPR_QUERY_RESULTS_VIEW_ID = "skippr.queryResults";
+const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
 const SKIPPR_SCHEMA_VIEW_ID = "skippr.schemaView";
 const SKIPPR_SCHEMA_CONTAINER_ID = "skippr.schema.sidebar";
 const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
@@ -770,6 +778,7 @@ interface RunStatusPanelPayload {
 let runStatusWebviewView: vscode.WebviewView | undefined;
 const runDetailsWebviewViews = new Map<string, vscode.WebviewView>();
 let schemaWebviewView: vscode.WebviewView | undefined;
+let queryResultsWebviewView: vscode.WebviewView | undefined;
 let observabilityStore: SkipprRunStateStore | undefined;
 let runHistory: SkipprRunHistory | undefined;
 let pendingHistorySave: SkipprObservedRun | undefined;
@@ -782,6 +791,10 @@ let runStatusPanelLast: RunStatusPanelPayload = {
   phase: "idle",
   headline: "No Skippr run yet.",
   detail: ""
+};
+let queryResultsLastPayload: SkipprQueryResultsPanelPayload = {
+  type: "queryResults",
+  status: "idle"
 };
 /** Start time for the current status-bar run session (first `setRunStatusRunning` after last finish). */
 let activeRunStatusStartedAt: number | undefined;
@@ -801,6 +814,17 @@ function postObservability(): void {
     void webviewView.webview.postMessage(snapshot);
   }
   void schemaWebviewView?.webview.postMessage(snapshot);
+}
+
+function postQueryResults(payload: SkipprQueryResultsPanelPayload): void {
+  queryResultsLastPayload = payload;
+  void queryResultsWebviewView?.webview.postMessage(payload);
+}
+
+async function showQueryResultsPanel(): Promise<void> {
+  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_QUERY_RESULTS_CONTAINER_ID}`);
+  await runWorkbenchCommand(`${SKIPPR_QUERY_RESULTS_VIEW_ID}.focus`);
+  postQueryResults(queryResultsLastPayload);
 }
 
 function scheduleRefreshRunHistory(): void {
@@ -980,6 +1004,33 @@ function registerSkipprSchemaView(context: vscode.ExtensionContext): void {
           webviewView.onDidDispose(() => {
             if (schemaWebviewView === webviewView) {
               schemaWebviewView = undefined;
+            }
+          });
+        }
+      },
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
+}
+
+function registerSkipprQueryResultsView(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SKIPPR_QUERY_RESULTS_VIEW_ID,
+      {
+        resolveWebviewView(webviewView: vscode.WebviewView): void {
+          webviewView.webview.options = { enableScripts: true };
+          webviewView.webview.html = renderSkipprQueryResultsPanelHtml();
+          queryResultsWebviewView = webviewView;
+          postQueryResults(queryResultsLastPayload);
+          webviewView.webview.onDidReceiveMessage((message: { command?: string; text?: string }) => {
+            if (message.command === "copy" && typeof message.text === "string") {
+              void vscode.env.clipboard.writeText(message.text);
+            }
+          });
+          webviewView.onDidDispose(() => {
+            if (queryResultsWebviewView === webviewView) {
+              queryResultsWebviewView = undefined;
             }
           });
         }
@@ -1257,6 +1308,240 @@ async function runSkipprCommand(
     await refreshConfigStatus(output, statusItem);
     vscode.window.showErrorMessage(`${run.label} failed. See Skippr output for details.`);
   }
+}
+
+interface SkipprQueryCliResult {
+  ok?: boolean;
+  pipeline?: string;
+  sql?: string;
+  answer?: string;
+  data?: SkipprQueryData;
+  chart?: SkipprQueryChart;
+  elapsed_ms?: number;
+  error?: string;
+}
+
+interface SkipprQueryContext {
+  cliPath: string;
+  configPath: string;
+  pipeline: string;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function normalizeQueryData(value: unknown): SkipprQueryData | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as { header?: unknown; rows?: unknown };
+  if (!isStringArray(candidate.header) || !Array.isArray(candidate.rows)) {
+    return undefined;
+  }
+  const rows = candidate.rows
+    .filter((row): row is unknown[] => Array.isArray(row))
+    .map((row) => row.map((cell) => String(cell ?? "")));
+  return { header: candidate.header, rows };
+}
+
+function normalizeQueryChart(value: unknown): SkipprQueryChart | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as { type?: unknown; x?: unknown; y?: unknown };
+  const chartType = typeof candidate.type === "string" ? candidate.type : "";
+  if (!chartType.trim() || typeof candidate.x !== "string" || !isStringArray(candidate.y)) {
+    return undefined;
+  }
+  return { type: chartType, x: candidate.x, y: candidate.y };
+}
+
+function payloadFromQueryResult(result: SkipprQueryCliResult, fallback: Pick<SkipprQueryResultsPanelPayload, "source" | "pipeline" | "question">): SkipprQueryResultsPanelPayload {
+  return {
+    type: "queryResults",
+    status: result.ok === false ? "error" : "success",
+    source: fallback.source,
+    pipeline: result.pipeline ?? fallback.pipeline,
+    question: fallback.question,
+    answer: result.answer,
+    sql: result.sql,
+    data: normalizeQueryData(result.data),
+    chart: normalizeQueryChart(result.chart),
+    elapsedMs: result.elapsed_ms,
+    error: result.error
+  };
+}
+
+function payloadFromAgentJsonLine(line: unknown, pipeline: string, question: string): SkipprQueryResultsPanelPayload | undefined {
+  if (!line || typeof line !== "object") {
+    return undefined;
+  }
+  const message = line as { type?: unknown; result?: unknown };
+  if (message.type !== "final" || !message.result || typeof message.result !== "object") {
+    return undefined;
+  }
+  const result = message.result as { kind?: unknown; payload?: unknown };
+  if (result.kind !== "ask" || !result.payload || typeof result.payload !== "object") {
+    return undefined;
+  }
+  const payload = result.payload as { answer?: unknown; sql?: unknown; data?: unknown; chart?: unknown };
+  return {
+    type: "queryResults",
+    status: "success",
+    source: "agent",
+    pipeline,
+    question,
+    answer: typeof payload.answer === "string" ? payload.answer : undefined,
+    sql: typeof payload.sql === "string" ? payload.sql : undefined,
+    data: normalizeQueryData(payload.data),
+    chart: normalizeQueryChart(payload.chart)
+  };
+}
+
+async function resolveSqlQueryContext(output: vscode.LogOutputChannel): Promise<SkipprQueryContext | undefined> {
+  const configPath = activeConfigPath || (await chooseActiveConfig(output));
+  if (!configPath) {
+    vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
+    return undefined;
+  }
+  if (!isWorkspaceRootConfigPath(configPath)) {
+    vscode.window.showWarningMessage("Skippr SQL commands require skippr.yml or skippr.yaml at the open workspace root.");
+    return undefined;
+  }
+  const cliPath = await resolveCliOrOfferInstall(output);
+  if (!cliPath) {
+    return undefined;
+  }
+  const show = await getConfigShow(output);
+  const folderUri = workspaceFolderForConfigPath(configPath);
+  const configuredDefault = vscode.workspace.getConfiguration("skippr", folderUri).get<string>(defaultPipelineKey, "").trim();
+  const candidates = show?.pipelines?.length ? show.pipelines : configuredDefault ? [configuredDefault] : [];
+  let pipeline = (show?.default_pipeline ?? configuredDefault).trim();
+  if (!pipeline || (candidates.length > 0 && !candidates.includes(pipeline))) {
+    if (candidates.length === 1) {
+      pipeline = candidates[0];
+    } else if (candidates.length > 1) {
+      pipeline = (await vscode.window.showQuickPick(candidates, { placeHolder: "Select a Skippr pipeline for this query" })) ?? "";
+    } else {
+      pipeline = (await vscode.window.showInputBox({ prompt: "Pipeline name for this query" }))?.trim() ?? "";
+    }
+  }
+  if (!pipeline) {
+    return undefined;
+  }
+  return { cliPath, configPath, pipeline };
+}
+
+function activeSqlDocumentText(selectionOnly: boolean): string | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showWarningMessage("Open a SQL editor before running a query.");
+    return undefined;
+  }
+  if (selectionOnly && !editor.selection.isEmpty) {
+    return editor.document.getText(editor.selection).trim();
+  }
+  return editor.document.getText().trim();
+}
+
+async function runSqlTextFromEditor(selectionOnly: boolean, output: vscode.LogOutputChannel): Promise<void> {
+  const sql = activeSqlDocumentText(selectionOnly);
+  if (!sql) {
+    vscode.window.showWarningMessage("No SQL found to run.");
+    return;
+  }
+  const ctx = await resolveSqlQueryContext(output);
+  if (!ctx) {
+    return;
+  }
+  postQueryResults({
+    type: "queryResults",
+    status: "running",
+    source: "sql",
+    pipeline: ctx.pipeline,
+    sql
+  });
+  await showQueryResultsPanel();
+  const result = await runSkipprJson<SkipprQueryCliResult>(
+    ctx.cliPath,
+    ["--config", ctx.configPath, "--log", getLogLevel(), "query", "--pipeline", ctx.pipeline, "--sql", sql, "--output", "json"],
+    getConfigCwd(ctx.configPath),
+    output,
+    skipprSpawnEnv(ctx.configPath, ctx.pipeline),
+    ctx.configPath
+  );
+  const payload = result.value
+    ? payloadFromQueryResult(result.value, { source: "sql", pipeline: ctx.pipeline })
+    : {
+        type: "queryResults" as const,
+        status: "error" as const,
+        source: "sql" as const,
+        pipeline: ctx.pipeline,
+        sql,
+        error: result.stdout || "Query failed before producing JSON output."
+      };
+  postQueryResults(payload);
+  await showQueryResultsPanel();
+}
+
+async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
+  const question = (await vscode.window.showInputBox({ prompt: "Ask a data question", placeHolder: "e.g. Which customers drove revenue last month?" }))?.trim();
+  if (!question) {
+    return;
+  }
+  const ctx = await resolveSqlQueryContext(output);
+  if (!ctx) {
+    return;
+  }
+  postQueryResults({
+    type: "queryResults",
+    status: "running",
+    source: "agent",
+    pipeline: ctx.pipeline,
+    question
+  });
+  await showQueryResultsPanel();
+  const message = JSON.stringify({
+    user: question,
+    execution_surface: "ide_chat",
+    context: { surface: "sql_results_panel" }
+  });
+  const tokenSource = new vscode.CancellationTokenSource();
+  try {
+    const result = await runSkipprJsonLines(
+      ctx.cliPath,
+      ["--config", ctx.configPath, "--log", getLogLevel(), "chat", "send", "--pipeline", ctx.pipeline, "--mode", "ask", "--message", message, "--output", "jsonl"],
+      getConfigCwd(ctx.configPath),
+      output,
+      tokenSource.token,
+      skipprSpawnEnv(ctx.configPath, ctx.pipeline)
+    );
+    const finalPayload = (result.lines as unknown[])
+      .map((line) => payloadFromAgentJsonLine(line, ctx.pipeline, question))
+      .find((payload): payload is SkipprQueryResultsPanelPayload => Boolean(payload));
+    postQueryResults(
+      finalPayload ?? {
+        type: "queryResults",
+        status: "error",
+        source: "agent",
+        pipeline: ctx.pipeline,
+        question,
+        error: result.stderr || "Agent finished without returning a SQL result."
+      }
+    );
+    await showQueryResultsPanel();
+  } finally {
+    tokenSource.dispose();
+  }
+}
+
+async function newSqlQueryDocument(): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument({
+    language: "sql",
+    content: "-- Write a read-only SELECT query, then run Skippr: Run SQL Document.\nselect *\nfrom \nlimit 50;\n"
+  });
+  await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
 }
 
 function normalizeDiscoverOutput(raw: unknown): string | undefined {
@@ -2435,6 +2720,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID, "schema");
   registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters");
   registerSkipprSchemaView(context);
+  registerSkipprQueryResultsView(context);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   const authProvider = new SkipprAuthenticationProvider(context, statusItem);
   await syncAuthStatusBarFromStoredSecrets(context, statusItem);
@@ -2610,6 +2896,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("skippr.openConfig", async () => {
       await openActiveConfig(output);
+    }),
+    vscode.commands.registerCommand("skippr.sql.newQuery", async () => {
+      await newSqlQueryDocument();
+    }),
+    vscode.commands.registerCommand("skippr.sql.runSelection", async () => {
+      await runSqlTextFromEditor(true, output);
+    }),
+    vscode.commands.registerCommand("skippr.sql.runDocument", async () => {
+      await runSqlTextFromEditor(false, output);
+    }),
+    vscode.commands.registerCommand("skippr.sql.askDataQuestion", async () => {
+      await askDataQuestion(output);
     }),
     vscode.commands.registerCommand("skippr.editPipelineEnv", async () => {
       const configPath = activeConfigPath ?? (await chooseActiveConfig(output));
