@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
@@ -28,7 +28,7 @@ function forwardRunTranscriptLine(
     .then(undefined, () => undefined);
 }
 
-export type SkipprRunKind = "discover" | "sync-once" | "sync-all-once" | "sync" | "model" | "model-direct";
+export type SkipprRunKind = "discover" | "sync-once" | "sync-all-once" | "sync" | "model";
 
 export interface SkipprRunOptions {
   kind: SkipprRunKind;
@@ -77,37 +77,20 @@ export interface SkipprJsonCommandResult<T> {
 
 const installerCommand = "curl -fsSL https://install.skippr.io/install.sh | sh -";
 const localCargoCli = "__skippr_local_cargo__";
-const reactCargoRegistryIndex =
-  "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/";
-const directDiffBeforeScheme = "skippr-direct-before";
-
-const directDiffBeforeDocs = new Map<string, string>();
-let directDiffProviderRegistered = false;
-
-function ensureDirectDiffProvider(): void {
-  if (directDiffProviderRegistered) {
-    return;
-  }
-  directDiffProviderRegistered = true;
-  vscode.workspace.registerTextDocumentContentProvider(directDiffBeforeScheme, {
-    provideTextDocumentContent(uri) {
-      return directDiffBeforeDocs.get(uri.toString()) ?? "";
-    }
-  });
-}
+const REACT_CARGO_REGISTRY_INDEX = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/";
 
 /** Crates published to react-cargo that skipprd resolves from path when ../react exists. */
 const REACT_CARGO_PATCHES: ReadonlyArray<readonly [string, string]> = [
-  ["react", "../react/src/runtime"],
-  ["react-core", "../react/src/core"],
-  ["react-http-protocol", "../react/src/http-protocol"],
-  ["react-transport", "../react/src/transport"],
-  ["react-view", "../react/src/view"],
-  ["react-module-storage-s3", "../react/src/modules/adaptors/storage-s3"],
-  ["react-module-storage-local", "../react/src/modules/adaptors/storage-local"],
-  ["react-module-storage-memory", "../react/src/modules/adaptors/storage-memory"],
-  ["react-module-provider-vector-lance", "../react/src/modules/providers/vector-lance"],
-  ["react-suite-debugger", "../react/src/suites/suite_debugger"]
+  ["react", "src/runtime"],
+  ["react-core", "src/core"],
+  ["react-http-protocol", "src/http-protocol"],
+  ["react-transport", "src/transport"],
+  ["react-view", "src/view"],
+  ["react-module-storage-s3", "src/modules/adaptors/storage-s3"],
+  ["react-module-storage-local", "src/modules/adaptors/storage-local"],
+  ["react-module-storage-memory", "src/modules/adaptors/storage-memory"],
+  ["react-module-provider-vector-lance", "src/modules/providers/vector-lance"],
+  ["react-suite-debugger", "src/suites/suite_debugger"]
 ];
 
 export function isLocalCargoCli(cliPath: string): boolean {
@@ -144,19 +127,35 @@ export function findInstalledSkipprCli(): string | undefined {
 }
 
 function localReactRootFromSkipprdManifest(manifestPath: string): string | undefined {
+  const settingsRoot = vscode.workspace.getConfiguration().get<string>("skippr.dev.reactRoot", "").trim();
+  const configured = process.env.SKIPPR_REACT_ROOT?.trim() || settingsRoot;
+  if (configured && existsSync(path.join(configured, "Cargo.toml"))) {
+    return path.resolve(configured);
+  }
   const skipprdRoot = path.dirname(manifestPath);
-  const reactRoot = path.resolve(skipprdRoot, "../react");
-  return existsSync(path.join(reactRoot, "Cargo.toml")) ? reactRoot : undefined;
+  const candidates = [
+    ...((vscode.workspace.workspaceFolders ?? [])
+      .filter((folder) => folder.name === "react" || folder.uri.fsPath.endsWith(`${path.sep}react`))
+      .map((folder) => folder.uri.fsPath)),
+    path.resolve(skipprdRoot, "../react"),
+    path.resolve(skipprdRoot, "../../react")
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(path.join(candidate, "Cargo.toml"))) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function reactCargoPatchConfigArgs(manifestPath: string): string[] {
   const reactRoot = localReactRootFromSkipprdManifest(manifestPath);
+  const args = ["--config", `registries.react-cargo.index="${REACT_CARGO_REGISTRY_INDEX}"`];
   if (!reactRoot) {
-    return [];
+    return args;
   }
-  const args: string[] = [];
   for (const [crateName, relativePath] of REACT_CARGO_PATCHES) {
-    args.push("--config", `patch."react-cargo".${crateName}.path="${path.resolve(reactRoot, relativePath.replace(/^\.\.\/react\//, ""))}"`);
+    args.push("--config", `patch."react-cargo".${crateName}.path="${path.resolve(reactRoot, relativePath)}"`);
   }
   return args;
 }
@@ -164,9 +163,9 @@ function reactCargoPatchConfigArgs(manifestPath: string): string[] {
 export function reactCargoAuthHint(): string {
   return (
     "Skippr could not fetch React crates from the private react-cargo registry. " +
-    "Install the Skippr CLI (Skippr: Install CLI), turn off skippr.dev.useLocalSkipprd to use an installed release binary, " +
-    "place a sibling ../react checkout next to skipprd, or export CARGO_REGISTRIES_REACT_CARGO_TOKEN " +
-    "(see skipprd/docs/docs/maintainers/local-development.md)."
+    "Place a sibling ../react checkout next to skipprd (or set SKIPPR_REACT_ROOT), run " +
+    "the local dev CLI through cargo, install the release CLI (Skippr: Install CLI), " +
+    "or export CARGO_REGISTRIES_REACT_CARGO_TOKEN (see skipprd/docs/docs/maintainers/local-development.md)."
   );
 }
 
@@ -248,7 +247,10 @@ export async function runSkipprJson<T>(
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
     forwardRunTranscriptLine("skippr-json", "json-cli", chunk, "stderr");
-    output.info(compactOutputLine(chunk.trimEnd()));
+    const line = compactOutputLine(chunk.trimEnd());
+    if (line) {
+      output.info(line);
+    }
   });
 
   return new Promise((resolve) => {
@@ -261,7 +263,10 @@ export async function runSkipprJson<T>(
         output.info(stdout.trimEnd());
       }
       if (stderr.trim() && code !== 0) {
-        output.error(compactOutputLine(stderr.trimEnd()));
+        const line = compactOutputLine(stderr.trimEnd());
+        if (line) {
+          output.error(line);
+        }
       }
       let value: T | undefined;
       if (stdout.trim()) {
@@ -282,8 +287,6 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
   const [spawnCommand, ...spawnArgs] = buildCliCommand(command, args);
   const label = labelForRun(options);
   const startedAt = Date.now();
-  const directDiffRoot = options.kind === "model-direct" ? directDbtOutputPath(options) : undefined;
-  const directDiffBefore = directDiffRoot ? snapshotDirectDiffFiles(directDiffRoot) : undefined;
   let lastEvent: SkipprRunEvent | undefined;
   let stdoutBuffer = "";
   let stderrBuffer = "";
@@ -306,7 +309,10 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
         lastEvent = event;
         callbacks.onEvent(event);
       } else if (line.trim()) {
-        callbacks.onLog(compactOutputLine(line));
+        const compacted = compactOutputLine(line);
+        if (compacted) {
+          callbacks.onLog(compacted);
+        }
       }
     });
   });
@@ -318,7 +324,10 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
       if (line.trim()) {
         lastErrorLine = line.trim();
       }
-      callbacks.onLog(compactOutputLine(line));
+      const compacted = compactOutputLine(line);
+      if (compacted) {
+        callbacks.onLog(compacted);
+      }
     });
   });
 
@@ -335,7 +344,10 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
           lastEvent = event;
           callbacks.onEvent(event);
         } else if (line.trim()) {
-          callbacks.onLog(compactOutputLine(line));
+          const compacted = compactOutputLine(line);
+          if (compacted) {
+            callbacks.onLog(compacted);
+          }
         }
       });
       flushRemainder(stderrBuffer, (line) => {
@@ -343,11 +355,11 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
         if (line.trim()) {
           lastErrorLine = line.trim();
         }
-        callbacks.onLog(compactOutputLine(line));
+        const compacted = compactOutputLine(line);
+        if (compacted) {
+          callbacks.onLog(compacted);
+        }
       });
-      if (directDiffRoot && directDiffBefore) {
-        void showDirectModelDiffs(directDiffRoot, directDiffBefore, options, callbacks);
-      }
       resolve({
         code,
         signal,
@@ -379,14 +391,13 @@ export function buildCliCommand(cliPath: string, args: string[]): string[] {
   if (!manifestPath) {
     return ["skippr", ...args];
   }
+  const patchArgs = reactCargoPatchConfigArgs(manifestPath);
   return [
     "cargo",
     "run",
     "--manifest-path",
     manifestPath,
-    "--config",
-    `registries.react-cargo.index="${reactCargoRegistryIndex}"`,
-    ...reactCargoPatchConfigArgs(manifestPath),
+    ...patchArgs,
     "-p",
     "skippr-cli",
     "--",
@@ -435,6 +446,7 @@ function resolveLocalSkipprdManifest(): string | undefined {
 function localSkipprdManifestCandidates(): string[] {
   const workspaceCandidates = (vscode.workspace.workspaceFolders ?? []).flatMap((folder) => [
     path.join(folder.uri.fsPath, "Cargo.toml"),
+    path.join(folder.uri.fsPath, "skipprd", "Cargo.toml"),
     path.join(path.dirname(folder.uri.fsPath), "skipprd", "Cargo.toml")
   ]);
   return [
@@ -450,8 +462,7 @@ export function isSkipprRunKind(value: unknown): value is SkipprRunKind {
     value === "sync-once" ||
     value === "sync-all-once" ||
     value === "sync" ||
-    value === "model" ||
-    value === "model-direct"
+    value === "model"
   );
 }
 
@@ -472,15 +483,12 @@ function buildRunArgs(options: SkipprRunOptions): string[] {
     const raw = (options.discoverOutput ?? "json").trim().toLowerCase();
     const out = raw === "progress" || raw === "json" || raw === "text" ? raw : "json";
     args.push("--output", out);
-  } else if (options.kind === "model" || options.kind === "model-direct") {
+  } else if (options.kind === "model") {
     args.push("model");
     if (options.pipeline) {
       args.push("--pipeline", options.pipeline);
     }
-    if (options.kind === "model-direct") {
-      args.push("--agent-type", "direct");
-      args.push("--dbt-output-path", directDbtOutputPath(options));
-    }
+    args.push("--dbt-output-path", modelDbtOutputPath(options));
     if (options.modelNoResume) {
       args.push("--no-resume");
     }
@@ -501,176 +509,13 @@ function buildRunArgs(options: SkipprRunOptions): string[] {
   return args;
 }
 
-function directDbtOutputPath(options: SkipprRunOptions): string {
+function modelDbtOutputPath(options: SkipprRunOptions): string {
   return path.join(skipprProjectRoot(options.configPath, options.cwd), "dbt", options.pipeline ?? "default");
-}
-
-function snapshotDirectDiffFiles(root: string): Map<string, string> {
-  const snapshot = new Map<string, string>();
-  if (!existsSync(root)) {
-    return snapshot;
-  }
-  for (const file of walkDirectDiffFiles(root)) {
-    try {
-      snapshot.set(file, readFileSync(file, "utf8"));
-    } catch {
-      // Ignore files that disappear or are not valid UTF-8; dbt source files are text.
-    }
-  }
-  return snapshot;
-}
-
-function walkDirectDiffFiles(root: string): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return [];
-  }
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry === ".git" || entry === "target" || entry === "logs" || entry === "dbt_packages") {
-      continue;
-    }
-    const full = path.join(root, entry);
-    let stat;
-    try {
-      stat = statSync(full);
-    } catch {
-      continue;
-    }
-    if (stat.isDirectory()) {
-      files.push(...walkDirectDiffFiles(full));
-    } else if (stat.isFile() && isDirectDiffTextFile(full)) {
-      files.push(full);
-    }
-  }
-  return files;
-}
-
-function isDirectDiffTextFile(file: string): boolean {
-  return [".sql", ".yml", ".yaml", ".csv", ".md", ".txt"].includes(path.extname(file).toLowerCase());
-}
-
-async function showDirectModelDiffs(
-  root: string,
-  before: Map<string, string>,
-  options: SkipprRunOptions,
-  callbacks: SkipprRunnerCallbacks
-): Promise<void> {
-  const after = snapshotDirectDiffFiles(root);
-  const paths = new Set<string>([...before.keys(), ...after.keys()]);
-  const changed = [...paths]
-    .filter((file) => before.get(file) !== after.get(file))
-    .sort((a, b) => path.relative(root, a).localeCompare(path.relative(root, b)));
-  if (!changed.length) {
-    callbacks.onLog("[skippr] Direct model made no local dbt file changes to diff.");
-    return;
-  }
-
-  ensureDirectDiffProvider();
-  const changedFiles = changed.map((file) => {
-    const existedBefore = before.has(file);
-    const existsAfter = after.has(file);
-    const changeKind: "created" | "modified" | "deleted" = !existedBefore ? "created" : !existsAfter ? "deleted" : "modified";
-    return {
-      path: path.relative(root, file) || path.basename(file),
-      absolute_path: file,
-      change_kind: changeKind,
-      lines_added: countAddedLines(before.get(file) ?? "", after.get(file) ?? ""),
-      lines_removed: countAddedLines(after.get(file) ?? "", before.get(file) ?? "")
-    };
-  });
-  callbacks.onEvent({
-    event: "model_file_changed",
-    run_kind: options.kind,
-    pipeline: options.pipeline,
-    timestamp: new Date().toISOString(),
-    phase: "review",
-    changed_files: changedFiles
-  });
-  callbacks.onLog(`[skippr] Opening ${changed.length} Direct model change${changed.length === 1 ? "" : "s"}.`);
-  const createdCount = changedFiles.filter((file) => file.change_kind === "created").length;
-  const modifiedCount = changedFiles.filter((file) => file.change_kind === "modified").length;
-  const deletedCount = changedFiles.filter((file) => file.change_kind === "deleted").length;
-  const linesAdded = changedFiles.reduce((sum, file) => sum + (file.lines_added ?? 0), 0);
-  const linesRemoved = changedFiles.reduce((sum, file) => sum + (file.lines_removed ?? 0), 0);
-  const multiDiffChanges: unknown[] = [];
-  for (const file of changed.slice(0, 20)) {
-    const rel = path.relative(root, file) || path.basename(file);
-    const beforeUri = directDiffBeforeUri(file, before.get(file) ?? "");
-    const afterUri = after.has(file)
-      ? vscode.Uri.file(file)
-      : directDiffBeforeUri(`${file}.deleted`, "");
-    multiDiffChanges.push([beforeUri, afterUri, rel]);
-  }
-  try {
-    await vscode.commands.executeCommand("vscode.changes", `Skippr Direct: ${options.pipeline ?? "model"} changes`, multiDiffChanges);
-    callbacks.onEvent({
-      event: "model_review_ready",
-      run_kind: options.kind,
-      pipeline: options.pipeline,
-      timestamp: new Date().toISOString(),
-      phase: "review",
-      total_count: changedFiles.length,
-      created_count: createdCount,
-      modified_count: modifiedCount,
-      deleted_count: deletedCount,
-      lines_added: linesAdded,
-      lines_removed: linesRemoved,
-      summary: `${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} ready for review`
-    });
-  } catch {
-    for (const [beforeUri, afterUri, rel] of multiDiffChanges as [vscode.Uri, vscode.Uri, string][]) {
-      await vscode.commands.executeCommand(
-        "vscode.diff",
-        beforeUri,
-        afterUri,
-        `Skippr Direct: ${rel}`,
-        { preview: false }
-      );
-    }
-    callbacks.onEvent({
-      event: "model_review_ready",
-      run_kind: options.kind,
-      pipeline: options.pipeline,
-      timestamp: new Date().toISOString(),
-      phase: "review",
-      total_count: changedFiles.length,
-      created_count: createdCount,
-      modified_count: modifiedCount,
-      deleted_count: deletedCount,
-      lines_added: linesAdded,
-      lines_removed: linesRemoved,
-      summary: `${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} opened in fallback diff review`
-    });
-  }
-  if (changed.length > 20) {
-    callbacks.onLog(`[skippr] ${changed.length - 20} additional Direct model diffs were not opened.`);
-  }
-}
-
-function countAddedLines(before: string, after: string): number {
-  const beforeLines = new Set(before.split(/\r?\n/));
-  return after.split(/\r?\n/).filter((line) => line && !beforeLines.has(line)).length;
-}
-
-function directDiffBeforeUri(file: string, content: string): vscode.Uri {
-  const uri = vscode.Uri.from({
-    scheme: directDiffBeforeScheme,
-    path: `/${path.basename(file)}`,
-    query: `${Date.now()}-${Math.random().toString(36).slice(2)}`
-  });
-  directDiffBeforeDocs.set(uri.toString(), content);
-  return uri;
 }
 
 function labelForRun(options: SkipprRunOptions): string {
   if (options.kind === "discover") {
     return `Discover ${options.pipeline ?? "pipeline"}`;
-  }
-  if (options.kind === "model-direct") {
-    return `Direct model ${options.pipeline ?? "pipeline"}`;
   }
   if (options.kind === "model") {
     return `Model ${options.pipeline ?? "pipeline"}`;
@@ -688,15 +533,18 @@ function compactTranscriptLine(line: string): string {
   return clipText(scrubLargeEmbeddedData(line), transcriptLineMaxChars);
 }
 
-function compactOutputLine(line: string): string {
+function compactOutputLine(line: string): string | undefined {
   const scrubbed = scrubLargeEmbeddedData(line.trimEnd());
   const summary = summarizeJsonLine(scrubbed);
+  if (summary === null) {
+    return undefined;
+  }
   return clipText(summary ?? scrubbed, outputLineMaxChars);
 }
 
-function summarizeJsonLine(line: string): string | undefined {
+function summarizeJsonLine(line: string): string | undefined | null {
   const trimmed = line.trim();
-  if (!trimmed.startsWith("{") || trimmed.length <= outputLineMaxChars) {
+  if (!trimmed.startsWith("{")) {
     return undefined;
   }
   try {
@@ -704,10 +552,10 @@ function summarizeJsonLine(line: string): string | undefined {
     const type = typeof parsed.type === "string" ? parsed.type : undefined;
     const event = typeof parsed.event === "string" ? parsed.event : undefined;
     if (type === "thread_state") {
-      const snapshot = parsed.snapshot as Record<string, unknown> | undefined;
-      const events = Array.isArray(snapshot?.events) ? snapshot.events.length : undefined;
-      const currentPhase = typeof snapshot?.current_phase === "string" ? snapshot.current_phase : undefined;
-      return `[skippr-json] thread_state current_phase=${currentPhase ?? "unknown"} events=${events ?? "unknown"} (${trimmed.length} chars elided)`;
+      return null;
+    }
+    if (trimmed.length <= outputLineMaxChars) {
+      return undefined;
     }
     if (type === "tool_end") {
       const name = typeof parsed.name === "string" ? parsed.name : "tool";
@@ -741,12 +589,27 @@ function parseRunEvent(line: string): SkipprRunEvent | undefined {
     return undefined;
   }
   try {
-    const parsed = JSON.parse(trimmed) as Partial<SkipprRunEvent>;
+    const parsed = JSON.parse(trimmed) as Partial<SkipprRunEvent> & { type?: unknown; ts?: unknown; server_time?: unknown };
     if (typeof parsed.event === "string") {
       return parsed as SkipprRunEvent;
     }
     if (parsed.event_kind === "tool_start" || parsed.event_kind === "tool_end") {
       return { ...parsed, event: parsed.event_kind } as SkipprRunEvent;
+    }
+    if (parsed.type === "tool_start" || parsed.type === "tool_end") {
+      return {
+        ...parsed,
+        event: parsed.type,
+        timestamp: typeof parsed.server_time === "string" ? parsed.server_time : parsed.timestamp
+      } as SkipprRunEvent;
+    }
+    if (parsed.type === "phase" && typeof parsed.phase === "string") {
+      return {
+        ...parsed,
+        event: "model_phase_changed",
+        run_kind: "model",
+        timestamp: typeof parsed.ts === "string" ? parsed.ts : typeof parsed.server_time === "string" ? parsed.server_time : parsed.timestamp
+      } as SkipprRunEvent;
     }
     return undefined;
   } catch {
@@ -788,12 +651,18 @@ function runCommand(
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     forwardRunTranscriptLine(`${command}`, "shell", chunk, "stdout");
-    output.info(compactOutputLine(chunk.trimEnd()));
+    const line = compactOutputLine(chunk.trimEnd());
+    if (line) {
+      output.info(line);
+    }
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
     forwardRunTranscriptLine(`${command}`, "shell", chunk, "stderr");
-    output.error(compactOutputLine(chunk.trimEnd()));
+    const line = compactOutputLine(chunk.trimEnd());
+    if (line) {
+      output.error(line);
+    }
   });
 
   return new Promise((resolve) => {

@@ -1,4 +1,4 @@
-export type SkipprPipelineRunCommand = "discover" | "sync" | "model" | "model-direct" | "doctor";
+export type SkipprPipelineRunCommand = "discover" | "sync" | "model" | "doctor";
 
 /** Config/pipeline for the next gutter Run menu action (set before `skippr.showPipelineRunMenu`). */
 let pendingLensRun: { configPath: string; pipeline: string } | undefined;

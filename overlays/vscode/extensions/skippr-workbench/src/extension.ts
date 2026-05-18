@@ -1,5 +1,8 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as crypto from "node:crypto";
 import { loadPanelPayloadFromRust } from "./rustBridge";
 import {
   installSkipprCli,
@@ -28,6 +31,7 @@ import {
   ConnectionSettings,
   SkipprConfigShowResult,
   SkipprDoctorResult,
+  SkipprModelChangedFile,
   SkipprPanelId,
   SkipprPanelName,
   SkipprPanelPayload,
@@ -44,6 +48,15 @@ import {
   SkipprQueryData,
   SkipprQueryResultsPanelPayload
 } from "./skipprQueryResultsPanelHtml";
+import {
+  compileDbtSqlForQuery,
+  detectDbtSqlFile,
+  dbtRunModeMenuTitle,
+  DbtEditorRunMode,
+  probeDbtFileHasTests,
+  probeDbtFileMeta,
+  refreshDbtEditorContextKeys
+} from "./skipprDbtSql";
 import { SkipprRunHistory } from "./skipprRunHistory";
 import { SkipprObservedRun, SkipprObservedRunStatus, SkipprRunStateStore } from "./skipprRunState";
 
@@ -57,6 +70,7 @@ const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
 const SKIPPR_SCHEMA_VIEW_ID = "skippr.schemaView";
 const SKIPPR_SCHEMA_CONTAINER_ID = "skippr.schema.sidebar";
 const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
+const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
 
 const panelSpecs: Array<{ id: SkipprPanelId; name: SkipprPanelName; command: string }> = [
   { id: "skippr.discover", name: "Discover", command: "skippr.open.discover" },
@@ -584,8 +598,6 @@ function runKindLabel(kind: SkipprRunnableKind): string {
       return "Start Sync";
     case "model":
       return "Model";
-    case "model-direct":
-      return "Direct Model";
   }
 }
 
@@ -1163,6 +1175,25 @@ type RunSkipprCliFlags = {
   modelNoResume?: boolean;
 };
 
+type RunSkipprObserver = {
+  onEvent?(event: SkipprRunEvent, observed: SkipprObservedRun | undefined): void;
+  onLog?(line: string): void;
+  onFinish?(result: { code: number | null; signal: string | null; elapsedMs: number; errorDetail?: string }, finishedRun: SkipprObservedRun | undefined): void;
+};
+
+type AgentModelRunRequest = {
+  id?: string;
+  kind?: string;
+  pipeline?: string;
+  configPath?: string;
+  noResume?: boolean;
+  workspaceRoot?: string;
+  sourceChatSessionId?: string;
+  sourceTurnId?: string;
+};
+
+type DbtFileSnapshot = Map<string, string | undefined>;
+
 function runOutcomeStatus(code: number | null, signal: string | null | undefined): SkipprObservedRunStatus {
   if (signal) {
     return "stopped";
@@ -1178,18 +1209,21 @@ async function runSkipprCommand(
   requestedConfigPath?: string,
   requestedLogLevel?: string,
   extraCliArgs?: string[],
-  cliFlags?: RunSkipprCliFlags
-): Promise<void> {
+  cliFlags?: RunSkipprCliFlags,
+  observer?: RunSkipprObserver
+): Promise<{ code: number | null; signal: string | null; elapsedMs: number; errorDetail?: string } | undefined> {
   if (activeRun) {
-    if (kind === "model" || kind === "model-direct") {
+    if (kind === "model") {
       output.show(true);
       output.info(`Attached to active ${activeRun.label}. Stop/cancel is the only in-flight control surface.`);
       vscode.window.showInformationMessage(`Attached to active ${activeRun.label}.`);
-      return;
+      const result = { code: null, signal: null, elapsedMs: 0, errorDetail: `Another Skippr run is already active: ${activeRun.label}` };
+      observer?.onFinish?.(result, observabilityStore?.snapshot().current);
+      return result;
     }
     vscode.window.showWarningMessage(`Skippr is already running: ${activeRun.label}`);
     output.show(true);
-    return;
+    return undefined;
   }
 
   const skipModal =
@@ -1201,29 +1235,29 @@ async function runSkipprCommand(
   if (!skipModal) {
     request = await showRunConfigModal(kind, output);
     if (!request) {
-      return;
+      return undefined;
     }
   }
 
   const pipeline = kind === "sync-all-once" ? undefined : requestedPipeline?.trim() || request?.pipeline?.trim();
   if (kind !== "sync-all-once" && !pipeline) {
-    return;
+    return undefined;
   }
 
   const configPath = requestedConfigPath?.trim() || request?.configPath?.trim() || activeConfigPath || (await chooseActiveConfig(output));
   if (!configPath) {
     vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
     await showSetupWebview(output, statusItem);
-    return;
+    return undefined;
   }
   if (!isWorkspaceRootConfigPath(configPath)) {
     vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
-    return;
+    return undefined;
   }
 
   const cliPath = await resolveCliOrOfferInstall(output);
   if (!cliPath) {
-    return;
+    return undefined;
   }
 
   output.show(true);
@@ -1236,13 +1270,14 @@ async function runSkipprCommand(
       pipeline,
       logLevel: requestedLogLevel?.trim() || request?.logLevel?.trim() || getLogLevel(),
       discoverOutput: kind === "discover" ? cliFlags?.discoverOutput : undefined,
-      modelNoResume: kind === "model" || kind === "model-direct" ? cliFlags?.modelNoResume : undefined,
+      modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined,
       extraArgs: extraCliArgs ?? [],
       spawnEnv: skipprSpawnEnv(configPath, pipeline)
     },
     {
       onEvent: (event) => {
         const observed = observabilityStore?.recordEvent(event);
+        observer?.onEvent?.(event, observed);
         if (event.event !== "sync_status") {
           const message = describeRunEvent(event);
           output.info(message);
@@ -1256,7 +1291,10 @@ async function runSkipprCommand(
           }
         }
       },
-      onLog: (line) => output.info(line)
+      onLog: (line) => {
+        observer?.onLog?.(line);
+        output.info(line);
+      }
     }
   );
 
@@ -1291,6 +1329,7 @@ async function runSkipprCommand(
     elapsedMs: result.elapsedMs,
     detail: result.lastEvent?.error ?? result.errorDetail
   });
+  observer?.onFinish?.(result, finishedRun);
   if (finishedRun) {
     flushHistorySave(finishedRun);
   }
@@ -1307,6 +1346,318 @@ async function runSkipprCommand(
     output.error(`${run.label} failed with exit code ${result.code}.`);
     await refreshConfigStatus(output, statusItem);
     vscode.window.showErrorMessage(`${run.label} failed. See Skippr output for details.`);
+  }
+  return result;
+}
+
+async function openModelWorkflowInAgentChat(
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem,
+  requestedPipeline?: string,
+  requestedConfigPath?: string,
+  modelNoResume?: boolean
+): Promise<void> {
+  const skipModal = Boolean(requestedPipeline?.trim()) || Boolean(requestedConfigPath?.trim());
+  let request: SkipprRunRequest | undefined;
+  if (!skipModal) {
+    request = await showRunConfigModal("model", output);
+    if (!request) {
+      return;
+    }
+  }
+
+  const pipeline = requestedPipeline?.trim() || request?.pipeline?.trim();
+  if (!pipeline) {
+    vscode.window.showWarningMessage("Choose a pipeline for Skippr model.");
+    return;
+  }
+
+  const configPath = requestedConfigPath?.trim() || request?.configPath?.trim() || activeConfigPath || (await chooseActiveConfig(output));
+  if (!configPath) {
+    vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
+    await showSetupWebview(output, statusItem);
+    return;
+  }
+  if (!isWorkspaceRootConfigPath(configPath)) {
+    vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
+    return;
+  }
+
+  activeConfigPath = configPath;
+  output.show(true);
+  output.info(`Opening Skippr Agent chat to run model workflow for ${pipeline}.`);
+
+  const prompt = `/model ${pipeline}${modelNoResume ? " --no-resume" : ""}`;
+
+  await vscode.commands.executeCommand(`workbench.action.chat.openNewSessionSidebar.${SKIPPR_AGENT_HOST_SESSION_TYPE}`, {
+    prompt,
+    initialSessionOptions: {
+      mode: "agent",
+      pipeline,
+      configPath
+    }
+  });
+}
+
+function registerAgentModelBridge(
+  context: vscode.ExtensionContext,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): void {
+  const processed = new Set<string>();
+  const watchers = new Map<string, fs.FSWatcher>();
+
+  const scanAll = () => {
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const bridgeDir = agentBridgeDirForWorkspace(folder.uri.fsPath);
+      ensureAgentBridgeDir(bridgeDir);
+      if (!watchers.has(bridgeDir)) {
+        try {
+          watchers.set(
+            bridgeDir,
+            fs.watch(bridgeDir, () => scanAgentModelBridgeDir(bridgeDir, processed, output, statusItem))
+          );
+        } catch (error) {
+          output.warn(`Unable to watch Skippr agent bridge: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      scanAgentModelBridgeDir(bridgeDir, processed, output, statusItem);
+    }
+  };
+
+  scanAll();
+  const interval = setInterval(scanAll, 1000);
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(scanAll),
+    {
+      dispose: () => {
+        clearInterval(interval);
+        for (const watcher of watchers.values()) {
+          watcher.close();
+        }
+        watchers.clear();
+      }
+    }
+  );
+}
+
+function ensureAgentBridgeDir(bridgeDir: string): void {
+  fs.mkdirSync(bridgeDir, { recursive: true });
+}
+
+function agentBridgeDirForWorkspace(workspaceRoot: string): string {
+  const digest = crypto.createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 24);
+  return path.join(os.tmpdir(), "skippr-ide-agent-bridge", digest);
+}
+
+function scanAgentModelBridgeDir(
+  bridgeDir: string,
+  processed: Set<string>,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): void {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(bridgeDir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".request.json")) {
+      continue;
+    }
+    const requestPath = path.join(bridgeDir, entry);
+    if (processed.has(requestPath)) {
+      continue;
+    }
+    processed.add(requestPath);
+    const request = readAgentModelRunRequest(requestPath);
+    if (!request || request.kind !== "model") {
+      continue;
+    }
+    void vscode.commands
+      .executeCommand("skippr.internal.runModelForAgentChat", request, bridgeDir)
+      .then(
+        () => cleanupAgentBridgeRequest(requestPath),
+        (error) => {
+          appendAgentBridgeMessage(bridgeDir, request.id, {
+            type: "complete",
+            ok: false,
+            errorDetail: error instanceof Error ? error.message : String(error),
+            elapsedMs: 0
+          });
+          cleanupAgentBridgeRequest(requestPath);
+        }
+      );
+  }
+}
+
+function readAgentModelRunRequest(requestPath: string): AgentModelRunRequest | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(requestPath, "utf8")) as AgentModelRunRequest;
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanupAgentBridgeRequest(requestPath: string): void {
+  fs.rm(requestPath, { force: true }, () => undefined);
+}
+
+async function runAgentModelBridgeRequest(
+  request: AgentModelRunRequest,
+  bridgeDir: string,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): Promise<void> {
+  const requestId = request.id?.trim();
+  const pipeline = request.pipeline?.trim();
+  const configPath = request.configPath?.trim();
+  if (!requestId || !pipeline || !configPath) {
+    appendAgentBridgeMessage(bridgeDir, requestId, {
+      type: "complete",
+      ok: false,
+      errorDetail: "Skippr Agent model bridge requires request id, pipeline, and configPath.",
+      elapsedMs: 0
+    });
+    return;
+  }
+
+  const dbtOutputPath = path.join(getConfigCwd(configPath), "dbt", pipeline);
+  const beforeSnapshot = snapshotDbtFiles(dbtOutputPath);
+  appendAgentBridgeMessage(bridgeDir, requestId, {
+    type: "accepted",
+    pipeline,
+    configPath,
+    dbtOutputPath
+  });
+
+  await runSkipprCommand(
+    "model",
+    output,
+    statusItem,
+    pipeline,
+    configPath,
+    getLogLevel(),
+    [],
+    { modelNoResume: request.noResume === true },
+    {
+      onEvent: (event) => {
+        appendAgentBridgeMessage(bridgeDir, requestId, { type: "event", event });
+        appendDbtFileDiffMessages(bridgeDir, requestId, event, dbtOutputPath, beforeSnapshot);
+      },
+      onLog: (line) => {
+        appendAgentBridgeMessage(bridgeDir, requestId, { type: "log", line });
+      },
+      onFinish: (result, finishedRun) => {
+        appendAgentBridgeMessage(bridgeDir, requestId, {
+          type: "complete",
+          ok: result.code === 0 && !result.signal,
+          code: result.code,
+          signal: result.signal,
+          elapsedMs: result.elapsedMs,
+          errorDetail: result.errorDetail,
+          changedFiles: finishedRun?.modelChangedFiles ?? []
+        });
+      }
+    }
+  );
+}
+
+function appendAgentBridgeMessage(bridgeDir: string, requestId: string | undefined, message: Record<string, unknown>): void {
+  if (!requestId?.trim()) {
+    return;
+  }
+  ensureAgentBridgeDir(bridgeDir);
+  const responsePath = path.join(bridgeDir, `${requestId}.response.jsonl`);
+  fs.appendFileSync(responsePath, `${JSON.stringify({ requestId, ...message })}\n`, "utf8");
+}
+
+function snapshotDbtFiles(dbtOutputPath: string): DbtFileSnapshot {
+  const snapshot: DbtFileSnapshot = new Map();
+  if (!fs.existsSync(dbtOutputPath)) {
+    return snapshot;
+  }
+  for (const filePath of listFilesRecursively(dbtOutputPath)) {
+    snapshot.set(filePath, readTextFileForDiff(filePath));
+  }
+  return snapshot;
+}
+
+function listFilesRecursively(root: string): string[] {
+  const files: string[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  for (const entry of entries) {
+    const next = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listFilesRecursively(next));
+    } else if (entry.isFile()) {
+      files.push(next);
+    }
+  }
+  return files;
+}
+
+function appendDbtFileDiffMessages(
+  bridgeDir: string,
+  requestId: string,
+  event: SkipprRunEvent,
+  dbtOutputPath: string,
+  beforeSnapshot: DbtFileSnapshot
+): void {
+  if (event.event !== "model_file_changed" || !event.changed_files?.length) {
+    return;
+  }
+  for (const changedFile of event.changed_files) {
+    const absolutePath = modelChangedFileAbsolutePath(changedFile, dbtOutputPath);
+    if (!absolutePath || !isPathInside(dbtOutputPath, absolutePath)) {
+      continue;
+    }
+    const beforeContent = beforeSnapshot.get(absolutePath) ?? "";
+    const afterContent = changedFile.change_kind === "deleted" ? "" : readTextFileForDiff(absolutePath);
+    if (afterContent === undefined && changedFile.change_kind !== "deleted") {
+      continue;
+    }
+    appendAgentBridgeMessage(bridgeDir, requestId, {
+      type: "file_edit",
+      filePath: absolutePath,
+      changeKind: changedFile.change_kind ?? "modified",
+      beforeContent,
+      afterContent: afterContent ?? "",
+      linesAdded: changedFile.lines_added,
+      linesRemoved: changedFile.lines_removed
+    });
+  }
+}
+
+function modelChangedFileAbsolutePath(changedFile: SkipprModelChangedFile, dbtOutputPath: string): string | undefined {
+  const raw = changedFile.absolute_path?.trim() || changedFile.path?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  return path.resolve(path.isAbsolute(raw) ? raw : path.join(dbtOutputPath, raw));
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function readTextFileForDiff(filePath: string): string | undefined {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size > 500_000) {
+      return undefined;
+    }
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return undefined;
   }
 }
 
@@ -1433,6 +1784,25 @@ async function resolveSqlQueryContext(output: vscode.LogOutputChannel): Promise<
   return { cliPath, configPath, pipeline };
 }
 
+async function resolveSqlQueryContextQuiet(output: vscode.LogOutputChannel): Promise<SkipprQueryContext | undefined> {
+  const configPath = activeConfigPath;
+  if (!configPath || !isWorkspaceRootConfigPath(configPath)) {
+    return undefined;
+  }
+  const config = vscode.workspace.getConfiguration();
+  const cliPath = await resolveSkipprCli(config.get<string>(cliPathKey, ""));
+  if (!cliPath) {
+    return undefined;
+  }
+  const folderUri = workspaceFolderForConfigPath(configPath);
+  const configuredDefault = vscode.workspace.getConfiguration("skippr", folderUri).get<string>(defaultPipelineKey, "").trim();
+  const pipeline = configuredDefault;
+  if (!pipeline) {
+    return undefined;
+  }
+  return { cliPath, configPath, pipeline };
+}
+
 function activeSqlDocumentText(selectionOnly: boolean): string | undefined {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
@@ -1445,20 +1815,19 @@ function activeSqlDocumentText(selectionOnly: boolean): string | undefined {
   return editor.document.getText().trim();
 }
 
-async function runSqlTextFromEditor(selectionOnly: boolean, output: vscode.LogOutputChannel): Promise<void> {
-  const sql = activeSqlDocumentText(selectionOnly);
-  if (!sql) {
-    vscode.window.showWarningMessage("No SQL found to run.");
-    return;
-  }
-  const ctx = await resolveSqlQueryContext(output);
-  if (!ctx) {
-    return;
-  }
+let dbtEditorRunMode: DbtEditorRunMode = "sql";
+let dbtContextRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function runWarehouseSqlQuery(
+  ctx: SkipprQueryContext,
+  sql: string,
+  output: vscode.LogOutputChannel,
+  source: "sql" | "dbt"
+): Promise<void> {
   postQueryResults({
     type: "queryResults",
     status: "running",
-    source: "sql",
+    source,
     pipeline: ctx.pipeline,
     sql
   });
@@ -1472,17 +1841,149 @@ async function runSqlTextFromEditor(selectionOnly: boolean, output: vscode.LogOu
     ctx.configPath
   );
   const payload = result.value
-    ? payloadFromQueryResult(result.value, { source: "sql", pipeline: ctx.pipeline })
+    ? payloadFromQueryResult(result.value, { source, pipeline: ctx.pipeline })
     : {
         type: "queryResults" as const,
         status: "error" as const,
-        source: "sql" as const,
+        source,
         pipeline: ctx.pipeline,
         sql,
         error: result.stdout || "Query failed before producing JSON output."
       };
   postQueryResults(payload);
   await showQueryResultsPanel();
+}
+
+async function runDbtDocument(
+  output: vscode.LogOutputChannel,
+  runStatusItem: vscode.StatusBarItem
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showWarningMessage("Open a dbt SQL file before running.");
+    return;
+  }
+  const detected = detectDbtSqlFile(editor.document.uri);
+  if (!detected.isDbt) {
+    vscode.window.showWarningMessage("This file is not a dbt SQL model.");
+    return;
+  }
+  const ctx = await resolveSqlQueryContext(output);
+  if (!ctx) {
+    return;
+  }
+  const cwd = getConfigCwd(ctx.configPath);
+  const env = skipprSpawnEnv(ctx.configPath, ctx.pipeline);
+  if (dbtEditorRunMode === "tests") {
+    const meta = await probeDbtFileMeta(
+      ctx.cliPath,
+      ctx.configPath,
+      ctx.pipeline,
+      detected.filePath,
+      cwd,
+      output,
+      env,
+      true
+    );
+    const testSelect = meta?.test_select?.trim() || meta?.model_name?.trim() || "";
+    if (!testSelect) {
+      vscode.window.showErrorMessage("Could not resolve a dbt model name for tests on this file.");
+      return;
+    }
+    await runSkipprTestFromCliPanel(output, runStatusItem, {
+      configPath: ctx.configPath,
+      pipeline: ctx.pipeline,
+      logLevel: getLogLevel(),
+      testSelect,
+      extraArgsText: vscode.workspace.getConfiguration("skippr").get<string>(runExtraArgsKey, "")
+    });
+    return;
+  }
+  postQueryResults({
+    type: "queryResults",
+    status: "running",
+    source: "dbt",
+    pipeline: ctx.pipeline,
+    sql: "-- compiling dbt model…"
+  });
+  await showQueryResultsPanel();
+  const compiled = await compileDbtSqlForQuery(
+    ctx.cliPath,
+    ctx.configPath,
+    ctx.pipeline,
+    detected.filePath,
+    cwd,
+    output,
+    env
+  );
+  if (!compiled.ok) {
+    postQueryResults({
+      type: "queryResults",
+      status: "error",
+      source: "dbt",
+      pipeline: ctx.pipeline,
+      error: compiled.error
+    });
+    await showQueryResultsPanel();
+    vscode.window.showErrorMessage(compiled.error);
+    return;
+  }
+  await runWarehouseSqlQuery(ctx, compiled.sql, output, "dbt");
+}
+
+async function runSqlTextFromEditor(
+  selectionOnly: boolean,
+  output: vscode.LogOutputChannel,
+  runStatusItem: vscode.StatusBarItem
+): Promise<void> {
+  if (!selectionOnly) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && detectDbtSqlFile(editor.document.uri).isDbt) {
+      await runDbtDocument(output, runStatusItem);
+      return;
+    }
+  }
+  const sql = activeSqlDocumentText(selectionOnly);
+  if (!sql) {
+    vscode.window.showWarningMessage("No SQL found to run.");
+    return;
+  }
+  const ctx = await resolveSqlQueryContext(output);
+  if (!ctx) {
+    return;
+  }
+  await runWarehouseSqlQuery(ctx, sql, output, "sql");
+}
+
+function scheduleDbtEditorContextRefresh(output: vscode.LogOutputChannel): void {
+  if (dbtContextRefreshTimer) {
+    clearTimeout(dbtContextRefreshTimer);
+  }
+  dbtContextRefreshTimer = setTimeout(() => {
+    dbtContextRefreshTimer = undefined;
+    void refreshDbtEditorContextKeys(vscode.window.activeTextEditor, {
+      getRunMode: () => dbtEditorRunMode,
+      probeHasTests: async (filePath) => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.document.languageId !== "sql") {
+          return false;
+        }
+        const ctx = await resolveSqlQueryContextQuiet(output);
+        if (!ctx) {
+          return false;
+        }
+        return probeDbtFileHasTests(
+          ctx.cliPath,
+          ctx.configPath,
+          ctx.pipeline,
+          filePath,
+          getConfigCwd(ctx.configPath),
+          output,
+          skipprSpawnEnv(ctx.configPath, ctx.pipeline)
+        );
+      }
+    });
+  }, 600);
 }
 
 async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
@@ -1637,19 +2138,7 @@ async function executeRunDebugPanelRun(
       vscode.window.showWarningMessage("Choose a pipeline for Skippr model.");
       return;
     }
-    await runSkipprCommand("model", output, statusItem, pipeline, configPath, logLevel, extraCliArgs, {
-      modelNoResume: message.modelNoResume === true
-    });
-    return;
-  }
-  if (cmd === "model-direct") {
-    if (!pipeline) {
-      vscode.window.showWarningMessage("Choose a pipeline for Skippr direct model.");
-      return;
-    }
-    await runSkipprCommand("model-direct", output, statusItem, pipeline, configPath, logLevel, extraCliArgs, {
-      modelNoResume: message.modelNoResume === true
-    });
+    await openModelWorkflowInAgentChat(output, statusItem, pipeline, configPath, message.modelNoResume === true);
     return;
   }
   vscode.window.showErrorMessage(`Unknown Skippr panel command: ${cmd || "(empty)"}`);
@@ -1761,7 +2250,7 @@ async function runLensPipelineWithArgs(
     return;
   }
   const cmd = command as SkipprPipelineRunCommand;
-  if (cmd !== "discover" && cmd !== "sync" && cmd !== "model" && cmd !== "model-direct" && cmd !== "doctor") {
+  if (cmd !== "discover" && cmd !== "sync" && cmd !== "model" && cmd !== "doctor") {
     vscode.window.showErrorMessage("Skippr: unknown run action.");
     return;
   }
@@ -1923,7 +2412,7 @@ async function runSkipprDebugConfiguration(
   if (!isSkipprRunKind(skipprKind)) {
     output.error(`Invalid Skippr debug configuration kind: ${String(rawKind)}`);
     vscode.window.showErrorMessage(
-      "Invalid Skippr debug configuration. Expected skipprKind discover, sync-once, sync-all-once, sync, model, model-direct, doctor, or test."
+      "Invalid Skippr debug configuration. Expected skipprKind discover, sync-once, sync-all-once, sync, model, doctor, or test."
     );
     return;
   }
@@ -2733,6 +3222,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const output = vscode.window.createOutputChannel("Skippr", { log: true });
   context.subscriptions.push(runStatusItem, output);
+  context.subscriptions.push(
+    vscode.commands.registerCommand("skippr.internal.runModelForAgentChat", async (request: AgentModelRunRequest, bridgeDir?: string) => {
+      const workspaceRoot = request?.workspaceRoot?.trim() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const resolvedBridgeDir = bridgeDir?.trim() || (workspaceRoot ? agentBridgeDirForWorkspace(workspaceRoot) : undefined);
+      if (!resolvedBridgeDir) {
+        return;
+      }
+      await runAgentModelBridgeRequest(request, resolvedBridgeDir, output, runStatusItem);
+    })
+  );
+  registerAgentModelBridge(context, output, runStatusItem);
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot) {
     runHistory = new SkipprRunHistory(workspaceRoot, output);
@@ -2742,6 +3242,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   void runWorkbenchCommand("skippr.workbench.forceRunPanels");
   void runWorkbenchCommand("skippr.workbench.forceSchemaSidebar");
   await vscode.commands.executeCommand("setContext", SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true);
+  await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => scheduleDbtEditorContextRefresh(output)),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.languageId === "sql") {
+        scheduleDbtEditorContextRefresh(output);
+      }
+    })
+  );
+  scheduleDbtEditorContextRefresh(output);
   context.subscriptions.push(
     vscode.authentication.registerAuthenticationProvider("skippr", "Skippr", authProvider, {
       supportsMultipleAccounts: false
@@ -2753,7 +3263,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const command = typeof a?.command === "string" ? a.command : "discover";
       const pipelineArg = typeof a?.pipeline === "string" ? a.pipeline.trim() : "";
       const configPath = await resolveSkipprConfigAtCwd();
-      const ws = vscode.workspace.getConfiguration();
+      const folderUri = configPath.trim() ? workspaceFolderForConfigPath(configPath) : undefined;
+      const ws = vscode.workspace.getConfiguration(undefined, folderUri);
       let defaultPipeline = ws.get<string>(defaultPipelineKey, "").trim();
       const show = configPath.trim() ? await getToolbarConfigShow(output, configPath) : undefined;
       const pipelines = show?.pipelines ?? [];
@@ -2779,10 +3290,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await executeRunDebugPanelRun(
         {
           command,
+          configPath: typeof m?.configPath === "string" ? m.configPath : undefined,
           pipeline: typeof m?.pipeline === "string" ? m.pipeline : undefined,
           testSelect: typeof m?.testSelect === "string" ? m.testSelect : undefined,
           extraArgs,
-          syncMode
+          syncMode,
+          modelNoResume: m?.modelNoResume === true
         },
         output,
         runStatusItem
@@ -2901,10 +3414,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await newSqlQueryDocument();
     }),
     vscode.commands.registerCommand("skippr.sql.runSelection", async () => {
-      await runSqlTextFromEditor(true, output);
+      await runSqlTextFromEditor(true, output, runStatusItem);
     }),
     vscode.commands.registerCommand("skippr.sql.runDocument", async () => {
-      await runSqlTextFromEditor(false, output);
+      await runSqlTextFromEditor(false, output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.sql.runDbtDocument", async () => {
+      await runSqlTextFromEditor(false, output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.sql.pickRunMode", async () => {
+      const picked = await vscode.window.showQuickPick(
+        [
+          { label: "SQL", description: "Compile model and run warehouse SQL", mode: "sql" as const },
+          { label: "Tests", description: "Run dbt tests for this model", mode: "tests" as const }
+        ],
+        {
+          title: "Run SQL|DBT",
+          placeHolder: `Current: ${dbtRunModeMenuTitle(dbtEditorRunMode)}`
+        }
+      );
+      if (!picked) {
+        return;
+      }
+      dbtEditorRunMode = picked.mode;
+      await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
+    }),
+    vscode.commands.registerCommand("skippr.sql.setRunModeSql", async () => {
+      dbtEditorRunMode = "sql";
+      await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
+    }),
+    vscode.commands.registerCommand("skippr.sql.setRunModeTests", async () => {
+      dbtEditorRunMode = "tests";
+      await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
     }),
     vscode.commands.registerCommand("skippr.sql.askDataQuestion", async () => {
       await askDataQuestion(output);
@@ -2962,10 +3503,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await runSkipprCommand("sync", output, runStatusItem);
     }),
     vscode.commands.registerCommand("skippr.run.modelPipeline", async () => {
-      await runSkipprCommand("model", output, runStatusItem);
-    }),
-    vscode.commands.registerCommand("skippr.run.modelDirectPipeline", async () => {
-      await runSkipprCommand("model-direct", output, runStatusItem);
+      await openModelWorkflowInAgentChat(output, runStatusItem);
     }),
     vscode.commands.registerCommand("skippr.run.doctor", async () => {
       await runSkipprDoctor(output, runStatusItem);
@@ -2976,7 +3514,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("skippr.run.lens.discover", () => runLensPipelineCommand("discover", output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lens.sync", () => runLensPipelineCommand("sync", output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lens.model", () => runLensPipelineCommand("model", output, runStatusItem)),
-    vscode.commands.registerCommand("skippr.run.lens.modelDirect", () => runLensPipelineCommand("model-direct", output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lens.doctor", () => runLensPipelineCommand("doctor", output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lensWithArgs", (configFsPath: unknown, pipeline: unknown, command: unknown) =>
       runLensPipelineWithArgs(configFsPath, pipeline, command, output, runStatusItem)
@@ -3036,7 +3573,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
       vscode.commands.registerCommand(panel.command, async () => {
         if (panel.id === "skippr.model") {
-          await runSkipprCommand("model", output, runStatusItem);
+          await openModelWorkflowInAgentChat(output, runStatusItem);
           return;
         }
         await openPanel(context, panel.id, panel.name, statusItem, authProvider);

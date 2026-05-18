@@ -92,10 +92,6 @@
         "title": "Skippr: Model Pipeline"
       },
       {
-        "command": "skippr.run.modelDirectPipeline",
-        "title": "Skippr: Direct Model Pipeline"
-      },
-      {
         "command": "skippr.run.doctor",
         "title": "Skippr: Doctor"
       },
@@ -121,11 +117,6 @@
         "command": "skippr.run.lens.model",
         "title": "Model",
         "icon": "$(circuit-board)"
-      },
-      {
-        "command": "skippr.run.lens.modelDirect",
-        "title": "Direct Model",
-        "icon": "$(edit)"
       },
       {
         "command": "skippr.run.lens.doctor",
@@ -182,13 +173,38 @@
       },
       {
         "command": "skippr.sql.runDocument",
-        "title": "Skippr: Run SQL Document"
+        "title": "Run SQL",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "skippr.sql.runDbtDocument",
+        "title": "Run SQL|DBT",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "skippr.sql.pickRunMode",
+        "title": "Run mode",
+        "icon": "$(chevron-down)"
+      },
+      {
+        "command": "skippr.sql.setRunModeSql",
+        "title": "SQL"
+      },
+      {
+        "command": "skippr.sql.setRunModeTests",
+        "title": "Tests"
       },
       {
         "command": "skippr.sql.askDataQuestion",
         "title": "Skippr: Ask Data Question"
       }
       ],
+    "submenus": [
+      {
+        "id": "skippr.sql.runMode",
+        "label": "Run SQL|DBT mode"
+      }
+    ],
     "viewsContainers": {
       "auxiliarybar": [
         {
@@ -302,10 +318,6 @@
           "group": "1@3"
         },
         {
-          "command": "skippr.run.lens.modelDirect",
-          "group": "1@3.5"
-        },
-        {
           "command": "skippr.run.lens.doctor",
           "group": "1@4"
         }
@@ -322,9 +334,29 @@
       ],
       "editor/title": [
         {
+          "command": "skippr.sql.runDbtDocument",
+          "group": "navigation@9",
+          "when": "resourceLangId == sql && skippr.editorIsDbtSql"
+        },
+        {
           "command": "skippr.sql.runDocument",
           "group": "navigation@9",
-          "when": "resourceLangId == sql"
+          "when": "resourceLangId == sql && !skippr.editorIsDbtSql"
+        },
+        {
+          "submenu": "skippr.sql.runMode",
+          "group": "navigation@9",
+          "when": "resourceLangId == sql && skippr.editorIsDbtSql && skippr.editorRunHasDbtTests"
+        }
+      ],
+      "skippr.sql.runMode": [
+        {
+          "command": "skippr.sql.setRunModeSql",
+          "group": "1@1"
+        },
+        {
+          "command": "skippr.sql.setRunModeTests",
+          "group": "1@2"
         }
       ],
       "editor/context": [
@@ -334,9 +366,14 @@
           "when": "editorLangId == sql"
         },
         {
+          "command": "skippr.sql.runDbtDocument",
+          "group": "navigation@10",
+          "when": "editorLangId == sql && skippr.editorIsDbtSql"
+        },
+        {
           "command": "skippr.sql.runDocument",
           "group": "navigation@10",
-          "when": "editorLangId == sql"
+          "when": "editorLangId == sql && !skippr.editorIsDbtSql"
         }
       ],
       "commandPalette": [
@@ -354,10 +391,6 @@
         },
         {
           "command": "skippr.run.lens.model",
-          "when": "false"
-        },
-        {
-          "command": "skippr.run.lens.modelDirect",
           "when": "false"
         },
         {
@@ -400,9 +433,6 @@
         },
         {
           "command": "skippr.run.modelPipeline"
-        },
-        {
-          "command": "skippr.run.modelDirectPipeline"
         },
         {
           "command": "skippr.run.doctor"
@@ -459,8 +489,8 @@
               },
               "skipprKind": {
                 "type": "string",
-                "enum": ["discover", "sync", "sync-once", "sync-all-once", "model", "model-direct", "doctor", "test"],
-                "description": "discover; sync or sync-once for one sync pass; sync-all-once; model; model-direct; doctor; test (dbt)."
+                "enum": ["discover", "sync", "sync-once", "sync-all-once", "model", "doctor", "test"],
+                "description": "discover; sync or sync-once for one sync pass; sync-all-once; model; doctor; test (dbt)."
               },
               "pipeline": {
                 "type": "string",
@@ -510,15 +540,6 @@
             "request": "launch",
             "name": "Skippr: Model",
             "skipprKind": "model",
-            "configPath": "${workspaceFolder}/skippr.yml",
-            "logLevel": "info",
-            "pipeline": "${config:skippr.defaultPipeline}"
-          },
-          {
-            "type": "skippr",
-            "request": "launch",
-            "name": "Skippr: Direct Model",
-            "skipprKind": "model-direct",
             "configPath": "${workspaceFolder}/skippr.yml",
             "logLevel": "info",
             "pipeline": "${config:skippr.defaultPipeline}"
@@ -581,18 +602,6 @@
             }
           },
           {
-            "label": "Skippr: Direct Model",
-            "description": "Run Skippr model with the direct dbt workspace agent.",
-            "body": {
-              "type": "skippr",
-              "request": "launch",
-              "name": "Skippr: Direct Model",
-              "skipprKind": "model-direct",
-              "configPath": "${workspaceFolder}/skippr.yml",
-              "pipeline": "${config:skippr.defaultPipeline}"
-            }
-          },
-          {
             "label": "Skippr: Doctor",
             "description": "Run skippr doctor for the workspace config.",
             "body": {
@@ -644,6 +653,11 @@
           "default": "",
           "description": "Optional advanced override for the Skippr CLI path. Leave empty to use an installed skippr binary on PATH; see skippr.dev.useLocalSkipprd to build from a local skipprd checkout."
         },
+        "skippr.dev.reactRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a local react checkout for cargo path patches (defaults to ../react next to skipprd). Also honored via SKIPPR_REACT_ROOT."
+        },
         "skippr.dev.useLocalSkipprd": {
           "type": "boolean",
           "default": true,
@@ -669,6 +683,12 @@
           "type": "string",
           "default": "",
           "description": "Optional extra CLI arguments for runs started from the Run Skippr title bar (space-separated; basic quoting supported). Merged with launch.json skipprExtraArgs when using debug."
+        },
+        "skippr.dbtVirtualEnvPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "Optional Python virtualenv root used for dbt. When unset, Skippr auto-detects `.venv` or `venv` under the workspace, config folder, or IDE extension/app folders. This sets `DBT_BIN`, `VIRTUAL_ENV`, and prepends the venv bin directory for Skippr CLI spawns."
         },
         "skippr.env": {
           "type": "object",

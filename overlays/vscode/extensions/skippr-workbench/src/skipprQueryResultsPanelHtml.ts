@@ -12,7 +12,7 @@ export interface SkipprQueryChart {
 export interface SkipprQueryResultsPanelPayload {
   type: "queryResults";
   status: "idle" | "running" | "success" | "error";
-  source?: "sql" | "agent";
+  source?: "sql" | "dbt" | "agent";
   pipeline?: string;
   question?: string;
   answer?: string;
@@ -132,7 +132,7 @@ export function renderSkipprQueryResultsPanelHtml(): string {
       function header() {
         const rows = payload.data && Array.isArray(payload.data.rows) ? payload.data.rows.length : 0;
         const canChart = Boolean(payload.chart && payload.data);
-        return '<div class="toolbar"><strong>' + esc(payload.source === "agent" ? "Agent query" : "SQL query") + '</strong><span class="badge ' + esc(payload.status || "idle") + '">' + esc(payload.status || "idle") + '</span><span class="muted">' + esc(payload.pipeline || "") + '</span><span class="muted">' + rows + ' rows</span><span class="spacer"></span><button data-action="copySql" ' + (payload.sql ? "" : "disabled") + '>Copy SQL</button><button data-action="copyCsv" ' + (rows ? "" : "disabled") + '>Copy CSV</button><button data-mode="table" class="' + (mode === "table" ? "active" : "") + '">Table</button><button data-mode="chart" class="' + (mode === "chart" ? "active" : "") + '" ' + (canChart ? "" : "disabled") + '>Chart</button></div>';
+        return '<div class="toolbar"><strong>' + esc(payload.source === "agent" ? "Agent query" : payload.source === "dbt" ? "dbt SQL" : "SQL query") + '</strong><span class="badge ' + esc(payload.status || "idle") + '">' + esc(payload.status || "idle") + '</span><span class="muted">' + esc(payload.pipeline || "") + '</span><span class="muted">' + rows + ' rows</span><span class="spacer"></span><button data-action="copySql" ' + (payload.sql ? "" : "disabled") + '>Copy SQL</button><button data-action="copyCsv" ' + (rows ? "" : "disabled") + '>Copy CSV</button><button data-mode="table" class="' + (mode === "table" ? "active" : "") + '">Table</button><button data-mode="chart" class="' + (mode === "chart" ? "active" : "") + '" ' + (canChart ? "" : "disabled") + '>Chart</button></div>';
       }
       function render() {
         if (payload.status === "idle") {

@@ -326,11 +326,8 @@ function runKindFromEvent(event: SkipprRunEvent): string | undefined {
 
 function normalizeRunKind(kind: string | undefined, command: string): string {
   const raw = kind?.trim() || command;
-  if (raw === "direct" && command === "model-direct") {
-    return "model-direct";
-  }
-  if (raw === "direct") {
-    return "model-direct";
+  if (command === "model" && (raw === "agent" || raw === "model")) {
+    return "model";
   }
   return raw;
 }

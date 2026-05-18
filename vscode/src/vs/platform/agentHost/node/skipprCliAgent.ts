@@ -4,7 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as cp from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { VSBuffer } from '../../../base/common/buffer.js';
@@ -22,10 +24,15 @@ import type { MessageAttachment, ModelSelection, ToolCallResult, ToolDefinition 
 import { ActionType, type SessionAction } from '../common/state/sessionActions.js';
 import { FileEditKind, PolicyState, ResponsePartKind, SessionStatus, ToolCallConfirmationReason, ToolResultContentType, type CustomizationRef, type PendingMessage, type SessionInputAnswer, type SessionInputResponseKind, type ToolResultContent, type ToolResultFileEditContent, type Turn } from '../common/state/sessionState.js';
 import { buildSessionDbUri } from './shared/fileEditTracker.js';
+import {
+	buildSkipprCliInvocation,
+	enrichCargoFailureDetail,
+	resolveSkipprCliForIde,
+} from './skipprLocalCargo.js';
 
 const SKIPPR_PROVIDER: AgentProvider = 'skippr';
-const LOCAL_CARGO_CLI = '__skippr_local_cargo__';
 const CHAT_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const MODEL_COMMAND_TIMEOUT_MS = 60 * 60_000;
 const moduleDirname = path.dirname(fileURLToPath(import.meta.url));
 
 interface ISkipprSession {
@@ -40,6 +47,7 @@ interface ISkipprSession {
 	readonly project: { uri: URI; displayName: string } | undefined;
 	child?: cp.ChildProcessWithoutNullStreams;
 	threadId?: string;
+	modelBridgeInFlight?: boolean;
 }
 
 interface ISkipprToolCall {
@@ -51,6 +59,11 @@ interface ISkipprToolCall {
 }
 
 type SkipprChatMode = 'ask' | 'plan' | 'agent';
+
+type ModelSlashRequest = {
+	readonly pipeline: string | undefined;
+	readonly noResume: boolean;
+};
 
 export class SkipprCliAgent extends Disposable implements IAgent {
 	readonly id = SKIPPR_PROVIDER;
@@ -94,7 +107,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 
 	async createSession(config?: IAgentCreateSessionConfig): Promise<IAgentCreateSessionResult> {
 		const workspaceRoot = workspaceRootFromWorkingDirectory(config?.workingDirectory);
-		const configPath = findWorkspaceConfigPath(workspaceRoot);
+		const configPath = stringConfig(config?.config, 'configPath') ?? findWorkspaceConfigPath(workspaceRoot);
 		const pipeline = stringConfig(config?.config, 'pipeline');
 		const mode = chatModeConfig(config?.config);
 		const workingDirectory = workspaceRoot ? URI.file(workspaceRoot) : config?.workingDirectory;
@@ -166,6 +179,12 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		}
 
 		state.modifiedAt = Date.now();
+		const modelSlash = parseModelSlashPrompt(prompt, state);
+		if (modelSlash) {
+			await this._runModelSubagent(state, turnId, modelSlash);
+			return;
+		}
+
 		const cliPath = resolveSkipprCli();
 		const args = [
 			...(state.configPath && state.pipeline ? ['--config', state.configPath] : []),
@@ -180,8 +199,17 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			'--output',
 			'jsonl',
 		];
-		const [command, ...commandArgs] = buildCliCommand(cliPath, args);
-		const cwd = cliCommandCwd(cliPath) ?? state.workspaceRoot;
+		const extraManifestCandidates = state.workspaceRoot
+			? [path.join(path.dirname(state.workspaceRoot), 'skipprd/Cargo.toml')]
+			: [];
+		const extraReactSearchPaths = state.workspaceRoot
+			? [path.join(path.dirname(state.workspaceRoot), 'react')]
+			: [];
+		const { command, argv: commandArgs, cwd: cargoCwd } = buildSkipprCliInvocation(cliPath, args, {
+			extraManifestCandidates,
+			extraReactSearchPaths,
+		});
+		const cwd = cargoCwd ?? state.workspaceRoot;
 		this._logService.info(`[SkipprCliAgent] $ ${[command, ...commandArgs].join(' ')}`);
 
 		await this._runCli(state, turnId, command, commandArgs, cwd);
@@ -225,7 +253,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			project: session.project,
 			workingDirectory: session.workingDirectory,
 			summary: session.pipeline ? `Skippr ${session.pipeline}` : 'Skippr Agent',
-			status: session.child ? SessionStatus.InProgress : SessionStatus.Idle,
+			status: session.child || session.modelBridgeInFlight ? SessionStatus.InProgress : SessionStatus.Idle,
 		}));
 	}
 
@@ -275,12 +303,23 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 	}
 
 	private async _runCli(state: ISkipprSession, turnId: string, command: string, commandArgs: string[], cwd: string): Promise<void> {
-		const child = cp.spawn(command, commandArgs, { cwd, env: process.env, shell: false });
+		const child = cp.spawn(command, commandArgs, {
+			cwd,
+			env: { ...process.env, SKIPPR_EXECUTION_SURFACE: 'ide_chat' },
+			shell: false,
+		});
 		state.child = child;
 
 		let stdoutBuffer = '';
 		let stderr = '';
 		const tools = this._toolsForSession(state.session);
+		const pendingLineHandlers = new Set<Promise<void>>();
+		const handleLine = (line: string, source: string) => {
+			const handled = this._handleJsonlLine(state, turnId, tools, line)
+				.catch(err => this._logService.error(`[SkipprCliAgent] ${source} JSONL mapping failed`, err))
+				.finally(() => pendingLineHandlers.delete(handled));
+			pendingLineHandlers.add(handled);
+		};
 		const cleanup = this._register(toDisposable(() => child.kill('SIGTERM')));
 		try {
 			await new Promise<void>((resolve, reject) => {
@@ -298,7 +337,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 						stdoutBuffer = stdoutBuffer.slice(nl + 1);
 						nl = stdoutBuffer.indexOf('\n');
 						if (line) {
-							this._handleJsonlLine(state, turnId, tools, line).catch(err => this._logService.error('[SkipprCliAgent] JSONL mapping failed', err));
+							handleLine(line, 'chat');
 						}
 					}
 				});
@@ -315,18 +354,21 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 					clearTimeout(timeoutHandle);
 					const tail = stdoutBuffer.trim();
 					if (tail) {
-						this._handleJsonlLine(state, turnId, tools, tail).catch(err => this._logService.error('[SkipprCliAgent] JSONL tail mapping failed', err));
+						handleLine(tail, 'chat tail');
 					}
-					if (code === 0 && !signal) {
-						resolve();
-					} else {
-						reject(new Error(stderr.trim() || `Skippr CLI exited with code ${code ?? 'unknown'}${signal ? ` signal ${signal}` : ''}`));
-					}
+					void Promise.allSettled([...pendingLineHandlers]).then(() => {
+						if (code === 0 && !signal) {
+							resolve();
+						} else {
+							reject(new Error(stderr.trim() || `Skippr CLI exited with code ${code ?? 'unknown'}${signal ? ` signal ${signal}` : ''}`));
+						}
+					});
 				});
 			});
 			this._emitAction(state.session, { type: ActionType.SessionTurnComplete, session: state.session.toString(), turnId });
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+			const raw = err instanceof Error ? err.message : String(err);
+			const message = enrichCargoFailureDetail(raw, stderr) ?? raw;
 			this._emitAction(state.session, {
 				type: ActionType.SessionError,
 				session: state.session.toString(),
@@ -339,6 +381,218 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 				state.child = undefined;
 			}
 		}
+	}
+
+	private async _runModelSubagent(
+		state: ISkipprSession,
+		turnId: string,
+		request: ModelSlashRequest,
+		toolIdOverride?: string,
+		completeTurn = true,
+	): Promise<void> {
+		const session = state.session;
+		const tools = this._toolsForSession(session);
+		const pipeline = request.pipeline;
+		if (!pipeline) {
+			this._emitAction(session, {
+				type: ActionType.SessionError,
+				session: session.toString(),
+				turnId,
+				error: { errorType: 'missingPipeline', message: 'Skippr /model requires a selected pipeline.' },
+			});
+			return;
+		}
+		if (!state.configPath) {
+			this._emitAction(session, {
+				type: ActionType.SessionError,
+				session: session.toString(),
+				turnId,
+				error: { errorType: 'missingConfig', message: 'Skippr /model requires a resolved skippr.yml config path.' },
+			});
+			return;
+		}
+		const dbtOutputPath = modelDbtOutputPath(state, pipeline);
+		const toolId = toolIdOverride ?? `model_subagent:${turnId}`;
+		this._emitToolStart(session, turnId, tools, {
+			tool_id: toolId,
+			name: 'model_subagent',
+			clean_name: 'Model subagent',
+			payload: { pipeline, dbt_output_path: dbtOutputPath, no_resume: request.noResume },
+		});
+		this._emitMarkdown(session, turnId, `Running model workflow for \`${pipeline}\`.`);
+		const events: Record<string, unknown>[] = [];
+		const fileEdits: ToolResultFileEditContent[] = [];
+		state.modelBridgeInFlight = true;
+		try {
+			const complete = await this._runModelThroughWorkbenchBridge(state, turnId, pipeline, request.noResume, toolId, events, fileEdits);
+			const ok = complete['ok'] !== false;
+			const error = ok ? undefined : stringField(complete, 'errorDetail') ?? stringField(complete, 'error') ?? 'Skippr model failed.';
+			const payload = modelSubagentSummary(events, pipeline, dbtOutputPath);
+			await this._emitModelSubagentComplete(session, turnId, tools, toolId, ok, payload, fileEdits, error);
+			if (ok && completeTurn) {
+				this._emitAction(session, { type: ActionType.SessionTurnComplete, session: session.toString(), turnId });
+			} else if (!ok) {
+				this._emitAction(session, {
+					type: ActionType.SessionError,
+					session: session.toString(),
+					turnId,
+					error: { errorType: 'skipprModelFailed', message: error ?? 'Skippr model failed.' },
+				});
+			}
+		} catch (err) {
+			const raw = err instanceof Error ? err.message : String(err);
+			const message = enrichCargoFailureDetail(raw, undefined) ?? raw;
+			await this._emitModelSubagentComplete(
+				session,
+				turnId,
+				tools,
+				toolId,
+				false,
+				modelSubagentSummary(events, pipeline, dbtOutputPath, message),
+				fileEdits,
+				message,
+			);
+			this._emitAction(session, {
+				type: ActionType.SessionError,
+				session: session.toString(),
+				turnId,
+				error: { errorType: 'skipprModelFailed', message },
+			});
+		} finally {
+			state.modelBridgeInFlight = false;
+		}
+	}
+
+	private async _runModelThroughWorkbenchBridge(
+		state: ISkipprSession,
+		turnId: string,
+		pipeline: string,
+		noResume: boolean,
+		toolCallId: string,
+		events: Record<string, unknown>[],
+		fileEdits: ToolResultFileEditContent[],
+	): Promise<Record<string, unknown>> {
+		if (!state.workspaceRoot || !state.configPath) {
+			throw new Error('Skippr model bridge requires workspace root and config path.');
+		}
+		const bridgeDir = agentBridgeDirForWorkspace(state.workspaceRoot);
+		fs.mkdirSync(bridgeDir, { recursive: true });
+		const requestId = `model-${generateUuid()}`;
+		const requestPath = path.join(bridgeDir, `${requestId}.request.json`);
+		const responsePath = path.join(bridgeDir, `${requestId}.response.jsonl`);
+		fs.rmSync(responsePath, { force: true });
+		fs.writeFileSync(requestPath, JSON.stringify({
+			id: requestId,
+			kind: 'model',
+			pipeline,
+			configPath: state.configPath,
+			noResume,
+			workspaceRoot: state.workspaceRoot,
+			sourceChatSessionId: state.session.toString(),
+			sourceTurnId: turnId,
+			createdAt: new Date().toISOString(),
+		}, null, 2), 'utf8');
+
+		let processedLines = 0;
+		const startedAt = Date.now();
+		for (;;) {
+			if (Date.now() - startedAt > MODEL_COMMAND_TIMEOUT_MS) {
+				throw new Error(`Skippr model timed out after ${Math.round(MODEL_COMMAND_TIMEOUT_MS / 1000)}s without completing.`);
+			}
+			const lines = readBridgeResponseLines(responsePath);
+			for (const line of lines.slice(processedLines)) {
+				processedLines++;
+				const message = parseJsonObject(line);
+				if (!message) {
+					continue;
+				}
+				const type = stringField(message, 'type');
+				if (type === 'accepted') {
+					const dbtOutputPath = stringField(message, 'dbtOutputPath');
+					this._emitMarkdown(state.session, turnId, dbtOutputPath ? `Model dbt output: \`${dbtOutputPath}\`.` : 'Model run accepted by the workbench runner.');
+					continue;
+				}
+				if (type === 'log') {
+					const logLine = stringField(message, 'line');
+					if (logLine) {
+						this._logService.info(logLine);
+					}
+					continue;
+				}
+				if (type === 'event') {
+					const event = objectField(message, 'event');
+					if (event) {
+						events.push(event);
+						const markdown = modelEventMarkdown(event);
+						if (markdown) {
+							this._emitMarkdown(state.session, turnId, markdown);
+						}
+					}
+					continue;
+				}
+				if (type === 'file_edit') {
+					const fileEdit = await this._fileEditFromBridgeMessage(state.session, turnId, toolCallId, message);
+					if (fileEdit) {
+						fileEdits.push(fileEdit);
+					}
+					continue;
+				}
+				if (type === 'complete') {
+					return message;
+				}
+			}
+			await delay(250);
+		}
+	}
+
+	private async _emitModelSubagentComplete(
+		session: URI,
+		turnId: string,
+		tools: Map<string, ISkipprToolCall>,
+		toolCallId: string,
+		success: boolean,
+		payload: Record<string, unknown>,
+		fileEdits: readonly ToolResultFileEditContent[],
+		error?: string,
+	): Promise<void> {
+		this._emitToolStart(session, turnId, tools, {
+			tool_id: toolCallId,
+			name: 'model_subagent',
+			clean_name: 'Model subagent',
+			payload,
+		});
+		const content: ToolResultContent[] = [
+			{ type: ToolResultContentType.Text, text: JSON.stringify(payload, null, 2) },
+			...fileEdits,
+		];
+		this._emitAction(session, {
+			type: ActionType.SessionToolCallComplete,
+			session: session.toString(),
+			turnId,
+			toolCallId,
+			result: {
+				success,
+				pastTenseMessage: success ? 'Ran Model subagent' : 'Failed Model subagent',
+				content,
+				structuredContent: payload,
+				...(success ? {} : { error: { message: error ?? 'Model subagent failed' } }),
+			},
+		});
+	}
+
+	private async _fileEditFromBridgeMessage(session: URI, turnId: string, toolCallId: string, message: Record<string, unknown>): Promise<ToolResultFileEditContent | undefined> {
+		const filePath = stringField(message, 'filePath');
+		const beforeContent = typeof message.beforeContent === 'string' ? message.beforeContent : undefined;
+		const afterContent = typeof message.afterContent === 'string' ? message.afterContent : undefined;
+		if (!filePath || beforeContent === undefined || afterContent === undefined) {
+			return undefined;
+		}
+		const kind = stringField(message, 'changeKind') === 'created'
+			? FileEditKind.Create
+			: stringField(message, 'changeKind') === 'deleted'
+				? FileEditKind.Delete
+				: FileEditKind.Edit;
+		return this._storeFileEditContent(session, turnId, toolCallId, filePath, kind, beforeContent, afterContent);
 	}
 
 	private async _handleJsonlLine(state: ISkipprSession, turnId: string, tools: Map<string, ISkipprToolCall>, line: string): Promise<void> {
@@ -354,12 +608,25 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		}
 		const o = event as Record<string, unknown>;
 		const type = stringField(o, 'type');
+		const modelEvent = stringField(o, 'event');
+		if (modelEvent) {
+			const markdown = modelEventMarkdown(o);
+			if (markdown) {
+				this._emitMarkdown(state.session, turnId, markdown);
+			}
+			return;
+		}
 
 		if (type === 'tool_start') {
 			this._emitToolStart(state.session, turnId, tools, o);
 			return;
 		}
 		if (type === 'tool_end') {
+			const bridgedModelRequest = modelRequestFromToolEnd(o, state);
+			if (bridgedModelRequest) {
+				await this._runModelSubagent(state, turnId, bridgedModelRequest, scalarStringField(o, 'tool_id') ?? scalarStringField(o, 'toolId'), false);
+				return;
+			}
 			await this._emitToolEnd(state.session, turnId, tools, o);
 			return;
 		}
@@ -470,6 +737,26 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			return undefined;
 		}
 
+		return this._storeFileEditContent(
+			session,
+			turnId,
+			toolCallId,
+			filePath,
+			beforeContent.length === 0 && afterContent.length > 0 ? FileEditKind.Create : FileEditKind.Edit,
+			beforeContent,
+			afterContent,
+		);
+	}
+
+	private async _storeFileEditContent(
+		session: URI,
+		turnId: string,
+		toolCallId: string,
+		filePath: string,
+		kind: FileEditKind,
+		beforeContent: string,
+		afterContent: string,
+	): Promise<ToolResultFileEditContent> {
 		const counts = await this._diffCounts(beforeContent, afterContent);
 		const ref = this._sessionDataService.openDatabase(session);
 		try {
@@ -477,7 +764,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 				turnId,
 				toolCallId,
 				filePath,
-				kind: beforeContent.length === 0 && afterContent.length > 0 ? FileEditKind.Create : FileEditKind.Edit,
+				kind,
 				beforeContent: VSBuffer.fromString(beforeContent).buffer,
 				afterContent: VSBuffer.fromString(afterContent).buffer,
 				addedLines: counts.added,
@@ -568,39 +855,14 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 }
 
 function resolveSkipprCli(): string {
-	const configured = process.env.SKIPPR_CLI_PATH?.trim();
-	if (configured) {
-		return configured;
-	}
-	return resolveLocalSkipprdManifest() ? LOCAL_CARGO_CLI : 'skippr';
-}
-
-function buildCliCommand(cliPath: string, args: string[]): string[] {
-	if (cliPath !== LOCAL_CARGO_CLI) {
-		return [cliPath, ...args];
-	}
-	const manifestPath = resolveLocalSkipprdManifest();
-	if (!manifestPath) {
-		return ['skippr', ...args];
-	}
-	return ['cargo', 'run', '--manifest-path', manifestPath, '-p', 'skippr-cli', '--', ...args];
-}
-
-function cliCommandCwd(cliPath: string): string | undefined {
-	const manifestPath = cliPath === LOCAL_CARGO_CLI ? resolveLocalSkipprdManifest() : undefined;
-	return manifestPath ? path.dirname(manifestPath) : undefined;
-}
-
-function resolveLocalSkipprdManifest(): string | undefined {
-	const candidates = [
-		process.env.SKIPPRD_MANIFEST_PATH,
-		path.resolve(process.cwd(), '../skipprd/Cargo.toml'),
-		path.resolve(process.cwd(), '../../skipprd/Cargo.toml'),
-		path.resolve(process.cwd(), '../../../skipprd/Cargo.toml'),
-		path.resolve(moduleDirname, '../../../../../skipprd/Cargo.toml'),
-		path.resolve(moduleDirname, '../../../../../../skipprd/Cargo.toml'),
-	].filter((candidate): candidate is string => Boolean(candidate?.trim()));
-	return candidates.find(candidate => fs.existsSync(candidate));
+	return resolveSkipprCliForIde({
+		configuredPath: process.env.SKIPPR_CLI_PATH,
+		preferLocalSkipprd: process.env.SKIPPR_USE_LOCAL_SKIPPRD !== '0',
+		extraManifestCandidates: [
+			path.resolve(moduleDirname, '../../../../../skipprd/Cargo.toml'),
+			path.resolve(moduleDirname, '../../../../../../skipprd/Cargo.toml'),
+		],
+	});
 }
 
 function workspaceRootFromWorkingDirectory(workingDirectory: URI | undefined): string | undefined {
@@ -699,6 +961,124 @@ function assistantSnippetFromChatJsonlObject(line: unknown): string | undefined 
 		return stringFieldFromObject(o, ['markdown', 'display', 'answer', 'text']);
 	}
 	return undefined;
+}
+
+function parseModelSlashPrompt(prompt: string, state: ISkipprSession): ModelSlashRequest | undefined {
+	const trimmed = prompt.trim();
+	if (!/^\/model(?:\s|$)/.test(trimmed)) {
+		return undefined;
+	}
+	const parts = trimmed.split(/\s+/).slice(1);
+	let pipeline: string | undefined;
+	let noResume = false;
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i];
+		if (part === '--no-resume' || part === '--fresh') {
+			noResume = true;
+			continue;
+		}
+		if ((part === '--pipeline' || part === '-p') && parts[i + 1]) {
+			pipeline = parts[++i];
+			continue;
+		}
+		if (!part.startsWith('-') && !pipeline) {
+			pipeline = part;
+		}
+	}
+	return { pipeline: pipeline ?? state.pipeline, noResume };
+}
+
+function modelDbtOutputPath(state: ISkipprSession, pipeline: string): string {
+	const root = state.configPath ? path.dirname(state.configPath) : state.workspaceRoot ?? process.cwd();
+	return path.join(root, 'dbt', pipeline);
+}
+
+function agentBridgeDirForWorkspace(workspaceRoot: string): string {
+	const digest = crypto.createHash('sha256').update(path.resolve(workspaceRoot)).digest('hex').slice(0, 24);
+	return path.join(os.tmpdir(), 'skippr-ide-agent-bridge', digest);
+}
+
+function readBridgeResponseLines(responsePath: string): string[] {
+	try {
+		return fs.readFileSync(responsePath, 'utf8').split(/\r?\n/).filter(line => line.trim().length > 0);
+	} catch {
+		return [];
+	}
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function modelRequestFromToolEnd(event: Record<string, unknown>, state: ISkipprSession): ModelSlashRequest | undefined {
+	const toolName = stringField(event, 'name');
+	if (toolName !== 'model_subagent' && toolName !== 'skippr_cli') {
+		return undefined;
+	}
+	const payload = objectField(event, 'payload') ?? objectField(event, 'observation');
+	if (payload?.ide_model_run_requested !== true) {
+		return undefined;
+	}
+	const pipeline = stringField(payload, 'pipeline') ?? state.pipeline;
+	return {
+		pipeline,
+		noResume: payload.no_resume === true,
+	};
+}
+
+function parseJsonObject(line: string): Record<string, unknown> | undefined {
+	try {
+		const parsed = JSON.parse(line);
+		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function modelEventMarkdown(event: Record<string, unknown>): string | undefined {
+	const name = stringField(event, 'event');
+	const phase = stringField(event, 'phase');
+	const error = stringField(event, 'error') ?? stringField(event, 'failure_summary');
+	switch (name) {
+		case 'model_start':
+			return 'Model workflow started.';
+		case 'model_thread_resumed':
+			return `Resumed model thread${stringField(event, 'thread_id') ? ` \`${stringField(event, 'thread_id')}\`` : ''}.`;
+		case 'model_preflight':
+			return event['ok'] === false ? `Model preflight failed: ${error ?? 'unknown error'}` : 'Model preflight passed.';
+		case 'model_authoring_start':
+			return 'Model authoring started.';
+		case 'model_phase_changed':
+			return phase ? `Model phase: ${phase}` : undefined;
+		case 'model_file_changed':
+			return 'Model updated local dbt files.';
+		case 'model_complete':
+			return 'Model workflow completed.';
+		case 'model_error':
+			return `Model workflow failed: ${error ?? 'unknown error'}`;
+		default:
+			return undefined;
+	}
+}
+
+function modelSubagentSummary(events: readonly Record<string, unknown>[], pipeline: string, dbtOutputPath: string, error?: string): Record<string, unknown> {
+	const terminalEvent = [...events].reverse().find(event => {
+		const name = stringField(event, 'event');
+		return name === 'model_complete' || name === 'model_error';
+	});
+	const changedFiles = events
+		.filter(event => stringField(event, 'event') === 'model_file_changed')
+		.map(event => event['changed_files'])
+		.filter(Boolean);
+	return {
+		pipeline,
+		dbt_output_path: dbtOutputPath,
+		ok: !error && stringField(terminalEvent, 'event') !== 'model_error',
+		error,
+		terminal_event: terminalEvent,
+		event_count: events.length,
+		changed_files: changedFiles,
+	};
 }
 
 function displayToolName(name: string): string {

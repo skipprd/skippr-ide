@@ -27,6 +27,8 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
     .model-alert { margin-top: 8px; padding: 7px 8px; border-left: 2px solid var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground) 55%, transparent); }
     .model-alert.warn { border-left-color: var(--vscode-editorWarning-foreground); background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground) 55%, transparent); }
     .model-section-title { padding: 6px 10px 4px; color: var(--vscode-descriptionForeground); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--vscode-panel-border); }
+    .phase-grid { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); border-bottom: 1px solid var(--vscode-panel-border); }
+    .phase-cell { min-height: 38px; padding: 5px 8px; border-right: 1px solid var(--vscode-panel-border); }
     .ok { color: var(--vscode-testing-iconPassed); }
     .bad { color: var(--vscode-errorForeground); }
     .warn { color: var(--vscode-editorWarning-foreground); }
@@ -85,7 +87,7 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
       function selected() { return state.selected || state.current; }
       function isModelRun(run) {
         const kind = String((run && (run.runKind || run.command)) || "");
-        return kind === "model" || kind === "model-direct" || kind === "direct" || kind.startsWith("model");
+        return kind === "model" || kind.startsWith("model");
       }
       function header(run) {
         if (!run) { return ""; }
@@ -202,7 +204,7 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         if (!run) { return '<div class="empty">No run selected.</div>'; }
         const fileSummary = modelFileSummary(run);
         const timelineRows = significantModelTimeline(run);
-        return modelSummary(run, fileSummary) + modelFiles(run, fileSummary) + modelTimeline(timelineRows);
+        return modelSummary(run, fileSummary) + modelPhaseDetails(run, fileSummary) + modelFiles(run, fileSummary) + modelTimeline(timelineRows);
       }
       function modelSummary(run, fileSummary) {
         const preflight = run.modelPreflight || {};
@@ -215,6 +217,32 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
           '<div class="model-meta">' + esc(metaParts.join(" · ")) + '</div>' +
           modelAlert(run, preflight, validation) +
         '</section>';
+      }
+      function modelPhaseDetails(run, fileSummary) {
+        const validation = run.modelValidation || {};
+        const preflight = run.modelPreflight || {};
+        const phase = run.phase || currentModelPhaseFromEvents(run) || "starting";
+        const revision = run.modelPendingPlanRevision ? "pending" : "none";
+        const validationStatus = validation.ok === true ? "passed" : validation.ok === false ? "failed" : "not run";
+        const dbtStatus = preflight.ok === true ? "ready" : preflight.ok === false ? "blocked" : "pending";
+        return '<section class="phase-grid">' +
+          phaseCell("Phase", phase) +
+          phaseCell("Repair", run.modelRepairStatus || "none") +
+          phaseCell("Plan revision", revision) +
+          phaseCell("dbt", dbtStatus) +
+          phaseCell("Validation", validationStatus) +
+          phaseCell("Files", fileSummary.total + " changed, +" + fileSummary.linesAdded + " -" + fileSummary.linesRemoved) +
+        '</section>';
+      }
+      function phaseCell(label, value) {
+        return '<section class="phase-cell"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></section>';
+      }
+      function currentModelPhaseFromEvents(run) {
+        const events = run.events || [];
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i].phase) { return events[i].phase; }
+        }
+        return "";
       }
       function modelInsightLine(preflight, validation, summary, run) {
         const parts = [];

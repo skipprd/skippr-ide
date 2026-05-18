@@ -42,6 +42,7 @@ import { IAgentHostService } from '../../../../platform/agentHost/common/agentSe
 import { type AgentInfo, type RootState } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { ChatContextKeys } from '../common/actions/chatContextKeys.js';
 import { IChatService } from '../common/chatService/chatService.js';
+import type { ReadonlyChatSessionOptionsMap } from '../common/chatSessionsService.js';
 import { ChatModeKind } from '../common/constants.js';
 import { IPluginGitService } from '../common/plugins/pluginGitService.js';
 import { registerChatDeveloperActions } from './actions/chatDeveloperActions.js';
@@ -268,7 +269,7 @@ function getSkipprAgentInfo(rootState: RootState | Error | undefined): AgentInfo
 	if (!rootState || rootState instanceof Error) {
 		return undefined;
 	}
-	return rootState.agents.find(a => a.provider === 'skipprcli');
+	return rootState.agents.find(a => a.provider === 'skippr' || a.provider === 'skipprcli');
 }
 
 /**
@@ -311,7 +312,7 @@ async function resolveAgentHostSessionType(agentHostService: IAgentHostService):
 		}),
 	]);
 	if (!resolved) {
-		throw new Error('Agent host did not register a skipprcli agent within the timeout period. Ensure the agent host is enabled and running.');
+		throw new Error('Agent host did not register a Skippr agent within the timeout period. Ensure the agent host is enabled and running.');
 	}
 	return `agent-host-${resolved.provider}`;
 }
@@ -320,7 +321,7 @@ async function resolveAgentHostSessionType(agentHostService: IAgentHostService):
 // type picker command and the static sidebar/editor commands below.
 // Delegates to `openChatSession` so the session type picker, context keys,
 // and welcome flows all stay in sync with the dynamic per-agent path.
-async function openNewAgentHostSession(accessor: ServicesAccessor, position: ChatSessionPosition): Promise<void> {
+async function openNewAgentHostSession(accessor: ServicesAccessor, position: ChatSessionPosition, chatOptions?: { prompt: string; initialSessionOptions?: ReadonlyChatSessionOptionsMap }): Promise<void> {
 	// Snapshot the services we need synchronously — `accessor` is only valid
 	// before the first `await`. Use the instantiation service to mint a fresh
 	// accessor for the downstream `openChatSession` call.
@@ -331,7 +332,7 @@ async function openNewAgentHostSession(accessor: ServicesAccessor, position: Cha
 		type: sessionType,
 		displayName: getAgentSessionProviderName(sessionType),
 		position,
-	}));
+	}, chatOptions));
 }
 
 // Static sidebar/editor open commands for the Agent Host umbrella scheme.
@@ -341,9 +342,9 @@ async function openNewAgentHostSession(accessor: ServicesAccessor, position: Cha
 // invoke before the dynamic registration has occurred.
 CommandsRegistry.registerCommand(
 	`workbench.action.chat.openNewSessionSidebar.${AgentSessionProviders.AgentHostSkippr}`,
-	accessor => openNewAgentHostSession(accessor, ChatSessionPosition.Sidebar)
+	(accessor, chatOptions?: { prompt: string; initialSessionOptions?: ReadonlyChatSessionOptionsMap }) => openNewAgentHostSession(accessor, ChatSessionPosition.Sidebar, chatOptions)
 );
 CommandsRegistry.registerCommand(
 	`workbench.action.chat.openNewSessionEditor.${AgentSessionProviders.AgentHostSkippr}`,
-	accessor => openNewAgentHostSession(accessor, ChatSessionPosition.Editor)
+	(accessor, chatOptions?: { prompt: string; initialSessionOptions?: ReadonlyChatSessionOptionsMap }) => openNewAgentHostSession(accessor, ChatSessionPosition.Editor, chatOptions)
 );

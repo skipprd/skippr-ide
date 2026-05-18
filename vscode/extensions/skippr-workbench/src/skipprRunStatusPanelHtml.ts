@@ -62,7 +62,7 @@ export function renderSkipprRunStatusPanelHtml(): string {
       }
       function isModelRun(run) {
         const kind = String((run && (run.runKind || run.command)) || "");
-        return kind === "model" || kind === "model-direct" || kind === "direct" || kind.startsWith("model");
+        return kind === "model" || kind.startsWith("model");
       }
       function statusLabel(status) {
         switch (status) {
@@ -80,9 +80,10 @@ export function renderSkipprRunStatusPanelHtml(): string {
       }
       function runMeta(run) {
         if (isModelRun(run)) {
-          const files = (run.modelChangedFiles || []).length;
+          const files = modelFileCount(run);
           const preflight = run.modelPreflight ? (run.modelPreflight.ok ? "dbt ok" : "dbt blocked") : "dbt pending";
-          return esc([duration(run), preflight, "files " + files].join(" · "));
+          const phase = run.phase || currentModelPhaseFromEvents(run) || "starting";
+          return esc([duration(run), phase, preflight, "files " + files].join(" · "));
         }
         const parts = [duration(run), "rows " + num(run.totalRows != null ? run.totalRows : run.rowsWritten)];
         return esc(parts.join(" · "));
@@ -92,17 +93,33 @@ export function renderSkipprRunStatusPanelHtml(): string {
         const preStatus = pre.ok === true ? '<span class="status-ok">ok</span>' : pre.ok === false ? '<span class="status-bad">failed</span>' : 'pending';
         const validation = run.modelValidation || {};
         const valStatus = validation.ok === true ? '<span class="status-ok">ok</span>' : validation.ok === false ? '<span class="status-bad">failed</span>' : 'not run';
+        const phase = run.phase || currentModelPhaseFromEvents(run) || "starting";
+        const repair = run.modelRepairStatus || "none";
+        const revision = run.modelPendingPlanRevision ? "pending" : "none";
         const files = (run.modelChangedFiles || []).slice(0, 8).map(file => {
           const label = file.path || file.absolute_path || "changed file";
           const kind = file.change_kind ? " [" + file.change_kind + "]" : "";
           return '<div class="model-file">' + esc(label + kind) + '</div>';
         }).join("");
         return '<div class="kv">' +
-          '<div class="key">Phase</div><div class="value">' + esc(run.phase || run.headline || "preflight") + '</div>' +
+          '<div class="key">Phase</div><div class="value">' + esc(phase) + '</div>' +
+          '<div class="key">Repair</div><div class="value">' + esc(repair) + '</div>' +
+          '<div class="key">Plan</div><div class="value">' + esc(revision) + '</div>' +
           '<div class="key">dbt</div><div class="value">' + preStatus + (pre.command ? ' · ' + esc(pre.command) : '') + '</div>' +
           '<div class="key">Validation</div><div class="value">' + valStatus + (validation.message ? ' · ' + esc(validation.message) : '') + '</div>' +
           (pre.remediation ? '<div class="key">Fix</div><div class="value" title="' + esc(pre.remediation) + '">' + esc(pre.remediation) + '</div>' : '') +
         '</div>' + (files ? '<div class="model-list">' + files + '</div>' : '');
+      }
+      function currentModelPhaseFromEvents(run) {
+        const events = run.events || [];
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i].phase) { return events[i].phase; }
+        }
+        return "";
+      }
+      function modelFileCount(run) {
+        const summary = run.modelFileSummary || {};
+        return Number(summary.total_count || (run.modelChangedFiles || []).length || 0);
       }
       function renderCurrent(run) {
         if (!run) {

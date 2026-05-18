@@ -100,6 +100,7 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 	private secondaryIndex = 0;
 	private testIndex = 0;
 	private logIndex = 0;
+	private configPath = '';
 	private pipeStrings: string[] = [];
 	private testIds: string[] = [''];
 
@@ -260,15 +261,19 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 			if (!model || typeof model !== 'object') {
 				return;
 			}
+			this.configPath = model.configPath?.trim() || '';
 			const preferred = model.defaultPipeline?.trim() || '';
 			const pls = Array.isArray(model.pipelines) ? model.pipelines : [];
+			const previousPipeline = pipeline.trim();
 			this.pipeStrings = pls.length ? pls.slice() : preferred ? [preferred] : [];
 			const pipeItems: ISelectOptionItem[] = this.pipeStrings.length
 				? this.pipeStrings.map(p => ({ text: p }))
 				: [{ text: nls.localize('skipprNoPipeline', '(no pipeline)') }];
 			let pick = 0;
-			if (preferred && pls.includes(preferred)) {
-				pick = pls.indexOf(preferred);
+			if (previousPipeline && this.pipeStrings.includes(previousPipeline)) {
+				pick = this.pipeStrings.indexOf(previousPipeline);
+			} else if (preferred && this.pipeStrings.includes(preferred)) {
+				pick = this.pipeStrings.indexOf(preferred);
 			} else if (this.pipeStrings.length) {
 				pick = 0;
 			}
@@ -477,6 +482,9 @@ export class SkipprRunToolbarActionViewItem extends BaseActionViewItem {
 			pipeline,
 			testSelect,
 		};
+		if (this.configPath) {
+			payload.configPath = this.configPath;
+		}
 		if (command === 'sync') {
 			payload.syncMode = syncMode;
 		}
