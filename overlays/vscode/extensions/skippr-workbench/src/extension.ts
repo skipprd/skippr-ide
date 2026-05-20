@@ -700,7 +700,7 @@ async function showRunConfigModal(kind: SkipprRunnableKind, output: vscode.LogOu
   });
 }
 
-function describeRunEvent(event: SkipprRunEvent): string {
+function describeRunEvent(event: SkipprRunEvent): string | undefined {
   switch (event.event) {
     case "discover_start":
       return `Discover started: ${event.pipeline ?? "pipeline"}`;
@@ -725,8 +725,11 @@ function describeRunEvent(event: SkipprRunEvent): string {
     case "sync_error":
       return `Sync error: ${event.error ?? "unknown error"}`;
     case "tool_start":
-      return `Tool started: ${event.clean_name ?? event.name ?? "tool"}`;
+      return undefined;
     case "tool_end":
+      if (event.status === "ok" || event.status === "success") {
+        return undefined;
+      }
       return `Tool ${event.status ?? "finished"}: ${event.clean_name ?? event.name ?? "tool"}`;
     case "model_start":
       return `Model started: ${event.pipeline ?? "pipeline"}`;
@@ -771,6 +774,7 @@ function describeRunEvent(event: SkipprRunEvent): string {
     case "plan_error":
       return `Plan error: ${event.error ?? "unknown error"}`;
   }
+  return undefined;
 }
 
 type RunStatusPanelPhase = "idle" | "running" | "success" | "error" | "stopped";
@@ -796,8 +800,10 @@ let runHistory: SkipprRunHistory | undefined;
 let pendingHistorySave: SkipprObservedRun | undefined;
 let historySaveTimer: ReturnType<typeof setTimeout> | undefined;
 let historyRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let observabilityPostTimer: ReturnType<typeof setTimeout> | undefined;
 const HISTORY_SAVE_DEBOUNCE_MS = 750;
 const HISTORY_REFRESH_DEBOUNCE_MS = 300;
+const OBSERVABILITY_POST_DEBOUNCE_MS = 100;
 let runStatusPanelLast: RunStatusPanelPayload = {
   type: "status",
   phase: "idle",
@@ -813,10 +819,18 @@ let activeRunStatusStartedAt: number | undefined;
 
 function postRunStatusPanel(payload: RunStatusPanelPayload): void {
   runStatusPanelLast = payload;
+  const snapshot = observabilityStore?.snapshot();
+  if (snapshot?.current || (snapshot?.selected && payload.phase === "idle")) {
+    return;
+  }
   void runStatusWebviewView?.webview.postMessage(payload);
 }
 
 function postObservability(): void {
+  if (observabilityPostTimer) {
+    clearTimeout(observabilityPostTimer);
+    observabilityPostTimer = undefined;
+  }
   const snapshot = observabilityStore?.snapshot();
   if (!snapshot) {
     return;
@@ -826,6 +840,16 @@ function postObservability(): void {
     void webviewView.webview.postMessage(snapshot);
   }
   void schemaWebviewView?.webview.postMessage(snapshot);
+}
+
+function schedulePostObservability(): void {
+  if (observabilityPostTimer) {
+    clearTimeout(observabilityPostTimer);
+  }
+  observabilityPostTimer = setTimeout(() => {
+    observabilityPostTimer = undefined;
+    postObservability();
+  }, OBSERVABILITY_POST_DEBOUNCE_MS);
 }
 
 function postQueryResults(payload: SkipprQueryResultsPanelPayload): void {
@@ -1278,8 +1302,8 @@ async function runSkipprCommand(
       onEvent: (event) => {
         const observed = observabilityStore?.recordEvent(event);
         observer?.onEvent?.(event, observed);
-        if (event.event !== "sync_status") {
-          const message = describeRunEvent(event);
+        const message = event.event === "sync_status" ? undefined : describeRunEvent(event);
+        if (message) {
           output.info(message);
           setRunStatusRunning(statusItem, message);
         }
@@ -1327,7 +1351,7 @@ async function runSkipprCommand(
     exitCode: result.code,
     signal: result.signal,
     elapsedMs: result.elapsedMs,
-    detail: result.lastEvent?.error ?? result.errorDetail
+    detail: result.lastEvent?.error ?? result.lastEvent?.failure_summary ?? result.errorDetail
   });
   observer?.onFinish?.(result, finishedRun);
   if (finishedRun) {
@@ -1524,7 +1548,7 @@ async function runAgentModelBridgeRequest(
     return;
   }
 
-  const dbtOutputPath = path.join(getConfigCwd(configPath), "dbt", pipeline);
+  const dbtOutputPath = path.join(getConfigCwd(configPath), pipeline, "dbt");
   const beforeSnapshot = snapshotDbtFiles(dbtOutputPath);
   appendAgentBridgeMessage(bridgeDir, requestId, {
     type: "accepted",
@@ -1834,7 +1858,7 @@ async function runWarehouseSqlQuery(
   await showQueryResultsPanel();
   const result = await runSkipprJson<SkipprQueryCliResult>(
     ctx.cliPath,
-    ["--config", ctx.configPath, "--log", getLogLevel(), "query", "--pipeline", ctx.pipeline, "--sql", sql, "--output", "json"],
+    ["--config", ctx.configPath, "--log", getLogLevel(), "query", "--pipeline", ctx.pipeline, `--sql=${sql}`, "--output", "json"],
     getConfigCwd(ctx.configPath),
     output,
     skipprSpawnEnv(ctx.configPath, ctx.pipeline),
@@ -1868,18 +1892,24 @@ async function runDbtDocument(
     vscode.window.showWarningMessage("This file is not a dbt SQL model.");
     return;
   }
+  if (detected.layoutError) {
+    vscode.window.showErrorMessage(detected.layoutError);
+    return;
+  }
   const ctx = await resolveSqlQueryContext(output);
   if (!ctx) {
     return;
   }
-  const cwd = getConfigCwd(ctx.configPath);
-  const env = skipprSpawnEnv(ctx.configPath, ctx.pipeline);
+  const dbtCtx = detected.pipelineFromPath ? { ...ctx, pipeline: detected.pipelineFromPath } : ctx;
+  const dbtFilePath = detected.filePath;
+  const cwd = getConfigCwd(dbtCtx.configPath);
+  const env = skipprSpawnEnv(dbtCtx.configPath, dbtCtx.pipeline);
   if (dbtEditorRunMode === "tests") {
     const meta = await probeDbtFileMeta(
-      ctx.cliPath,
-      ctx.configPath,
-      ctx.pipeline,
-      detected.filePath,
+      dbtCtx.cliPath,
+      dbtCtx.configPath,
+      dbtCtx.pipeline,
+      dbtFilePath,
       cwd,
       output,
       env,
@@ -1891,8 +1921,8 @@ async function runDbtDocument(
       return;
     }
     await runSkipprTestFromCliPanel(output, runStatusItem, {
-      configPath: ctx.configPath,
-      pipeline: ctx.pipeline,
+      configPath: dbtCtx.configPath,
+      pipeline: dbtCtx.pipeline,
       logLevel: getLogLevel(),
       testSelect,
       extraArgsText: vscode.workspace.getConfiguration("skippr").get<string>(runExtraArgsKey, "")
@@ -1903,15 +1933,15 @@ async function runDbtDocument(
     type: "queryResults",
     status: "running",
     source: "dbt",
-    pipeline: ctx.pipeline,
+    pipeline: dbtCtx.pipeline,
     sql: "-- compiling dbt model…"
   });
   await showQueryResultsPanel();
   const compiled = await compileDbtSqlForQuery(
-    ctx.cliPath,
-    ctx.configPath,
-    ctx.pipeline,
-    detected.filePath,
+    dbtCtx.cliPath,
+    dbtCtx.configPath,
+    dbtCtx.pipeline,
+    dbtFilePath,
     cwd,
     output,
     env
@@ -1921,14 +1951,14 @@ async function runDbtDocument(
       type: "queryResults",
       status: "error",
       source: "dbt",
-      pipeline: ctx.pipeline,
+      pipeline: dbtCtx.pipeline,
       error: compiled.error
     });
     await showQueryResultsPanel();
     vscode.window.showErrorMessage(compiled.error);
     return;
   }
-  await runWarehouseSqlQuery(ctx, compiled.sql, output, "dbt");
+  await runWarehouseSqlQuery(dbtCtx, compiled.sql, output, "dbt");
 }
 
 async function runSqlTextFromEditor(
@@ -1963,7 +1993,7 @@ function scheduleDbtEditorContextRefresh(output: vscode.LogOutputChannel): void 
     dbtContextRefreshTimer = undefined;
     void refreshDbtEditorContextKeys(vscode.window.activeTextEditor, {
       getRunMode: () => dbtEditorRunMode,
-      probeHasTests: async (filePath) => {
+      probeHasTests: async (_filePath) => {
         const editor = vscode.window.activeTextEditor;
         if (!editor || editor.document.languageId !== "sql") {
           return false;
@@ -1972,14 +2002,19 @@ function scheduleDbtEditorContextRefresh(output: vscode.LogOutputChannel): void 
         if (!ctx) {
           return false;
         }
+        const detected = detectDbtSqlFile(editor.document.uri);
+        if (detected.layoutError) {
+          return false;
+        }
+        const pipeline = detected.pipelineFromPath ?? ctx.pipeline;
         return probeDbtFileHasTests(
           ctx.cliPath,
           ctx.configPath,
-          ctx.pipeline,
-          filePath,
+          pipeline,
+          detected.filePath,
           getConfigCwd(ctx.configPath),
           output,
-          skipprSpawnEnv(ctx.configPath, ctx.pipeline)
+          skipprSpawnEnv(ctx.configPath, pipeline)
         );
       }
     });
@@ -3238,7 +3273,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     runHistory = new SkipprRunHistory(workspaceRoot, output);
     void refreshRunHistory();
   }
-  observabilityStore.onDidChange(() => postObservability(), undefined, context.subscriptions);
+  observabilityStore.onDidChange(() => schedulePostObservability(), undefined, context.subscriptions);
   void runWorkbenchCommand("skippr.workbench.forceRunPanels");
   void runWorkbenchCommand("skippr.workbench.forceSchemaSidebar");
   await vscode.commands.executeCommand("setContext", SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true);

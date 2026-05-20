@@ -16,6 +16,8 @@ export interface DbtSqlFileContext {
   filePath: string;
   dbtRoot?: string;
   relPath?: string;
+  pipelineFromPath?: string;
+  layoutError?: string;
 }
 
 export interface SkipprDbtCompileSqlResult {
@@ -44,7 +46,7 @@ export function detectDbtSqlFile(uri: vscode.Uri): DbtSqlFileContext {
       if (!isResource) {
         return { isDbt: false, filePath };
       }
-      return { isDbt: true, filePath, dbtRoot: dir, relPath };
+      return { isDbt: true, filePath, dbtRoot: dir, relPath, ...managedDbtPathContext(dir) };
     }
     if (dir === root) {
       break;
@@ -52,6 +54,26 @@ export function detectDbtSqlFile(uri: vscode.Uri): DbtSqlFileContext {
     dir = path.dirname(dir);
   }
   return { isDbt: false, filePath };
+}
+
+function managedDbtPathContext(dbtRoot: string): Pick<DbtSqlFileContext, "pipelineFromPath" | "layoutError"> {
+  if (path.basename(dbtRoot) !== "dbt") {
+    const nonCanonicalParent = path.dirname(dbtRoot);
+    if (path.basename(nonCanonicalParent) !== "dbt") {
+      return {};
+    }
+    const pipeline = path.basename(dbtRoot).trim();
+    if (!pipeline) {
+      return {};
+    }
+    const projectRoot = path.dirname(nonCanonicalParent);
+    const canonicalRoot = path.join(projectRoot, pipeline, "dbt");
+    return {
+      layoutError: `This dbt file is under <project>/dbt/<pipeline>, but Skippr now requires <project>/<pipeline>/dbt. Move or regenerate it under ${canonicalRoot}.`
+    };
+  }
+  const pipeline = path.basename(path.dirname(dbtRoot)).trim();
+  return pipeline && pipeline !== "dbt" ? { pipelineFromPath: pipeline } : {};
 }
 
 export async function probeDbtFileMeta(

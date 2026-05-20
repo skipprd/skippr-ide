@@ -419,7 +419,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			clean_name: 'Model subagent',
 			payload: { pipeline, dbt_output_path: dbtOutputPath, no_resume: request.noResume },
 		});
-		this._emitMarkdown(session, turnId, `Running model workflow for \`${pipeline}\`.`);
+		this._emitProgressMarkdown(session, turnId, `Running model workflow for \`${pipeline}\`.`);
 		const events: Record<string, unknown>[] = [];
 		const fileEdits: ToolResultFileEditContent[] = [];
 		state.modelBridgeInFlight = true;
@@ -509,13 +509,17 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 				const type = stringField(message, 'type');
 				if (type === 'accepted') {
 					const dbtOutputPath = stringField(message, 'dbtOutputPath');
-					this._emitMarkdown(state.session, turnId, dbtOutputPath ? `Model dbt output: \`${dbtOutputPath}\`.` : 'Model run accepted by the workbench runner.');
+					this._emitProgressMarkdown(state.session, turnId, dbtOutputPath ? `Model dbt output: \`${dbtOutputPath}\`.` : 'Model run accepted by the workbench runner.');
 					continue;
 				}
 				if (type === 'log') {
 					const logLine = stringField(message, 'line');
 					if (logLine) {
 						this._logService.info(logLine);
+						const progress = modelLogProgressMarkdown(logLine);
+						if (progress) {
+							this._emitProgressMarkdown(state.session, turnId, progress);
+						}
 					}
 					continue;
 				}
@@ -525,7 +529,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 						events.push(event);
 						const markdown = modelEventMarkdown(event);
 						if (markdown) {
-							this._emitMarkdown(state.session, turnId, markdown);
+							this._emitProgressMarkdown(state.session, turnId, markdown);
 						}
 					}
 					continue;
@@ -829,6 +833,10 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		});
 	}
 
+	private _emitProgressMarkdown(session: URI, turnId: string, content: string): void {
+		this._emitMarkdown(session, turnId, `${content.trimEnd()}\n\n`);
+	}
+
 	private _emitAction(session: URI, action: SessionAction): void {
 		this._onDidSessionProgress.fire({ kind: 'action', session, action });
 	}
@@ -990,7 +998,7 @@ function parseModelSlashPrompt(prompt: string, state: ISkipprSession): ModelSlas
 
 function modelDbtOutputPath(state: ISkipprSession, pipeline: string): string {
 	const root = state.configPath ? path.dirname(state.configPath) : state.workspaceRoot ?? process.cwd();
-	return path.join(root, 'dbt', pipeline);
+	return path.join(root, pipeline, 'dbt');
 }
 
 function agentBridgeDirForWorkspace(workspaceRoot: string): string {
@@ -1059,6 +1067,55 @@ function modelEventMarkdown(event: Record<string, unknown>): string | undefined 
 		default:
 			return undefined;
 	}
+}
+
+function modelLogProgressMarkdown(line: string): string | undefined {
+	const message = dataEngineerLogMessage(line);
+	if (!message) {
+		return undefined;
+	}
+	const lower = message.toLowerCase();
+	if (lower.includes('semantic_profile evidence claim ref')) {
+		const count = message.match(/attached\s+(\d+)\s+semantic_profile/i)?.[1];
+		return count ? `Model planning attached ${count} semantic evidence claim ref(s).` : 'Model planning attached semantic evidence.';
+	}
+	if (lower.includes('grounding plan against existing staging models')) {
+		return 'Model planning is grounding against existing staging models.';
+	}
+	if (lower.includes('validating plan')) {
+		return 'Model planning is validating the candidate plan.';
+	}
+	if (lower.includes('deterministic staging discovery sufficient for model plan')) {
+		const count = message.match(/\((\d+)\s+staging model/i)?.[1];
+		return count
+			? `Model planning found ${count} staging model(s); skipping extra discovery.`
+			: 'Model planning found enough staging evidence; skipping extra discovery.';
+	}
+	if (lower.includes('compiling plan from candidate models')) {
+		return 'Model planning is compiling the plan from candidate models.';
+	}
+	if (lower.includes('enrichment chunk start')) {
+		const chunk = message.match(/chunk="?(\d+)"?/i)?.[1];
+		const total = message.match(/\bof="?(\d+)"?/i)?.[1];
+		return chunk && total ? `Model enrichment chunk ${chunk}/${total} started.` : 'Model enrichment chunk started.';
+	}
+	if (lower.includes('enrichment chunk complete')) {
+		const chunk = message.match(/chunk="?(\d+)"?/i)?.[1];
+		const total = message.match(/\bof="?(\d+)"?/i)?.[1];
+		return chunk && total ? `Model enrichment chunk ${chunk}/${total} completed.` : 'Model enrichment chunk completed.';
+	}
+	if (lower.includes('enrichment loop complete')) {
+		return 'Model enrichment completed.';
+	}
+	return undefined;
+}
+
+function dataEngineerLogMessage(line: string): string | undefined {
+	if (!line.includes('data_engineer:')) {
+		return undefined;
+	}
+	const message = line.slice(line.indexOf('data_engineer:') + 'data_engineer:'.length).trim();
+	return message || undefined;
 }
 
 function modelSubagentSummary(events: readonly Record<string, unknown>[], pipeline: string, dbtOutputPath: string, error?: string): Record<string, unknown> {

@@ -37,6 +37,7 @@ export function renderSkipprRunStatusPanelHtml(): string {
     (function () {
       const vscode = acquireVsCodeApi();
       const root = document.getElementById("root");
+      let showingObservedRun = false;
       function esc(v) {
         return String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
       }
@@ -123,7 +124,7 @@ export function renderSkipprRunStatusPanelHtml(): string {
       }
       function renderCurrent(run) {
         if (!run) {
-          return '<div class="section-title">Current Run</div><div class="empty">No Skippr run selected.</div>';
+          return '<div class="section-title">Current Run</div><div class="empty">No active Skippr run.</div>';
         }
         return '<div class="section-title">Current Run</div><div class="summary">' +
           '<div class="line"><span class="name">' + esc(runName(run)) + '</span>' + statusBadge(run.status) + '</div>' +
@@ -140,11 +141,16 @@ export function renderSkipprRunStatusPanelHtml(): string {
       }
       function render(m) {
         if (m.type === "status") {
+          if (showingObservedRun && (!m.phase || m.phase === "idle")) {
+            return;
+          }
+          showingObservedRun = false;
           root.innerHTML = '<div class="section-title">Current Run</div><div class="summary"><div class="line"><span class="name">' + esc(m.headline || "No Skippr run yet.") + '</span>' + statusBadge(m.phase || "idle") + '</div><div class="meta">' + esc(m.detail || "") + '</div></div>';
           return;
         }
         if (m.type === "observability") {
-          root.innerHTML = renderCurrent(m.current || m.selected) + renderHistory(m.history);
+          showingObservedRun = Boolean(m.current);
+          root.innerHTML = renderCurrent(m.current) + renderHistory(m.history);
         }
       }
       root.addEventListener("click", event => {

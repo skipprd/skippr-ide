@@ -93,6 +93,7 @@ function testUri(projectRoot: string, t: SkipprTestListJson["tests"][0]): vscode
 
 const OUTPUT_PANEL_HINT =
   "Open **View → Output**, choose **Skippr** in the dropdown (same panel as Discover / Model).";
+const ansiEscapePattern = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function clipText(s: string, maxChars: number): string {
   const t = s.trimEnd();
@@ -104,6 +105,10 @@ function clipText(s: string, maxChars: number): string {
 
 function logTestRunBanner(deps: SkipprDbtTestDeps, title: string, body: string): void {
   deps.output.error(`\n── ${title} ──\n${body}\n${OUTPUT_PANEL_HINT}\n`);
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(ansiEscapePattern, "");
 }
 
 async function offerShowSkipprOutput(message: string, deps: SkipprDbtTestDeps): Promise<void> {
@@ -201,13 +206,15 @@ export function runSkipprJsonLines(
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (c: string) => {
-      stderr += c;
-      output.info(c.trimEnd());
+      const clean = stripAnsi(c);
+      stderr += clean;
+      output.info(clean.trimEnd());
     });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-      buf += chunk;
+      const clean = stripAnsi(chunk);
+      stdout += clean;
+      buf += clean;
       let nl = buf.indexOf("\n");
       while (nl >= 0) {
         const line = buf.slice(0, nl).trim();

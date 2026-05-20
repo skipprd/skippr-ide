@@ -14,6 +14,8 @@ import {
   SkipprSchemaDiffPayload
 } from "./types";
 
+const MAX_RETAINED_RUN_EVENTS = 400;
+
 export type SkipprObservedRunStatus = "running" | "success" | "error" | "stopped";
 
 export interface SkipprMetricPoint extends SkipprRunMetrics {
@@ -152,13 +154,18 @@ export class SkipprRunStateStore {
       return undefined;
     }
 
+    const wasFollowingCurrent =
+      !this.selectedRun ||
+      this.selectedRun === this.currentRun ||
+      this.selectedRun.id === this.currentRun.id;
+
     if (event.run_id?.trim()) {
       this.currentRun.id = event.run_id.trim();
     }
-    this.currentRun.events.push(event);
+    appendRetainedEvent(this.currentRun.events, event);
     this.currentRun.pipeline = event.pipeline ?? this.currentRun.pipeline;
     this.currentRun.phase = event.phase ?? this.currentRun.phase;
-    this.currentRun.headline = describeRunEvent(event) || this.currentRun.headline;
+    this.currentRun.headline = describeRunEvent(event) ?? this.currentRun.headline;
     this.currentRun.totalRows = event.total_rows ?? event.metrics?.messages_total ?? this.currentRun.totalRows;
     this.currentRun.rowsWritten = event.rows_written ?? event.metrics?.rows_written ?? this.currentRun.rowsWritten;
     this.currentRun.bytesTotal = event.bytes ?? event.metrics?.bytes_total ?? this.currentRun.bytesTotal;
@@ -213,7 +220,9 @@ export class SkipprRunStateStore {
       this.currentRun.elapsedMs = event.elapsed_ms ?? this.currentRun.finishedAt - this.currentRun.startedAt;
     }
 
-    this.selectedRun = this.currentRun;
+    if (wasFollowingCurrent) {
+      this.selectedRun = this.currentRun;
+    }
     this.emit();
     return this.currentRun;
   }
@@ -345,7 +354,43 @@ function validationFromToolEvent(event: SkipprRunEvent): SkipprModelValidation |
   };
 }
 
-function describeRunEvent(event: SkipprRunEvent): string {
+function appendRetainedEvent(events: SkipprRunEvent[], event: SkipprRunEvent): void {
+  if (!shouldRetainEvent(event)) {
+    return;
+  }
+  const last = events[events.length - 1];
+  if (last && equivalentTimelineEvent(last, event)) {
+    events[events.length - 1] = event;
+  } else {
+    events.push(event);
+  }
+  if (events.length > MAX_RETAINED_RUN_EVENTS) {
+    events.splice(0, events.length - MAX_RETAINED_RUN_EVENTS);
+  }
+}
+
+function shouldRetainEvent(event: SkipprRunEvent): boolean {
+  if (event.event === "tool_start") {
+    return false;
+  }
+  if (event.event === "tool_end") {
+    return event.status !== "ok" && event.status !== "success";
+  }
+  return true;
+}
+
+function equivalentTimelineEvent(a: SkipprRunEvent, b: SkipprRunEvent): boolean {
+  return (
+    a.event === b.event &&
+    a.phase === b.phase &&
+    a.name === b.name &&
+    a.clean_name === b.clean_name &&
+    a.status === b.status &&
+    a.error === b.error
+  );
+}
+
+function describeRunEvent(event: SkipprRunEvent): string | undefined {
   switch (event.event) {
     case "discover_start":
       return `Discover started: ${event.pipeline ?? "pipeline"}`;
@@ -368,8 +413,11 @@ function describeRunEvent(event: SkipprRunEvent): string {
     case "sync_error":
       return `Sync error: ${event.error ?? "unknown error"}`;
     case "tool_start":
-      return `Tool started: ${event.clean_name ?? event.name ?? "tool"}`;
+      return undefined;
     case "tool_end":
+      if (event.status === "ok" || event.status === "success") {
+        return undefined;
+      }
       return `Tool ${event.status ?? "finished"}: ${event.clean_name ?? event.name ?? "tool"}`;
     case "model_start":
       return `Model started: ${event.pipeline ?? "pipeline"}`;
@@ -396,6 +444,6 @@ function describeRunEvent(event: SkipprRunEvent): string {
     case "model_error":
       return `Model error: ${event.error ?? event.failure_summary ?? "unknown error"}`;
     default:
-      return event.event;
+      return undefined;
   }
 }

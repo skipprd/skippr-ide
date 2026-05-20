@@ -7,6 +7,7 @@ import { SkipprRunEvent } from "./types";
 
 const transcriptLineMaxChars = 20_000;
 const outputLineMaxChars = 12_000;
+const ansiEscapePattern = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function forwardRunTranscriptLine(
   label: string,
@@ -240,14 +241,16 @@ export async function runSkipprJson<T>(
   let stderr = "";
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-    forwardRunTranscriptLine("skippr-json", "json-cli", chunk, "stdout");
+    const clean = stripAnsi(chunk);
+    stdout += clean;
+    forwardRunTranscriptLine("skippr-json", "json-cli", clean, "stdout");
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-    forwardRunTranscriptLine("skippr-json", "json-cli", chunk, "stderr");
-    const line = compactOutputLine(chunk.trimEnd());
+    const clean = stripAnsi(chunk);
+    stderr += clean;
+    forwardRunTranscriptLine("skippr-json", "json-cli", clean, "stderr");
+    const line = compactOutputLine(clean.trimEnd());
     if (line) {
       output.info(line);
     }
@@ -319,7 +322,7 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
 
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    stderrBuffer = consumeLines(stderrBuffer + chunk, (line) => {
+    stderrBuffer = consumeLines(stderrBuffer + stripAnsi(chunk), (line) => {
       forwardRunTranscriptLine(label, options.kind, line, "stderr");
       if (line.trim()) {
         lastErrorLine = line.trim();
@@ -366,7 +369,9 @@ export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunne
         elapsedMs: Date.now() - startedAt,
         lastEvent,
         errorDetail:
-          code === 0 ? undefined : enrichCargoFailureDetail(lastEvent?.error ?? lastErrorLine, stderrBuffer)
+          code === 0
+            ? undefined
+            : enrichCargoFailureDetail(lastEvent?.error ?? lastEvent?.failure_summary ?? lastErrorLine, stderrBuffer)
       });
     });
   });
@@ -510,7 +515,7 @@ function buildRunArgs(options: SkipprRunOptions): string[] {
 }
 
 function modelDbtOutputPath(options: SkipprRunOptions): string {
-  return path.join(skipprProjectRoot(options.configPath, options.cwd), "dbt", options.pipeline ?? "default");
+  return path.join(skipprProjectRoot(options.configPath, options.cwd), options.pipeline ?? "default", "dbt");
 }
 
 function labelForRun(options: SkipprRunOptions): string {
@@ -530,16 +535,20 @@ function labelForRun(options: SkipprRunOptions): string {
 }
 
 function compactTranscriptLine(line: string): string {
-  return clipText(scrubLargeEmbeddedData(line), transcriptLineMaxChars);
+  return clipText(scrubLargeEmbeddedData(stripAnsi(line)), transcriptLineMaxChars);
 }
 
 function compactOutputLine(line: string): string | undefined {
-  const scrubbed = scrubLargeEmbeddedData(line.trimEnd());
+  const scrubbed = scrubLargeEmbeddedData(stripAnsi(line.trimEnd()));
   const summary = summarizeJsonLine(scrubbed);
   if (summary === null) {
     return undefined;
   }
   return clipText(summary ?? scrubbed, outputLineMaxChars);
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(ansiEscapePattern, "");
 }
 
 function summarizeJsonLine(line: string): string | undefined | null {
@@ -650,16 +659,18 @@ function runCommand(
   const child = spawn(command, args, cwd ? { cwd, env: spawnEnv } : { env: spawnEnv });
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
-    forwardRunTranscriptLine(`${command}`, "shell", chunk, "stdout");
-    const line = compactOutputLine(chunk.trimEnd());
+    const clean = stripAnsi(chunk);
+    forwardRunTranscriptLine(`${command}`, "shell", clean, "stdout");
+    const line = compactOutputLine(clean.trimEnd());
     if (line) {
       output.info(line);
     }
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    forwardRunTranscriptLine(`${command}`, "shell", chunk, "stderr");
-    const line = compactOutputLine(chunk.trimEnd());
+    const clean = stripAnsi(chunk);
+    forwardRunTranscriptLine(`${command}`, "shell", clean, "stderr");
+    const line = compactOutputLine(clean.trimEnd());
     if (line) {
       output.error(line);
     }
