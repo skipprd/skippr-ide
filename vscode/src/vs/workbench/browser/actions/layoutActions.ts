@@ -35,6 +35,7 @@ import { MenuSettings, TitlebarStyle } from '../../../platform/window/common/win
 import { IPreferencesService } from '../../services/preferences/common/preferences.js';
 import { QuickInputAlignmentContextKey } from '../../../platform/quickinput/browser/quickInput.js';
 import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
+import { playSkipprFirstSyncConfetti } from '../skippr/firstSyncConfetti.js';
 
 // Register Icons
 const menubarIcon = registerIcon('menuBar', Codicon.layoutMenubar, localize('menuBarIcon', "Represents the menu bar"));
@@ -517,6 +518,19 @@ registerAction2(class extends Action2 {
 		if (container) {
 			viewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.AuxiliaryBar, undefined, 'skippr.forceSchemaSidebar');
 		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.playFirstSyncConfetti',
+			title: localize2('skipprPlayFirstSyncConfetti', "Play Skippr First Sync Confetti"),
+		});
+	}
+
+	run(): void {
+		playSkipprFirstSyncConfetti(mainWindow);
 	}
 });
 

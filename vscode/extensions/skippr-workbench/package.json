@@ -213,6 +213,11 @@
     "viewsContainers": {
       "activitybar": [
         {
+          "id": "skipprConnectionsActivity",
+          "title": "Connections",
+          "icon": "media/plug.svg"
+        },
+        {
           "id": "skipprLineageActivity",
           "title": "Lineage",
           "icon": "media/lineage-graph.svg"
@@ -237,6 +242,14 @@
       ]
     },
     "views": {
+      "skipprConnectionsActivity": [
+        {
+          "id": "skippr.connections",
+          "name": "Connections",
+          "type": "webview",
+          "order": 1
+        }
+      ],
       "skipprLineageActivity": [
         {
           "id": "skippr.lineageLaunch",
@@ -677,6 +690,11 @@
           "type": "string",
           "default": "",
           "description": "Default pipeline for Skippr runs, debug launch configs (${config:skippr.defaultPipeline}), and gutter Run on skippr.yml."
+        },
+        "skippr.celebrateFirstSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a full-window confetti animation the first time each pipeline emits sync_start."
         },
         "skippr.logLevel": {
           "type": "string",

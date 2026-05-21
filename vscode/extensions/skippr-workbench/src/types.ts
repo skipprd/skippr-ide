@@ -262,6 +262,39 @@ export interface SkipprConfigShowResult {
   sources: string[];
   sinks: string[];
   schema_sinks: string[];
+  connections?: SkipprConfigConnections;
+}
+
+export interface SkipprConfigConnections {
+  sources: SkipprConfigConnection[];
+  sinks: SkipprConfigConnection[];
+  schema_sinks: SkipprConfigConnection[];
+}
+
+export interface SkipprConfigConnection {
+  name: string;
+  provider?: string;
+  label: string;
+  fields: SkipprConfigConnectionField[];
+  pipelines: string[];
+  schema_sink?: string;
+  linked_sinks: string[];
+  supports_sql: boolean;
+}
+
+export interface SkipprConfigConnectionField {
+  name: string;
+  value: string;
+  secret: boolean;
+}
+
+export interface SkipprConnectionsPanelPayload {
+  type: "connections";
+  status: "idle" | "loading" | "success" | "error";
+  configPath?: string;
+  workspace?: string;
+  connections?: SkipprConfigConnections;
+  error?: string;
 }
 
 export interface SkipprFieldSchema {

@@ -387,4 +387,52 @@ chatSetupCssSource = chatSetupCssSource.replace(
 `, "\n");
 writeFileSync(chatSetupCssPath, chatSetupCssSource, "utf8");
 
+const layoutActionsPath = path.join(vscodeDir, "src", "vs", "workbench", "browser", "actions", "layoutActions.ts");
+let layoutActionsSource = readFileSync(layoutActionsPath, "utf8");
+const firstSyncConfettiImport = "import { playSkipprFirstSyncConfetti } from '../skippr/firstSyncConfetti.js';";
+if (!layoutActionsSource.includes(firstSyncConfettiImport)) {
+  layoutActionsSource = layoutActionsSource.replace(
+    "import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';",
+    `import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';\n${firstSyncConfettiImport}`
+  );
+}
+const firstSyncConfettiActionNeedle = "skippr.workbench.playFirstSyncConfetti";
+if (!layoutActionsSource.includes(firstSyncConfettiActionNeedle)) {
+  const forceSchemaSidebarBlock = `registerAction2(class extends Action2 {
+\tconstructor() {
+\t\tsuper({
+\t\t\tid: 'skippr.workbench.forceSchemaSidebar',
+\t\t\ttitle: localize2('skipprForceSchemaSidebar', "Force Skippr Schema Sidebar"),
+\t\t});
+\t}
+
+\trun(accessor: ServicesAccessor): void {
+\t\tconst viewDescriptorService = accessor.get(IViewDescriptorService);
+\t\tconst container = viewDescriptorService.getViewContainerById('skippr.schema.sidebar');
+\t\tif (container) {
+\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.AuxiliaryBar, undefined, 'skippr.forceSchemaSidebar');
+\t\t}
+\t}
+});`;
+  const firstSyncConfettiBlock = `${forceSchemaSidebarBlock}
+
+registerAction2(class extends Action2 {
+\tconstructor() {
+\t\tsuper({
+\t\t\tid: 'skippr.workbench.playFirstSyncConfetti',
+\t\t\ttitle: localize2('skipprPlayFirstSyncConfetti', "Play Skippr First Sync Confetti"),
+\t\t});
+\t}
+
+\trun(): void {
+\t\tplaySkipprFirstSyncConfetti(mainWindow);
+\t}
+});`;
+  if (!layoutActionsSource.includes(forceSchemaSidebarBlock)) {
+    throw new Error("layoutActions.ts forceSchemaSidebar block not found; cannot inject first-sync confetti action.");
+  }
+  layoutActionsSource = layoutActionsSource.replace(forceSchemaSidebarBlock, firstSyncConfettiBlock);
+}
+writeFileSync(layoutActionsPath, layoutActionsSource, "utf8");
+
 console.log("Skippr overlay applied successfully.");
