@@ -48,6 +48,7 @@ import {
   SkipprQueryData,
   SkipprQueryResultsPanelPayload
 } from "./skipprQueryResultsPanelHtml";
+import { renderSkipprLineagePanelHtml, SkipprLineagePanelPayload } from "./skipprLineagePanelHtml";
 import {
   compileDbtSqlForQuery,
   detectDbtSqlFile,
@@ -69,6 +70,7 @@ const SKIPPR_QUERY_RESULTS_VIEW_ID = "skippr.queryResults";
 const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
 const SKIPPR_SCHEMA_VIEW_ID = "skippr.schemaView";
 const SKIPPR_SCHEMA_CONTAINER_ID = "skippr.schema.sidebar";
+const SKIPPR_LINEAGE_LAUNCH_VIEW_ID = "skippr.lineageLaunch";
 const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
 const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
 
@@ -1049,6 +1051,41 @@ function registerSkipprSchemaView(context: vscode.ExtensionContext): void {
   );
 }
 
+function renderLineageLaunchHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+  <style>
+    body { margin: 0; padding: 12px; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: 12px var(--vscode-font-family); }
+    h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+    p { margin: 0 0 12px; color: var(--vscode-descriptionForeground); line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <h2>Lineage</h2>
+  <p>Opening the lineage graph.</p>
+</body>
+</html>`;
+}
+
+function registerSkipprLineageLaunchView(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SKIPPR_LINEAGE_LAUNCH_VIEW_ID,
+      {
+        resolveWebviewView(webviewView: vscode.WebviewView): void {
+          webviewView.webview.options = { enableScripts: true };
+          webviewView.webview.html = renderLineageLaunchHtml();
+          void vscode.commands.executeCommand("skippr.open.lineage");
+        }
+      },
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
+}
+
 function registerSkipprQueryResultsView(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -1702,6 +1739,12 @@ interface SkipprQueryContext {
   pipeline: string;
 }
 
+interface SkipprLineageContext {
+  cliPath: string;
+  configPath: string;
+  pipeline?: string;
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -1825,6 +1868,164 @@ async function resolveSqlQueryContextQuiet(output: vscode.LogOutputChannel): Pro
     return undefined;
   }
   return { cliPath, configPath, pipeline };
+}
+
+interface SkipprLineageCliResult {
+  ok?: boolean;
+  pipeline?: string;
+  graph?: SkipprLineagePanelPayload["graph"];
+  node_count?: number;
+  edge_count?: number;
+  diagnostic_count?: number;
+  error?: string;
+}
+
+let activeLineagePanel: vscode.WebviewPanel | undefined;
+let activeLineageContext: SkipprLineageContext | undefined;
+
+function lineageBrandLogoUris(webview: vscode.Webview, extensionUri: vscode.Uri): Record<string, string> {
+  const brandDir = vscode.Uri.joinPath(extensionUri, "media", "lineage-brands");
+  return {
+    s3: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "s3.svg")).toString(),
+    snowflake: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "snowflake.svg")).toString()
+  };
+}
+
+function postLineagePanel(payload: SkipprLineagePanelPayload): void {
+  void activeLineagePanel?.webview.postMessage(payload);
+}
+
+function payloadFromLineageResult(
+  result: SkipprLineageCliResult,
+  fallback: Pick<SkipprLineagePanelPayload, "pipeline">
+): SkipprLineagePanelPayload {
+  return {
+    type: "lineage",
+    status: result.ok === false ? "error" : "success",
+    pipeline: result.pipeline ?? fallback.pipeline,
+    graph: result.graph,
+    error: result.error
+  };
+}
+
+async function runLineageCommand(
+  ctx: SkipprLineageContext,
+  output: vscode.LogOutputChannel,
+  command: "graph" | "refresh" | "import-query-history"
+): Promise<SkipprLineagePanelPayload> {
+  if (command !== "graph" && !ctx.pipeline) {
+    return {
+      type: "lineage",
+      status: "error",
+      pipeline: "all pipelines",
+      error: "Choose a specific pipeline before refreshing lineage or importing query history."
+    };
+  }
+  const args = ["--config", ctx.configPath, "--log", getLogLevel(), "lineage", command];
+  if (ctx.pipeline) {
+    args.push("--pipeline", ctx.pipeline);
+  }
+  args.push("--output", "json");
+  const result = await runSkipprJson<SkipprLineageCliResult>(
+    ctx.cliPath,
+    args,
+    getConfigCwd(ctx.configPath),
+    output,
+    skipprSpawnEnv(ctx.configPath, ctx.pipeline),
+    ctx.configPath
+  );
+  if (!result.value) {
+    return {
+      type: "lineage",
+      status: "error",
+      pipeline: ctx.pipeline ?? "all pipelines",
+      error: result.stdout || "Lineage command failed before producing JSON output."
+    };
+  }
+  return payloadFromLineageResult(result.value, { pipeline: ctx.pipeline ?? "all pipelines" });
+}
+
+async function resolveLineageContext(
+  output: vscode.LogOutputChannel,
+  requested?: { configPath?: string; pipeline?: string }
+): Promise<SkipprLineageContext | undefined> {
+  const configPath = requested?.configPath?.trim() || activeConfigPath || (await chooseActiveConfig(output));
+  if (!configPath) {
+    vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
+    return undefined;
+  }
+  if (!isWorkspaceRootConfigPath(configPath)) {
+    vscode.window.showWarningMessage("Skippr lineage requires skippr.yml or skippr.yaml at the open workspace root.");
+    return undefined;
+  }
+  const cliPath = await resolveCliOrOfferInstall(output);
+  if (!cliPath) {
+    return undefined;
+  }
+  return { cliPath, configPath, pipeline: requested?.pipeline?.trim() || undefined };
+}
+
+async function openLineagePanel(
+  context: vscode.ExtensionContext,
+  output: vscode.LogOutputChannel,
+  requested?: { configPath?: string; pipeline?: string }
+): Promise<void> {
+  const ctx = await resolveLineageContext(output, requested);
+  if (!ctx) {
+    return;
+  }
+  activeLineageContext = ctx;
+  if (activeLineagePanel) {
+    activeLineagePanel.reveal(vscode.ViewColumn.Active);
+  } else {
+    activeLineagePanel = vscode.window.createWebviewPanel(
+      "skippr.lineage",
+      "Skippr Lineage",
+      vscode.ViewColumn.Active,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")]
+      }
+    );
+    activeLineagePanel.webview.html = renderSkipprLineagePanelHtml({
+      cspSource: activeLineagePanel.webview.cspSource,
+      brandLogoUris: lineageBrandLogoUris(activeLineagePanel.webview, context.extensionUri)
+    });
+    activeLineagePanel.webview.onDidReceiveMessage((message: { command?: string }) => {
+      if (message.command === "refresh") {
+        void refreshLineagePanel(output, "refresh");
+      } else if (message.command === "importHistory") {
+        void refreshLineagePanel(output, "import-query-history");
+      }
+    });
+    activeLineagePanel.onDidDispose(() => {
+      activeLineagePanel = undefined;
+      activeLineageContext = undefined;
+    });
+  }
+  await refreshLineagePanel(output, "graph");
+}
+
+async function refreshLineagePanel(
+  output: vscode.LogOutputChannel,
+  command: "graph" | "refresh" | "import-query-history"
+): Promise<void> {
+  const ctx = activeLineageContext;
+  if (!ctx) {
+    return;
+  }
+  postLineagePanel({
+    type: "lineage",
+    status: "running",
+    pipeline: ctx.pipeline
+  });
+  const payload = await runLineageCommand(ctx, output, command);
+  postLineagePanel(payload);
+  if (command !== "graph" && payload.status === "success") {
+    const graphPayload = await runLineageCommand(ctx, output, "graph");
+    postLineagePanel(graphPayload);
+  }
 }
 
 function activeSqlDocumentText(selectionOnly: boolean): string | undefined {
@@ -2262,6 +2463,7 @@ async function runVectorIngestOnOpen(
 
 async function runLensPipelineCommand(
   command: SkipprPipelineRunCommand,
+  context: vscode.ExtensionContext,
   output: vscode.LogOutputChannel,
   statusItem: vscode.StatusBarItem
 ): Promise<void> {
@@ -2270,13 +2472,14 @@ async function runLensPipelineCommand(
     vscode.window.showErrorMessage("Skippr: no pipeline run context. Click a run action on a pipeline in skippr.yml.");
     return;
   }
-  await runLensPipelineWithArgs(ctx.configPath, ctx.pipeline, command, output, statusItem);
+  await runLensPipelineWithArgs(ctx.configPath, ctx.pipeline, command, context, output, statusItem);
 }
 
 async function runLensPipelineWithArgs(
   configFsPath: unknown,
   pipeline: unknown,
   command: unknown,
+  context: vscode.ExtensionContext,
   output: vscode.LogOutputChannel,
   statusItem: vscode.StatusBarItem
 ): Promise<void> {
@@ -2285,8 +2488,15 @@ async function runLensPipelineWithArgs(
     return;
   }
   const cmd = command as SkipprPipelineRunCommand;
-  if (cmd !== "discover" && cmd !== "sync" && cmd !== "model" && cmd !== "doctor") {
+  if (cmd !== "discover" && cmd !== "sync" && cmd !== "model" && cmd !== "doctor" && cmd !== "lineage") {
     vscode.window.showErrorMessage("Skippr: unknown run action.");
+    return;
+  }
+  if (cmd === "lineage") {
+    await openLineagePanel(context, output, {
+      configPath: configFsPath.trim(),
+      pipeline: pipeline.trim()
+    });
     return;
   }
   const wsExtra = vscode.workspace.getConfiguration().get<string>(runExtraArgsKey, "").trim();
@@ -2849,7 +3059,6 @@ function renderPanelHtml(payload: SkipprPanelPayload, session?: AuthSession): st
     .map((resource) => `<li><strong>${resource.label}</strong><br /><span>${resource.path}</span></li>`)
     .join("");
   const catalog = payload.catalog.map((entry) => `<li>${entry.name} (${entry.owner})</li>`).join("");
-  const lineage = payload.lineage.edges.map((edge) => `${edge.from} -> ${edge.to}`).join("<br />");
   const diagnostics = payload.diagnostics.map((diagnostic) => `<li>${diagnostic}</li>`).join("");
   const addedColumns = payload.diff.after.filter((column) => !payload.diff.before.includes(column)).join(", ");
   const loginState = session ? `Signed in as ${session.email}` : "Not signed in";
@@ -2895,7 +3104,6 @@ function renderPanelHtml(payload: SkipprPanelPayload, session?: AuthSession): st
     </main>
     <aside class="pane">
       <div class="section"><div class="title">Catalog</div><ul>${catalog}</ul></div>
-      <div class="section"><div class="title">Lineage</div><div>${lineage || "No edges."}</div></div>
       <div class="section"><div class="title">Agent Debug Logs</div><ul>${diagnostics}</ul></div>
     </aside>
   </div>
@@ -3244,6 +3452,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID, "schema");
   registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters");
   registerSkipprSchemaView(context);
+  registerSkipprLineageLaunchView(context);
   registerSkipprQueryResultsView(context);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   const authProvider = new SkipprAuthenticationProvider(context, statusItem);
@@ -3546,12 +3755,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("skippr.run.pickPipelineAction", async (configFsPath: unknown, pipeline: unknown, line: unknown) => {
       await runPickPipelineAction(configFsPath, pipeline, line, output, runStatusItem);
     }),
-    vscode.commands.registerCommand("skippr.run.lens.discover", () => runLensPipelineCommand("discover", output, runStatusItem)),
-    vscode.commands.registerCommand("skippr.run.lens.sync", () => runLensPipelineCommand("sync", output, runStatusItem)),
-    vscode.commands.registerCommand("skippr.run.lens.model", () => runLensPipelineCommand("model", output, runStatusItem)),
-    vscode.commands.registerCommand("skippr.run.lens.doctor", () => runLensPipelineCommand("doctor", output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.discover", () => runLensPipelineCommand("discover", context, output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.sync", () => runLensPipelineCommand("sync", context, output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.model", () => runLensPipelineCommand("model", context, output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.doctor", () => runLensPipelineCommand("doctor", context, output, runStatusItem)),
+    vscode.commands.registerCommand("skippr.run.lens.lineage", () => runLensPipelineCommand("lineage", context, output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lensWithArgs", (configFsPath: unknown, pipeline: unknown, command: unknown) =>
-      runLensPipelineWithArgs(configFsPath, pipeline, command, output, runStatusItem)
+      runLensPipelineWithArgs(configFsPath, pipeline, command, context, output, runStatusItem)
     ),
     vscode.languages.registerCodeLensProvider(
       skipprConfigDocumentSelector,
@@ -3606,9 +3816,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   for (const panel of panelSpecs) {
     context.subscriptions.push(
-      vscode.commands.registerCommand(panel.command, async () => {
+      vscode.commands.registerCommand(panel.command, async (args?: unknown) => {
         if (panel.id === "skippr.model") {
           await openModelWorkflowInAgentChat(output, runStatusItem);
+          return;
+        }
+        if (panel.id === "skippr.lineage") {
+          const lineageArgs = args as { configPath?: unknown; pipeline?: unknown } | undefined;
+          await openLineagePanel(context, output, {
+            configPath: typeof lineageArgs?.configPath === "string" ? lineageArgs.configPath : undefined,
+            pipeline: typeof lineageArgs?.pipeline === "string" ? lineageArgs.pipeline : undefined
+          });
           return;
         }
         await openPanel(context, panel.id, panel.name, statusItem, authProvider);

@@ -33,18 +33,12 @@ export interface SchemaDiff {
   after: string[];
 }
 
-export interface LineageGraph {
-  nodes: Array<{ id: string; label: string; type: "source" | "model" | "table" }>;
-  edges: Array<{ from: string; to: string }>;
-}
-
 export interface SkipprPanelPayload {
   panelId: SkipprPanelId;
   panelName: SkipprPanelName;
   resources: ResourceNode[];
   catalog: CatalogEntry[];
   diff: SchemaDiff;
-  lineage: LineageGraph;
   diagnostics: string[];
   settings: ConnectionSettings;
 }

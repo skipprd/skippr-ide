@@ -124,6 +124,11 @@
         "icon": "$(pass)"
       },
       {
+        "command": "skippr.run.lens.lineage",
+        "title": "Lineage",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
         "command": "skippr.run.lensWithArgs",
         "title": "Skippr: Run pipeline action"
       },
@@ -206,6 +211,13 @@
       }
     ],
     "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "skipprLineageActivity",
+          "title": "Lineage",
+          "icon": "media/lineage-graph.svg"
+        }
+      ],
       "auxiliarybar": [
         {
           "id": "skippr.schema.sidebar",
@@ -237,6 +249,14 @@
       ]
     },
     "views": {
+      "skipprLineageActivity": [
+        {
+          "id": "skippr.lineageLaunch",
+          "name": "Lineage",
+          "type": "webview",
+          "order": 1
+        }
+      ],
       "skippr.schema.sidebar": [
         {
           "id": "skippr.schemaView",
@@ -320,6 +340,10 @@
         {
           "command": "skippr.run.lens.doctor",
           "group": "1@4"
+        },
+        {
+          "command": "skippr.run.lens.lineage",
+          "group": "1@5"
         }
       ],
       "skippr.debug.toolbar": [
@@ -395,6 +419,10 @@
         },
         {
           "command": "skippr.run.lens.doctor",
+          "when": "false"
+        },
+        {
+          "command": "skippr.run.lens.lineage",
           "when": "false"
         },
         {

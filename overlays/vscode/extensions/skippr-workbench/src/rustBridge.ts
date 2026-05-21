@@ -17,13 +17,6 @@ function fallbackPayload(
     resources: [{ id: "fallback", label: "fallback_resource", kind: "source", path: "sources/fallback.yml" }],
     catalog: [{ id: "fallback", name: "fallback_table", owner: "skippr", tags: ["mock"], updatedAt: "2026-05-13" }],
     diff: { model: "fallback_model", before: ["id"], after: ["id", "new_column"] },
-    lineage: {
-      nodes: [
-        { id: "a", label: "fallback_source", type: "source" },
-        { id: "b", label: "fallback_model", type: "model" }
-      ],
-      edges: [{ from: "a", to: "b" }]
-    },
     diagnostics: [`Rust bridge fallback: ${reason}`],
     settings
   };

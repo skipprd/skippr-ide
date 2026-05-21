@@ -50,35 +50,12 @@ struct SchemaDiff {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LineageNode {
-    id: String,
-    label: String,
-    r#type: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LineageEdge {
-    from: String,
-    to: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LineageGraph {
-    nodes: Vec<LineageNode>,
-    edges: Vec<LineageEdge>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct PanelData {
     panel_id: String,
     panel_name: String,
     resources: Vec<ResourceNode>,
     catalog: Vec<CatalogEntry>,
     diff: SchemaDiff,
-    lineage: LineageGraph,
     diagnostics: Vec<String>,
     settings: ConnectionSettings,
 }
@@ -168,35 +145,6 @@ fn main() {
                 "ended_at".to_string(),
                 "duration_seconds".to_string(),
                 "station_region".to_string(),
-            ],
-        },
-        lineage: LineageGraph {
-            nodes: vec![
-                LineageNode {
-                    id: "n1".to_string(),
-                    label: "bike_hire_raw".to_string(),
-                    r#type: "source".to_string(),
-                },
-                LineageNode {
-                    id: "n2".to_string(),
-                    label: "bike_hire_model".to_string(),
-                    r#type: "model".to_string(),
-                },
-                LineageNode {
-                    id: "n3".to_string(),
-                    label: "bike_hire_daily".to_string(),
-                    r#type: "table".to_string(),
-                },
-            ],
-            edges: vec![
-                LineageEdge {
-                    from: "n1".to_string(),
-                    to: "n2".to_string(),
-                },
-                LineageEdge {
-                    from: "n2".to_string(),
-                    to: "n3".to_string(),
-                },
             ],
         },
         diagnostics,
