@@ -22,11 +22,13 @@ import {
   skipprConfigDocumentSelector
 } from "./skipprPipelineCodeLens";
 import type { SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
+import { getSkipprPipelineLensTarget } from "./skipprPipelineLensContext";
 import { openSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
 import { parseShellArgs } from "./skipprCliArgs";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
+import { mergeSkipprSpawnEnvWithLocalRuntimePlugins } from "./skipprLocalRuntimePlugins";
 import { registerSkipprConfigDiagnostics } from "./skipprConfigDiagnostics";
 import {
   ConnectionSettings,
@@ -42,7 +44,6 @@ import { clearSkipprCliCredentialsFile, writeSkipprCliCredentialsFile } from "./
 import { runEmailOtpAuthQuickInput } from "./skipprOverlayUi";
 import { renderSkipprRunStatusPanelHtml } from "./skipprRunStatusPanelHtml";
 import { renderSkipprRunDetailsPanelHtml, SkipprRunDetailsViewKind } from "./skipprRunDetailsPanelHtml";
-import { renderSkipprSchemaPanelHtml } from "./skipprSchemaPanelHtml";
 import {
   renderSkipprQueryResultsPanelHtml,
   SkipprQueryChart,
@@ -64,13 +65,10 @@ import { SkipprObservedRun, SkipprObservedRunStatus, SkipprRunStateStore } from 
 
 const SKIPPR_RUN_STATUS_VIEW_ID = "skippr.runStatus";
 const SKIPPR_RUN_TIMELINE_VIEW_ID = "skippr.runTimeline";
-const SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID = "skippr.runSchemaChanges";
 const SKIPPR_RUN_DEADLETTERS_VIEW_ID = "skippr.runDeadletters";
 const SKIPPR_RUN_TIMELINE_CONTAINER_ID = "skippr.run.timeline.panel";
 const SKIPPR_QUERY_RESULTS_VIEW_ID = "skippr.queryResults";
 const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
-const SKIPPR_SCHEMA_VIEW_ID = "skippr.schemaView";
-const SKIPPR_SCHEMA_CONTAINER_ID = "skippr.schema.sidebar";
 const SKIPPR_LINEAGE_LAUNCH_VIEW_ID = "skippr.lineageLaunch";
 const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
 const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
@@ -344,9 +342,12 @@ function getLogLevel(): string {
   return vscode.workspace.getConfiguration().get<string>(logLevelKey, "info").trim() || "info";
 }
 
-function skipprSpawnEnv(configPath: string | undefined, pipeline: string | undefined): NodeJS.ProcessEnv {
-  const folder = workspaceFolderForConfigPath(configPath);
-  return mergeSkipprSpawnEnv(process.env, folder, pipeline, configPath);
+async function skipprSpawnEnv(
+  configPath: string | undefined,
+  pipeline: string | undefined,
+  output?: vscode.LogOutputChannel
+): Promise<NodeJS.ProcessEnv> {
+  return mergeSkipprSpawnEnvWithLocalRuntimePlugins(process.env, configPath, pipeline, output);
 }
 
 const SKIPPR_RUN_TOOLBAR_CONTEXT_KEY = "skippr.runToolbarInTitle";
@@ -530,7 +531,7 @@ async function getCachedConfigShow(
         ["--config", trimmed, "config", "show"],
         getConfigCwd(trimmed),
         output,
-        skipprSpawnEnv(trimmed, undefined),
+        await skipprSpawnEnv(trimmed, undefined, output),
         trimmed
       );
       const value = result.value;
@@ -572,7 +573,7 @@ async function fetchTestSelectOptionsForRunDebug(
     ["--config", cfg, "test", "list", "--pipeline", pipe, "--output", "json"],
     getConfigCwd(cfg),
     output,
-    skipprSpawnEnv(cfg, pipe),
+    await skipprSpawnEnv(cfg, pipe, output),
     cfg
   );
   const rows = result.value?.tests;
@@ -797,7 +798,6 @@ interface RunStatusPanelPayload {
 
 let runStatusWebviewView: vscode.WebviewView | undefined;
 const runDetailsWebviewViews = new Map<string, vscode.WebviewView>();
-let schemaWebviewView: vscode.WebviewView | undefined;
 let queryResultsWebviewView: vscode.WebviewView | undefined;
 let observabilityStore: SkipprRunStateStore | undefined;
 let runHistory: SkipprRunHistory | undefined;
@@ -843,7 +843,6 @@ function postObservability(): void {
   for (const webviewView of runDetailsWebviewViews.values()) {
     void webviewView.webview.postMessage(snapshot);
   }
-  void schemaWebviewView?.webview.postMessage(snapshot);
 }
 
 function schedulePostObservability(): void {
@@ -930,13 +929,6 @@ async function showRunDetailsPanel(): Promise<void> {
   await runWorkbenchCommand("skippr.workbench.forceRunPanels");
   await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_RUN_TIMELINE_CONTAINER_ID}`);
   await runWorkbenchCommand(`${SKIPPR_RUN_TIMELINE_VIEW_ID}.focus`);
-  postObservability();
-}
-
-async function showSchemaPanel(): Promise<void> {
-  await runWorkbenchCommand("skippr.workbench.forceSchemaSidebar");
-  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_SCHEMA_CONTAINER_ID}`);
-  await runWorkbenchCommand(`${SKIPPR_SCHEMA_VIEW_ID}.focus`);
   postObservability();
 }
 
@@ -1031,56 +1023,155 @@ function registerSkipprRunDetailsView(
   );
 }
 
-function registerSkipprSchemaView(context: vscode.ExtensionContext): void {
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(
-      SKIPPR_SCHEMA_VIEW_ID,
-      {
-        resolveWebviewView(webviewView: vscode.WebviewView): void {
-          webviewView.webview.options = { enableScripts: true };
-          webviewView.webview.html = renderSkipprSchemaPanelHtml();
-          schemaWebviewView = webviewView;
-          postObservability();
-          webviewView.onDidDispose(() => {
-            if (schemaWebviewView === webviewView) {
-              schemaWebviewView = undefined;
-            }
-          });
-        }
-      },
-      { webviewOptions: { retainContextWhenHidden: true } }
-    )
-  );
-}
-
-function renderLineageLaunchHtml(): string {
+function renderLineageLaunchHtml(payload: {
+  configPath?: string;
+  pipelines: string[];
+  error?: string;
+}): string {
+  const configPath = JSON.stringify(payload.configPath || "").replace(/</g, "\\u003c");
+  const pipelines = JSON.stringify(payload.pipelines).replace(/</g, "\\u003c");
+  const error = JSON.stringify(payload.error || "").replace(/</g, "\\u003c");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
   <style>
     body { margin: 0; padding: 12px; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: 12px var(--vscode-font-family); }
     h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+    h3 { margin: 16px 0 8px; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
     p { margin: 0 0 12px; color: var(--vscode-descriptionForeground); line-height: 1.4; }
+    .pipeline-list { display: grid; gap: 6px; }
+    button { all: unset; box-sizing: border-box; display: block; padding: 7px 9px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; cursor: pointer; background: var(--vscode-list-inactiveSelectionBackground, transparent); overflow-wrap: anywhere; }
+    button:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+    .schema-placeholder { padding: 8px 9px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; color: var(--vscode-descriptionForeground); line-height: 1.4; }
+    .schema-fields { display: grid; gap: 3px; margin-top: 8px; }
+    .schema-field { border-radius: 3px; padding: 3px 5px; border: 0; background: transparent; color: var(--vscode-foreground); }
+    .schema-field.highlighted { color: var(--vscode-textLink-foreground); font-weight: 600; }
+    .schema-field.faded { opacity: .55; }
+    .field-loading { display: inline-block; width: 10px; height: 10px; margin-left: 6px; border: 1.5px solid color-mix(in srgb, var(--vscode-descriptionForeground) 35%, transparent); border-top-color: var(--vscode-textLink-foreground); border-radius: 50%; animation: lineageSpin .8s linear infinite; vertical-align: -1px; }
+    .empty, .error { color: var(--vscode-descriptionForeground); line-height: 1.4; }
+    .error { color: var(--vscode-errorForeground); }
+    @keyframes lineageSpin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <h2>Lineage</h2>
-  <p>Opening the lineage graph.</p>
+  <h3>Pipelines</h3>
+  <p>Select a pipeline to open its lineage graph.</p>
+  <div id="root"></div>
+  <h3>Schema</h3>
+  <div class="schema-placeholder">Select a lineage node from the graph to view its schema.</div>
+  <script>
+    (function () {
+      const vscode = acquireVsCodeApi();
+      const root = document.getElementById("root");
+      const configPath = ${configPath};
+      const pipelines = ${pipelines};
+      const error = ${error};
+      function esc(v) { return String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch])); }
+      function schemaHtml(schema) {
+        const node = schema && schema.node;
+        const fields = Array.isArray(schema && schema.fields) ? schema.fields : [];
+        if (!node) {
+          return '<div class="schema-placeholder">Select a lineage node from the graph to view its schema.</div>';
+        }
+        if (!fields.length) {
+          return '<div class="schema-placeholder">No schema fields found for ' + esc(node.label || node.id) + '.</div>';
+        }
+        const rows = fields.map(field => '<button class="schema-field ' + esc(field.state || "") + '" data-action="selectField" data-asset="' + esc(node.datasetId || "") + '" data-field="' + esc(field.fieldPath || "") + '">' + esc(field.fieldPath) + (field.loading ? '<span class="field-loading"></span>' : '') + '</button>').join("");
+        return '<div class="schema-placeholder"><strong>' + esc(node.label || node.id) + '</strong><div class="schema-fields">' + rows + '</div></div>';
+      }
+      if (error) {
+        root.innerHTML = '<div class="error">' + esc(error) + '</div>';
+      } else if (!pipelines.length) {
+        root.innerHTML = '<div class="empty">No pipelines found in the active skippr.yml.</div>';
+      } else {
+        root.innerHTML = '<div class="pipeline-list">' + pipelines.map(pipeline => '<button data-pipeline="' + esc(pipeline) + '">' + esc(pipeline) + '</button>').join("") + '</div>';
+      }
+      document.addEventListener("click", event => {
+        const target = event.target instanceof Element ? event.target : null;
+        const field = target && target.closest("button[data-action='selectField']");
+        if (field) {
+          field.classList.add("highlighted");
+          if (!field.querySelector(".field-loading")) {
+            field.insertAdjacentHTML("beforeend", '<span class="field-loading"></span>');
+          }
+          vscode.postMessage({
+            command: "selectField",
+            asset: field.getAttribute("data-asset") || "",
+            field: field.getAttribute("data-field") || ""
+          });
+          return;
+        }
+        const pipeline = target && target.closest("button[data-pipeline]");
+        if (!pipeline) { return; }
+        vscode.postMessage({ command: "openPipeline", configPath, pipeline: pipeline.getAttribute("data-pipeline") || "" });
+      });
+      window.addEventListener("message", event => {
+        if (event.data && event.data.command === "selectedNode") {
+          const current = document.querySelector(".schema-placeholder");
+          if (current) {
+            current.outerHTML = schemaHtml(event.data.schema || {});
+          }
+        } else if (event.data && event.data.command === "loadingField") {
+          document.querySelectorAll(".schema-field .field-loading").forEach(node => node.remove());
+          document.querySelectorAll(".schema-field").forEach(node => node.classList.remove("highlighted"));
+          const asset = event.data.asset || "";
+          const fieldPath = event.data.field || "";
+          const match = document.querySelector(".schema-field[data-asset='" + CSS.escape(asset) + "'][data-field='" + CSS.escape(fieldPath) + "']");
+          if (match) {
+            match.classList.add("highlighted");
+            match.insertAdjacentHTML("beforeend", '<span class="field-loading"></span>');
+          }
+        }
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
 
-function registerSkipprLineageLaunchView(context: vscode.ExtensionContext): void {
+function registerSkipprLineageLaunchView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SKIPPR_LINEAGE_LAUNCH_VIEW_ID,
       {
-        resolveWebviewView(webviewView: vscode.WebviewView): void {
+        async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
+          lineageLaunchWebviewView = webviewView;
           webviewView.webview.options = { enableScripts: true };
-          webviewView.webview.html = renderLineageLaunchHtml();
-          void vscode.commands.executeCommand("skippr.open.lineage");
+          const configPath = activeConfigPath || (await chooseActiveConfig(output));
+          let pipelines: string[] = [];
+          let error = "";
+          if (!configPath) {
+            error = "No skippr.yml or skippr.yaml found in the workspace.";
+          } else {
+            const show = await getCachedConfigShow(output, configPath, "offerInstall");
+            pipelines = show?.pipelines ?? [];
+            if (!show?.ok) {
+              error = "Unable to read pipelines from the active Skippr config.";
+            }
+          }
+          webviewView.webview.html = renderLineageLaunchHtml({ configPath, pipelines, error });
+          webviewView.webview.onDidReceiveMessage((message: { command?: string; configPath?: string; pipeline?: string; asset?: string; field?: string }) => {
+            if (message.command === "openPipeline" && message.pipeline?.trim()) {
+              void vscode.commands.executeCommand("skippr.open.lineage", {
+                configPath: message.configPath,
+                pipeline: message.pipeline
+              });
+            } else if (message.command === "selectField") {
+              const asset = typeof message.asset === "string" ? message.asset.trim() : "";
+              const field = typeof message.field === "string" ? message.field.trim() : "";
+              if (asset && field) {
+                void refreshLineagePanel(output, "graph", { asset, field });
+              }
+            }
+          });
+          webviewView.onDidDispose(() => {
+            if (lineageLaunchWebviewView === webviewView) {
+              lineageLaunchWebviewView = undefined;
+            }
+          });
         }
       },
       { webviewOptions: { retainContextWhenHidden: true } }
@@ -1194,7 +1285,7 @@ async function runSkipprDoctor(
     args,
     getConfigCwd(configPath),
     output,
-    skipprSpawnEnv(configPath, undefined),
+    await skipprSpawnEnv(configPath, undefined, output),
     configPath
   );
   const summary = result.value;
@@ -1332,7 +1423,7 @@ async function runSkipprCommand(
     configPath,
     logLevel: requestedLogLevel?.trim() || request?.logLevel?.trim() || getLogLevel(),
     extraArgs: extraCliArgs ?? [],
-    spawnEnv: skipprSpawnEnv(configPath, scopedPipeline)
+    spawnEnv: await skipprSpawnEnv(configPath, scopedPipeline, output)
   };
   const runOptions =
     kind === "sync-all-once"
@@ -1362,7 +1453,6 @@ async function runSkipprCommand(
           scheduleHistorySave(observed);
           if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
             void showRunDetailsPanel();
-            void showSchemaPanel();
           }
         }
       },
@@ -1382,9 +1472,6 @@ async function runSkipprCommand(
     configPath
   });
   void showRunDetailsPanel();
-  if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
-    void showSchemaPanel();
-  }
   const runDisplayName = observedPipeline ?? run.label;
   setRunStatusRunning(statusItem, runDisplayName);
   const result = await run.done;
@@ -1760,6 +1847,11 @@ interface SkipprLineageContext {
   pipeline: string;
 }
 
+interface SkipprLineageFieldFocus {
+  asset: string;
+  field: string;
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -1896,11 +1988,14 @@ interface SkipprLineageCliResult {
 }
 
 let activeLineagePanel: vscode.WebviewPanel | undefined;
+let lineageLaunchWebviewView: vscode.WebviewView | undefined;
 let activeLineageContext: SkipprLineageContext | undefined;
+let activeLineageFieldFocus: SkipprLineageFieldFocus | undefined;
 
 function lineageBrandLogoUris(webview: vscode.Webview, extensionUri: vscode.Uri): Record<string, string> {
   const brandDir = vscode.Uri.joinPath(extensionUri, "media", "lineage-brands");
   return {
+    dbt: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "dbt.png")).toString(),
     file: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "file.svg")).toString(),
     s3: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "s3.svg")).toString(),
     snowflake: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "snowflake.svg")).toString()
@@ -1909,6 +2004,10 @@ function lineageBrandLogoUris(webview: vscode.Webview, extensionUri: vscode.Uri)
 
 function postLineagePanel(payload: SkipprLineagePanelPayload): void {
   void activeLineagePanel?.webview.postMessage(payload);
+}
+
+function postLineageActivity(message: unknown): void {
+  void lineageLaunchWebviewView?.webview.postMessage(message);
 }
 
 function payloadFromLineageResult(
@@ -1927,17 +2026,21 @@ function payloadFromLineageResult(
 async function runLineageCommand(
   ctx: SkipprLineageContext,
   output: vscode.LogOutputChannel,
-  command: "graph" | "refresh" | "import-query-history"
+  command: "graph" | "refresh" | "import-query-history",
+  focus?: SkipprLineageFieldFocus
 ): Promise<SkipprLineagePanelPayload> {
   const args = ["--config", ctx.configPath, "--log", getLogLevel(), "lineage", command];
   args.push("--pipeline", ctx.pipeline);
+  if (command === "graph" && focus?.asset.trim() && focus.field.trim()) {
+    args.push("--asset", focus.asset.trim(), "--field", focus.field.trim());
+  }
   args.push("--output", "json");
   const result = await runSkipprJson<SkipprLineageCliResult>(
     ctx.cliPath,
     args,
     getConfigCwd(ctx.configPath),
     output,
-    skipprSpawnEnv(ctx.configPath, ctx.pipeline),
+    await skipprSpawnEnv(ctx.configPath, ctx.pipeline, output),
     ctx.configPath
   );
   if (!result.value) {
@@ -2000,6 +2103,7 @@ async function openLineagePanel(
     return;
   }
   activeLineageContext = ctx;
+  activeLineageFieldFocus = undefined;
   if (activeLineagePanel) {
     activeLineagePanel.reveal(vscode.ViewColumn.Active);
   } else {
@@ -2017,16 +2121,27 @@ async function openLineagePanel(
       cspSource: activeLineagePanel.webview.cspSource,
       brandLogoUris: lineageBrandLogoUris(activeLineagePanel.webview, context.extensionUri)
     });
-    activeLineagePanel.webview.onDidReceiveMessage((message: { command?: string }) => {
+    activeLineagePanel.webview.onDidReceiveMessage((message: { command?: string; asset?: string; field?: string; schema?: unknown }) => {
       if (message.command === "refresh") {
         void refreshLineagePanel(output, "refresh");
       } else if (message.command === "importHistory") {
         void refreshLineagePanel(output, "import-query-history");
+      } else if (message.command === "clearField") {
+        void refreshLineagePanel(output, "graph");
+      } else if (message.command === "selectField") {
+        const asset = typeof message.asset === "string" ? message.asset.trim() : "";
+        const field = typeof message.field === "string" ? message.field.trim() : "";
+        if (asset && field) {
+          void refreshLineagePanel(output, "graph", { asset, field });
+        }
+      } else if (message.command === "selectedNode") {
+        postLineageActivity({ command: "selectedNode", schema: message.schema });
       }
     });
     activeLineagePanel.onDidDispose(() => {
       activeLineagePanel = undefined;
       activeLineageContext = undefined;
+      activeLineageFieldFocus = undefined;
     });
   }
   await refreshLineagePanel(output, "graph");
@@ -2034,19 +2149,33 @@ async function openLineagePanel(
 
 async function refreshLineagePanel(
   output: vscode.LogOutputChannel,
-  command: "graph" | "refresh" | "import-query-history"
+  command: "graph" | "refresh" | "import-query-history",
+  focus?: SkipprLineageFieldFocus
 ): Promise<void> {
   const ctx = activeLineageContext ? await resolveLineageContext(output, activeLineageContext) : undefined;
   if (!ctx) {
     return;
   }
   activeLineageContext = ctx;
+  if (command === "graph") {
+    activeLineageFieldFocus = focus;
+  } else {
+    activeLineageFieldFocus = undefined;
+  }
   postLineagePanel({
     type: "lineage",
     status: "running",
-    pipeline: ctx.pipeline
+    pipeline: ctx.pipeline,
+    loadingField: command === "graph" && activeLineageFieldFocus ? activeLineageFieldFocus : undefined
   });
-  const payload = await runLineageCommand(ctx, output, command);
+  if (command === "graph" && activeLineageFieldFocus) {
+    postLineageActivity({
+      command: "loadingField",
+      asset: activeLineageFieldFocus.asset,
+      field: activeLineageFieldFocus.field
+    });
+  }
+  const payload = await runLineageCommand(ctx, output, command, activeLineageFieldFocus);
   postLineagePanel(payload);
   if (command !== "graph" && payload.status === "success") {
     const graphPayload = await runLineageCommand(ctx, output, "graph");
@@ -2088,7 +2217,7 @@ async function runWarehouseSqlQuery(
     ["--config", ctx.configPath, "--log", getLogLevel(), "query", "--pipeline", ctx.pipeline, `--sql=${sql}`, "--output", "json"],
     getConfigCwd(ctx.configPath),
     output,
-    skipprSpawnEnv(ctx.configPath, ctx.pipeline),
+    await skipprSpawnEnv(ctx.configPath, ctx.pipeline, output),
     ctx.configPath
   );
   const payload = result.value
@@ -2130,7 +2259,7 @@ async function runDbtDocument(
   const dbtCtx = detected.pipelineFromPath ? { ...ctx, pipeline: detected.pipelineFromPath } : ctx;
   const dbtFilePath = detected.filePath;
   const cwd = getConfigCwd(dbtCtx.configPath);
-  const env = skipprSpawnEnv(dbtCtx.configPath, dbtCtx.pipeline);
+  const env = await skipprSpawnEnv(dbtCtx.configPath, dbtCtx.pipeline, output);
   if (dbtEditorRunMode === "tests") {
     const meta = await probeDbtFileMeta(
       dbtCtx.cliPath,
@@ -2241,7 +2370,7 @@ function scheduleDbtEditorContextRefresh(output: vscode.LogOutputChannel): void 
           detected.filePath,
           getConfigCwd(ctx.configPath),
           output,
-          skipprSpawnEnv(ctx.configPath, pipeline)
+          await skipprSpawnEnv(ctx.configPath, pipeline, output)
         );
       }
     });
@@ -2278,7 +2407,7 @@ async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
       getConfigCwd(ctx.configPath),
       output,
       tokenSource.token,
-      skipprSpawnEnv(ctx.configPath, ctx.pipeline)
+      await skipprSpawnEnv(ctx.configPath, ctx.pipeline, output)
     );
     const finalPayload = (result.lines as unknown[])
       .map((line) => payloadFromAgentJsonLine(line, ctx.pipeline, question))
@@ -2461,7 +2590,7 @@ async function runVectorIngestOnOpen(
           args,
           getConfigCwd(configPath),
           output,
-          skipprSpawnEnv(configPath, "vector_ingest"),
+          await skipprSpawnEnv(configPath, "vector_ingest", output),
           configPath
         );
         progress.report({ message: "Finalizing vector index..." });
@@ -2493,6 +2622,11 @@ async function runLensPipelineCommand(
   output: vscode.LogOutputChannel,
   statusItem: vscode.StatusBarItem
 ): Promise<void> {
+  const lens = getSkipprPipelineLensTarget();
+  if (lens) {
+    await runLensPipelineWithArgs(lens.configPath, lens.pipeline, command, context, output, statusItem);
+    return;
+  }
   const configPath = activeConfigPath || (await chooseActiveConfig(output));
   if (!configPath) {
     vscode.window.showErrorMessage("Skippr: no config path. Click a run action on a pipeline in skippr.yml.");
@@ -2608,7 +2742,7 @@ async function runSkipprTestFromCliPanel(
       cwd,
       output,
       cts.token,
-      skipprSpawnEnv(opts.configPath, opts.pipeline.trim())
+      await skipprSpawnEnv(opts.configPath, opts.pipeline.trim(), output)
     );
     const elapsedMs = Date.now() - testStartedAt;
     const headline = `Test ${opts.pipeline.trim()}`;
@@ -3484,10 +3618,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(observabilityStore);
   registerSkipprRunStatusView(context);
   registerSkipprRunDetailsView(context, SKIPPR_RUN_TIMELINE_VIEW_ID, "timeline");
-  registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_CHANGES_VIEW_ID, "schema");
   registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters");
-  registerSkipprSchemaView(context);
-  registerSkipprLineageLaunchView(context);
   registerSkipprQueryResultsView(context);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   const authProvider = new SkipprAuthenticationProvider(context, statusItem);
@@ -3501,6 +3632,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const output = vscode.window.createOutputChannel("Skippr", { log: true });
   context.subscriptions.push(runStatusItem, output);
+  registerSkipprLineageLaunchView(context, output);
   context.subscriptions.push(
     vscode.commands.registerCommand("skippr.internal.runModelForAgentChat", async (request: AgentModelRunRequest, bridgeDir?: string) => {
       const workspaceRoot = request?.workspaceRoot?.trim() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -3519,7 +3651,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   observabilityStore.onDidChange(() => schedulePostObservability(), undefined, context.subscriptions);
   void runWorkbenchCommand("skippr.workbench.forceRunPanels");
-  void runWorkbenchCommand("skippr.workbench.forceSchemaSidebar");
   await vscode.commands.executeCommand("setContext", SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true);
   await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
   context.subscriptions.push(
@@ -3658,7 +3789,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("skippr.cli.update", async () => {
       const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
-      const result = await updateSkipprCli(cliPath, output, skipprSpawnEnv(undefined, undefined));
+      const result = await updateSkipprCli(
+        cliPath,
+        output,
+        mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(undefined), undefined)
+      );
       if (result.code === 0) {
         vscode.window.showInformationMessage("Skippr CLI updated.");
       } else {
@@ -3670,7 +3805,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!cliPath) {
         return;
       }
-      const result = await showSkipprVersion(cliPath, output, skipprSpawnEnv(undefined, undefined));
+      const result = await showSkipprVersion(
+        cliPath,
+        output,
+        mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(undefined), undefined)
+      );
       if (result.code !== 0) {
         vscode.window.showErrorMessage("Unable to read Skippr CLI version. See Skippr output for details.");
       }

@@ -218,22 +218,10 @@
           "icon": "media/lineage-graph.svg"
         }
       ],
-      "auxiliarybar": [
-        {
-          "id": "skippr.schema.sidebar",
-          "title": "Schema",
-          "icon": "media/skippr.svg"
-        }
-      ],
       "panel": [
         {
           "id": "skippr.run.timeline.panel",
           "title": "Run",
-          "icon": "media/skippr.svg"
-        },
-        {
-          "id": "skippr.run.schema.panel",
-          "title": "Schema Changes",
           "icon": "media/skippr.svg"
         },
         {
@@ -257,14 +245,6 @@
           "order": 1
         }
       ],
-      "skippr.schema.sidebar": [
-        {
-          "id": "skippr.schemaView",
-          "name": "Schema",
-          "type": "webview",
-          "order": 1
-        }
-      ],
       "debug": [
         {
           "id": "skippr.runStatus",
@@ -277,14 +257,6 @@
         {
           "id": "skippr.runTimeline",
           "name": "Run",
-          "type": "webview",
-          "order": 1
-        }
-      ],
-      "skippr.run.schema.panel": [
-        {
-          "id": "skippr.runSchemaChanges",
-          "name": "Schema Changes",
           "type": "webview",
           "order": 1
         }
@@ -690,6 +662,16 @@
           "type": "boolean",
           "default": true,
           "description": "When true, run skippr via `cargo run` from a detected local skipprd repo instead of an installed skippr binary. Turn off to force an installed release binary. Requires CodeArtifact auth (CARGO_REGISTRIES_REACT_CARGO_TOKEN) or a sibling ../react checkout."
+        },
+        "skippr.dev.skipprdRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a local skipprd checkout (defaults to a workspace folder named skipprd or ../skipprd). Also honored via SKIPPRD_ROOT."
+        },
+        "skippr.dev.useLocalRuntimePlugins": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default for local IDE dev), build runtime plugins from the skipprd checkout and set USE_LOCAL_PLUGIN_CODE instead of downloading from install.skippr.io. Requires python3 and a detected skipprd repo."
         },
         "skippr.defaultPipeline": {
           "type": "string",

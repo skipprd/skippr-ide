@@ -1,30 +1,17 @@
 import * as vscode from "vscode";
-import type { SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
+import { setSkipprPipelineLensTarget } from "./skipprPipelineLensContext";
 
 /**
- * Opens a pipeline action picker and forwards the config/pipeline as command args.
- * Keeping the payload on the command avoids a stale module-level "next run" slot.
+ * Opens the Skippr pipeline run submenu beside the code lens (workbench context menu),
+ * not the command palette quick pick.
  */
 export async function openSkipprPipelineRunMenu(
   configPath: string,
   pipeline: string,
   /** 0-based line index from the code lens provider. */
-  _line: number
+  line: number
 ): Promise<void> {
-  const picked = await vscode.window.showQuickPick<
-    vscode.QuickPickItem & { command: SkipprPipelineRunCommand }
-  >(
-    [
-      { label: "Discover", command: "discover" },
-      { label: "Sync Once", command: "sync" },
-      { label: "Model", command: "model" },
-      { label: "Lineage", command: "lineage" },
-      { label: "Doctor", command: "doctor" }
-    ],
-    { title: `Run Skippr: ${pipeline}` }
-  );
-  if (!picked) {
-    return;
-  }
-  await vscode.commands.executeCommand("skippr.run.lensWithArgs", configPath, pipeline, picked.command);
+  setSkipprPipelineLensTarget(configPath.trim(), pipeline.trim());
+  const lineNumber = Number.isFinite(line) ? line + 1 : undefined;
+  await vscode.commands.executeCommand("skippr.showPipelineRunMenu", lineNumber);
 }

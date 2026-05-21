@@ -61,6 +61,18 @@ export function mergeSkipprSpawnEnv(
   return withDbtVirtualEnv({ ...base, ...globalExtra, ...(pipeExtra ?? {}) }, conf, workspaceFolder, configPath);
 }
 
+/** Use locally built skipprd runtime plugin binaries instead of install.skippr.io. */
+export function applyLocalRuntimePluginSpawnVars(
+  env: NodeJS.ProcessEnv,
+  manifestDir: string
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    USE_LOCAL_PLUGIN_CODE: "1",
+    SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: manifestDir
+  };
+}
+
 function withDbtVirtualEnv(
   env: NodeJS.ProcessEnv,
   conf: vscode.WorkspaceConfiguration,

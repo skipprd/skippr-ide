@@ -112,7 +112,7 @@ export function isLocalCargoCli(cliPath: string): boolean {
   return cliPath === localCargoCli;
 }
 
-function useLocalSkipprdFromSettings(): boolean {
+export function useLocalSkipprdFromSettings(): boolean {
   return (
     vscode.workspace.getConfiguration().get<boolean>("skippr.dev.useLocalSkipprd", true) ||
     process.env.SKIPPR_USE_LOCAL_SKIPPRD === "1"
@@ -454,7 +454,7 @@ export function formatCliCommand(cliPath: string, args: string[]): string {
   return buildCliCommand(cliPath, args).join(" ");
 }
 
-function resolveLocalSkipprdManifest(): string | undefined {
+export function resolveLocalSkipprdManifest(): string | undefined {
   const candidates = [
     process.env.SKIPPRD_MANIFEST_PATH,
     ...localSkipprdManifestCandidates()
@@ -462,7 +462,18 @@ function resolveLocalSkipprdManifest(): string | undefined {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
+/** Root of the local skipprd checkout (parent of workspace `Cargo.toml`). */
+export function resolveSkipprdRepoRoot(): string | undefined {
+  const manifest = resolveLocalSkipprdManifest();
+  return manifest ? path.dirname(manifest) : undefined;
+}
+
 function localSkipprdManifestCandidates(): string[] {
+  const settingsRoot = vscode.workspace.getConfiguration().get<string>("skippr.dev.skipprdRoot", "").trim();
+  const configured = process.env.SKIPPRD_ROOT?.trim() || settingsRoot;
+  if (configured) {
+    return [path.resolve(configured, "Cargo.toml")];
+  }
   const workspaceCandidates = (vscode.workspace.workspaceFolders ?? []).flatMap((folder) => [
     path.join(folder.uri.fsPath, "Cargo.toml"),
     path.join(folder.uri.fsPath, "skipprd", "Cargo.toml"),

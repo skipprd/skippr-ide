@@ -5,7 +5,10 @@ import {
   runDbtTestsForRequest,
   type SkipprDbtTestDeps
 } from "./skipprDbtTestController";
-import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
+import {
+  ensureLocalRuntimePluginManifests,
+  spawnEnvWithCachedLocalRuntimePlugins
+} from "./skipprLocalRuntimePlugins";
 import { isSkipprConfigDocument, listPipelineDefinitionLines } from "./skipprPipelineCodeLens";
 
 function removeItemsForFile(controller: vscode.TestController, uri: vscode.Uri): void {
@@ -51,7 +54,7 @@ export function registerSkipprPipelineTestControllers(
     resolveCliPath: deps.resolveCliPath,
     getConfigCwd: deps.getConfigCwd,
     revealSkipprOutput,
-    getSpawnEnv: (ref) => mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(ref.configFsPath), ref.pipeline),
+    getSpawnEnv: (ref) => spawnEnvWithCachedLocalRuntimePlugins(process.env, ref.configFsPath, ref.pipeline),
     getLogLevel: deps.getLogLevel,
     getRunExtraArgsText: deps.getRunExtraArgsText
   };
@@ -67,6 +70,7 @@ export function registerSkipprPipelineTestControllers(
     if (!ref) {
       return;
     }
+    await ensureLocalRuntimePluginManifests(ref.configFsPath, ref.pipeline, deps.output);
     await resolveDbtChildrenForPipelineItem(controller, item, ref, dbtDeps);
   };
 
