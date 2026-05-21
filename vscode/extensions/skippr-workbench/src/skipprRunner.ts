@@ -30,23 +30,37 @@ function forwardRunTranscriptLine(
 }
 
 export type SkipprRunKind = "discover" | "sync-once" | "sync-all-once" | "sync" | "model";
+export type PipelineScopedRunKind = Exclude<SkipprRunKind, "sync-all-once">;
+export type PipelineName = string & { readonly __skipprPipelineName: unique symbol };
 
-export interface SkipprRunOptions {
-  kind: SkipprRunKind;
+export function pipelineName(value: string): PipelineName | undefined {
+  const trimmed = value.trim();
+  return trimmed ? (trimmed as PipelineName) : undefined;
+}
+
+interface BaseSkipprRunOptions {
   cliPath?: string;
   cwd: string;
-  configPath?: string;
-  pipeline?: string;
+  configPath: string;
   logLevel: string;
-  /** `skippr discover --output` (CLI: progress | json | text). */
-  discoverOutput?: string;
-  /** When true, pass `skippr model --no-resume`. */
-  modelNoResume?: boolean;
   /** Appended after built flags (e.g. from the Run panel “Args” field). */
   extraArgs?: string[];
   /** When set, used as the child process environment (typically `process.env` merged with Skippr settings). */
   spawnEnv?: NodeJS.ProcessEnv;
 }
+
+export type SkipprRunOptions =
+  | (BaseSkipprRunOptions & {
+      kind: PipelineScopedRunKind;
+      pipeline: PipelineName;
+      /** `skippr discover --output` (CLI: progress | json | text). */
+      discoverOutput?: string;
+      /** When true, pass `skippr model --no-resume`. */
+      modelNoResume?: boolean;
+    })
+  | (BaseSkipprRunOptions & {
+      kind: "sync-all-once";
+    });
 
 export interface SkipprRunResult {
   code: number | null;
@@ -471,39 +485,33 @@ export function isSkipprRunKind(value: unknown): value is SkipprRunKind {
   );
 }
 
-function buildRunArgs(options: SkipprRunOptions): string[] {
+export function buildRunArgs(options: SkipprRunOptions): string[] {
   const args: string[] = [];
-  if (options.configPath) {
-    args.push("--config", options.configPath);
-  }
+  args.push("--config", options.configPath);
   if (options.logLevel.trim()) {
     args.push("--log", options.logLevel.trim());
   }
 
   if (options.kind === "discover") {
     args.push("discover");
-    if (options.pipeline) {
-      args.push("--pipeline", options.pipeline);
-    }
+    args.push("--pipeline", options.pipeline);
     const raw = (options.discoverOutput ?? "json").trim().toLowerCase();
     const out = raw === "progress" || raw === "json" || raw === "text" ? raw : "json";
     args.push("--output", out);
   } else if (options.kind === "model") {
     args.push("model");
-    if (options.pipeline) {
-      args.push("--pipeline", options.pipeline);
-    }
+    args.push("--pipeline", options.pipeline);
     args.push("--dbt-output-path", modelDbtOutputPath(options));
     if (options.modelNoResume) {
       args.push("--no-resume");
     }
     args.push("--output", "jsonl");
+  } else if (options.kind === "sync-all-once") {
+    args.push("sync", "--once", "--output", "json");
   } else {
     args.push("sync");
-    if (options.pipeline) {
-      args.push("--pipeline", options.pipeline);
-    }
-    if (options.kind === "sync-once" || options.kind === "sync-all-once") {
+    args.push("--pipeline", options.pipeline);
+    if (options.kind === "sync-once") {
       args.push("--once");
     }
     args.push("--output", "json");
@@ -515,23 +523,26 @@ function buildRunArgs(options: SkipprRunOptions): string[] {
 }
 
 function modelDbtOutputPath(options: SkipprRunOptions): string {
-  return path.join(skipprProjectRoot(options.configPath, options.cwd), options.pipeline ?? "default", "dbt");
+  if (options.kind !== "model") {
+    return path.join(skipprProjectRoot(options.configPath, options.cwd), "dbt");
+  }
+  return path.join(skipprProjectRoot(options.configPath, options.cwd), options.pipeline, "dbt");
 }
 
 function labelForRun(options: SkipprRunOptions): string {
   if (options.kind === "discover") {
-    return `Discover ${options.pipeline ?? "pipeline"}`;
+    return `Discover ${options.pipeline}`;
   }
   if (options.kind === "model") {
-    return `Model ${options.pipeline ?? "pipeline"}`;
+    return `Model ${options.pipeline}`;
   }
   if (options.kind === "sync-all-once") {
     return "Sync all once";
   }
   if (options.kind === "sync-once") {
-    return `Sync ${options.pipeline ?? "pipeline"} once`;
+    return `Sync ${options.pipeline} once`;
   }
-  return `Sync ${options.pipeline ?? "pipeline"}`;
+  return `Sync ${options.pipeline}`;
 }
 
 function compactTranscriptLine(line: string): string {

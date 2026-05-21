@@ -1,21 +1,30 @@
 import * as vscode from "vscode";
-import { setPendingPipelineLensRun } from "./skipprPipelineRunContext";
+import type { SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
 
 /**
- * Opens the native Run Skippr context menu (requires workbench compile).
- * Falls back to no-op if the workbench command is not registered yet.
+ * Opens a pipeline action picker and forwards the config/pipeline as command args.
+ * Keeping the payload on the command avoids a stale module-level "next run" slot.
  */
 export async function openSkipprPipelineRunMenu(
   configPath: string,
   pipeline: string,
   /** 0-based line index from the code lens provider. */
-  line: number
+  _line: number
 ): Promise<void> {
-  setPendingPipelineLensRun(configPath, pipeline);
-  const lineNumber = line + 1;
-  try {
-    await vscode.commands.executeCommand("skippr.showPipelineRunMenu", lineNumber);
-  } catch {
-    // Workbench handler not compiled in this dev build — gutter uses inline code lens actions instead.
+  const picked = await vscode.window.showQuickPick<
+    vscode.QuickPickItem & { command: SkipprPipelineRunCommand }
+  >(
+    [
+      { label: "Discover", command: "discover" },
+      { label: "Sync Once", command: "sync" },
+      { label: "Model", command: "model" },
+      { label: "Lineage", command: "lineage" },
+      { label: "Doctor", command: "doctor" }
+    ],
+    { title: `Run Skippr: ${pipeline}` }
+  );
+  if (!picked) {
+    return;
   }
+  await vscode.commands.executeCommand("skippr.run.lensWithArgs", configPath, pipeline, picked.command);
 }

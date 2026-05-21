@@ -13,6 +13,7 @@ import {
   showSkipprVersion,
   SkipprProcess,
   SkipprRunKind,
+  pipelineName,
   startSkipprRun,
   updateSkipprCli
 } from "./skipprRunner";
@@ -20,7 +21,7 @@ import {
   SkipprPipelineCodeLensProvider,
   skipprConfigDocumentSelector
 } from "./skipprPipelineCodeLens";
-import { takePendingPipelineLensRun, type SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
+import type { SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
 import { openSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
@@ -668,14 +669,15 @@ function renderRunConfigHtml(kind: SkipprRunnableKind, pipelines: string[], conf
 }
 
 async function showRunConfigModal(kind: SkipprRunnableKind, output: vscode.LogOutputChannel): Promise<SkipprRunRequest | undefined> {
-  const config = vscode.workspace.getConfiguration();
   const configs = await detectSkipprConfigs();
   const configPath = activeConfigPath || configs[0];
   if (configPath) {
     activeConfigPath = configPath;
   }
+  const folderUri = configPath ? workspaceFolderForConfigPath(configPath) : undefined;
+  const config = vscode.workspace.getConfiguration(undefined, folderUri);
   const configShow = await getConfigShow(output);
-  const defaultPipeline = configShow?.default_pipeline ?? config.get<string>(defaultPipelineKey, "").trim();
+  const defaultPipeline = config.get<string>(defaultPipelineKey, "").trim();
   const panel = vscode.window.createWebviewPanel("skippr.runConfig", `Skippr: ${runKindLabel(kind)}`, vscode.ViewColumn.Active, { enableScripts: true });
   panel.webview.html = renderRunConfigHtml(kind, configShow?.pipelines ?? [], configs, configPath, defaultPipeline, getLogLevel());
   return new Promise((resolve) => {
@@ -689,7 +691,7 @@ async function showRunConfigModal(kind: SkipprRunnableKind, output: vscode.LogOu
       if (message.command === "run") {
         const pipeline = message.pipeline?.trim();
         if (pipeline) {
-          await config.update(defaultPipelineKey, pipeline, vscode.ConfigurationTarget.Global);
+          await config.update(defaultPipelineKey, pipeline, vscode.ConfigurationTarget.WorkspaceFolder);
         }
         panel.dispose();
         resolve({
@@ -1300,8 +1302,10 @@ async function runSkipprCommand(
     }
   }
 
-  const pipeline = kind === "sync-all-once" ? undefined : requestedPipeline?.trim() || request?.pipeline?.trim();
-  if (kind !== "sync-all-once" && !pipeline) {
+  const rawPipeline = kind === "sync-all-once" ? undefined : requestedPipeline?.trim() || request?.pipeline?.trim();
+  const scopedPipeline = rawPipeline ? pipelineName(rawPipeline) : undefined;
+  if (kind !== "sync-all-once" && !scopedPipeline) {
+    vscode.window.showWarningMessage("Choose a Skippr pipeline before running this command.");
     return undefined;
   }
 
@@ -1322,19 +1326,29 @@ async function runSkipprCommand(
   }
 
   output.show(true);
+  const baseRunOptions = {
+    cliPath,
+    cwd: getConfigCwd(configPath),
+    configPath,
+    logLevel: requestedLogLevel?.trim() || request?.logLevel?.trim() || getLogLevel(),
+    extraArgs: extraCliArgs ?? [],
+    spawnEnv: skipprSpawnEnv(configPath, scopedPipeline)
+  };
+  const runOptions =
+    kind === "sync-all-once"
+      ? {
+          ...baseRunOptions,
+          kind
+        }
+      : {
+          ...baseRunOptions,
+          kind,
+          pipeline: scopedPipeline!,
+          discoverOutput: kind === "discover" ? cliFlags?.discoverOutput : undefined,
+          modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined
+        };
   const run = startSkipprRun(
-    {
-      kind,
-      cliPath,
-      cwd: getConfigCwd(configPath),
-      configPath,
-      pipeline,
-      logLevel: requestedLogLevel?.trim() || request?.logLevel?.trim() || getLogLevel(),
-      discoverOutput: kind === "discover" ? cliFlags?.discoverOutput : undefined,
-      modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined,
-      extraArgs: extraCliArgs ?? [],
-      spawnEnv: skipprSpawnEnv(configPath, pipeline)
-    },
+    runOptions,
     {
       onEvent: (event) => {
         const observed = observabilityStore?.recordEvent(event);
@@ -1360,17 +1374,18 @@ async function runSkipprCommand(
   );
 
   activeRun = run;
+  const observedPipeline = kind === "sync-all-once" ? undefined : scopedPipeline;
   observabilityStore?.startRun({
     command: kind,
     label: run.label,
-    pipeline,
+    pipeline: observedPipeline,
     configPath
   });
   void showRunDetailsPanel();
   if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
     void showSchemaPanel();
   }
-  const runDisplayName = pipeline ?? run.label;
+  const runDisplayName = observedPipeline ?? run.label;
   setRunStatusRunning(statusItem, runDisplayName);
   const result = await run.done;
   if (activeRun === run) {
@@ -1742,7 +1757,7 @@ interface SkipprQueryContext {
 interface SkipprLineageContext {
   cliPath: string;
   configPath: string;
-  pipeline?: string;
+  pipeline: string;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -1833,9 +1848,9 @@ async function resolveSqlQueryContext(output: vscode.LogOutputChannel): Promise<
   }
   const show = await getConfigShow(output);
   const folderUri = workspaceFolderForConfigPath(configPath);
-  const configuredDefault = vscode.workspace.getConfiguration("skippr", folderUri).get<string>(defaultPipelineKey, "").trim();
+  const configuredDefault = vscode.workspace.getConfiguration(undefined, folderUri).get<string>(defaultPipelineKey, "").trim();
   const candidates = show?.pipelines?.length ? show.pipelines : configuredDefault ? [configuredDefault] : [];
-  let pipeline = (show?.default_pipeline ?? configuredDefault).trim();
+  let pipeline = configuredDefault;
   if (!pipeline || (candidates.length > 0 && !candidates.includes(pipeline))) {
     if (candidates.length === 1) {
       pipeline = candidates[0];
@@ -1862,7 +1877,7 @@ async function resolveSqlQueryContextQuiet(output: vscode.LogOutputChannel): Pro
     return undefined;
   }
   const folderUri = workspaceFolderForConfigPath(configPath);
-  const configuredDefault = vscode.workspace.getConfiguration("skippr", folderUri).get<string>(defaultPipelineKey, "").trim();
+  const configuredDefault = vscode.workspace.getConfiguration(undefined, folderUri).get<string>(defaultPipelineKey, "").trim();
   const pipeline = configuredDefault;
   if (!pipeline) {
     return undefined;
@@ -1886,6 +1901,7 @@ let activeLineageContext: SkipprLineageContext | undefined;
 function lineageBrandLogoUris(webview: vscode.Webview, extensionUri: vscode.Uri): Record<string, string> {
   const brandDir = vscode.Uri.joinPath(extensionUri, "media", "lineage-brands");
   return {
+    file: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "file.svg")).toString(),
     s3: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "s3.svg")).toString(),
     snowflake: webview.asWebviewUri(vscode.Uri.joinPath(brandDir, "snowflake.svg")).toString()
   };
@@ -1913,18 +1929,8 @@ async function runLineageCommand(
   output: vscode.LogOutputChannel,
   command: "graph" | "refresh" | "import-query-history"
 ): Promise<SkipprLineagePanelPayload> {
-  if (command !== "graph" && !ctx.pipeline) {
-    return {
-      type: "lineage",
-      status: "error",
-      pipeline: "all pipelines",
-      error: "Choose a specific pipeline before refreshing lineage or importing query history."
-    };
-  }
   const args = ["--config", ctx.configPath, "--log", getLogLevel(), "lineage", command];
-  if (ctx.pipeline) {
-    args.push("--pipeline", ctx.pipeline);
-  }
+  args.push("--pipeline", ctx.pipeline);
   args.push("--output", "json");
   const result = await runSkipprJson<SkipprLineageCliResult>(
     ctx.cliPath,
@@ -1938,11 +1944,11 @@ async function runLineageCommand(
     return {
       type: "lineage",
       status: "error",
-      pipeline: ctx.pipeline ?? "all pipelines",
+      pipeline: ctx.pipeline,
       error: result.stdout || "Lineage command failed before producing JSON output."
     };
   }
-  return payloadFromLineageResult(result.value, { pipeline: ctx.pipeline ?? "all pipelines" });
+  return payloadFromLineageResult(result.value, { pipeline: ctx.pipeline });
 }
 
 async function resolveLineageContext(
@@ -1962,7 +1968,26 @@ async function resolveLineageContext(
   if (!cliPath) {
     return undefined;
   }
-  return { cliPath, configPath, pipeline: requested?.pipeline?.trim() || undefined };
+  let pipeline = requested?.pipeline?.trim() || "";
+  if (!pipeline) {
+    const show = await getConfigShow(output);
+    const folderUri = workspaceFolderForConfigPath(configPath);
+    const configuredDefault = vscode.workspace.getConfiguration(undefined, folderUri).get<string>(defaultPipelineKey, "").trim();
+    const candidates = show?.pipelines?.length ? show.pipelines : configuredDefault ? [configuredDefault] : [];
+    if (configuredDefault && (!candidates.length || candidates.includes(configuredDefault))) {
+      pipeline = configuredDefault;
+    } else if (candidates.length === 1) {
+      pipeline = candidates[0];
+    } else if (candidates.length > 1) {
+      pipeline = (await vscode.window.showQuickPick(candidates, { placeHolder: "Select a Skippr pipeline for lineage" })) ?? "";
+    } else {
+      pipeline = (await vscode.window.showInputBox({ prompt: "Pipeline name for lineage" }))?.trim() ?? "";
+    }
+  }
+  if (!pipeline) {
+    return undefined;
+  }
+  return { cliPath, configPath, pipeline };
 }
 
 async function openLineagePanel(
@@ -2011,10 +2036,11 @@ async function refreshLineagePanel(
   output: vscode.LogOutputChannel,
   command: "graph" | "refresh" | "import-query-history"
 ): Promise<void> {
-  const ctx = activeLineageContext;
+  const ctx = activeLineageContext ? await resolveLineageContext(output, activeLineageContext) : undefined;
   if (!ctx) {
     return;
   }
+  activeLineageContext = ctx;
   postLineagePanel({
     type: "lineage",
     status: "running",
@@ -2467,12 +2493,21 @@ async function runLensPipelineCommand(
   output: vscode.LogOutputChannel,
   statusItem: vscode.StatusBarItem
 ): Promise<void> {
-  const ctx = takePendingPipelineLensRun();
-  if (!ctx) {
-    vscode.window.showErrorMessage("Skippr: no pipeline run context. Click a run action on a pipeline in skippr.yml.");
+  const configPath = activeConfigPath || (await chooseActiveConfig(output));
+  if (!configPath) {
+    vscode.window.showErrorMessage("Skippr: no config path. Click a run action on a pipeline in skippr.yml.");
     return;
   }
-  await runLensPipelineWithArgs(ctx.configPath, ctx.pipeline, command, context, output, statusItem);
+  const show = await getConfigShow(output);
+  const candidates = show?.pipelines ?? [];
+  const pipeline =
+    candidates.length === 1
+      ? candidates[0]
+      : await vscode.window.showQuickPick(candidates, { title: "Pipeline for Skippr action" });
+  if (!pipeline) {
+    return;
+  }
+  await runLensPipelineWithArgs(configPath, pipeline, command, context, output, statusItem);
 }
 
 async function runLensPipelineWithArgs(
@@ -3513,7 +3548,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const show = configPath.trim() ? await getToolbarConfigShow(output, configPath) : undefined;
       const pipelines = show?.pipelines ?? [];
       if (!defaultPipeline && show) {
-        defaultPipeline = (show.default_pipeline ?? pipelines[0] ?? "").trim();
+        defaultPipeline = (pipelines[0] ?? "").trim();
       }
       let tests: Array<{ value: string; label: string }> | undefined;
       if (command === "test" && pipelineArg) {
@@ -3701,7 +3736,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const folderUri = workspaceFolderForConfigPath(configPath);
-      const conf = vscode.workspace.getConfiguration("skippr", folderUri);
+      const conf = vscode.workspace.getConfiguration(undefined, folderUri);
       const show = await getConfigShow(output);
       const fallback = conf.get<string>(defaultPipelineKey, "").trim();
       const names = show?.pipelines?.length ? show.pipelines : fallback ? [fallback] : [];

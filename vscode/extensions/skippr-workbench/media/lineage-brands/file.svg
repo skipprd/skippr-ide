@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="File">
+  <path fill="#f8fafc" d="M16 6h22l14 14v38H16z"/>
+  <path fill="#cbd5e1" d="M38 6v14h14z"/>
+  <path fill="none" stroke="#334155" stroke-width="4" stroke-linejoin="round" d="M16 6h22l14 14v38H16z"/>
+  <path fill="none" stroke="#64748b" stroke-width="4" stroke-linecap="round" d="M24 34h16M24 44h16"/>
+</svg>

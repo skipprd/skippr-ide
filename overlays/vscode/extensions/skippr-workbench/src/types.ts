@@ -262,7 +262,6 @@ export interface SkipprConfigShowResult {
   sources: string[];
   sinks: string[];
   schema_sinks: string[];
-  default_pipeline?: string;
 }
 
 export interface SkipprFieldSchema {
