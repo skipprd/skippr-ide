@@ -132,6 +132,8 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 	async resolveSessionConfig(params: IAgentResolveSessionConfigParams): Promise<ResolveSessionConfigResult> {
 		const workspaceRoot = workspaceRootFromWorkingDirectory(params.workingDirectory);
 		const configPath = findWorkspaceConfigPath(workspaceRoot) ?? '';
+		const pipelines = listPipelinesFromConfig(configPath);
+		const pipeline = stringConfig(params.config, 'pipeline');
 		return {
 			schema: {
 				type: 'object',
@@ -143,11 +145,18 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 						enum: ['ask', 'plan', 'agent'],
 						default: 'agent',
 					},
+					pipeline: {
+						type: 'string',
+						title: 'Pipeline',
+						description: 'Skippr pipeline',
+						...(pipelines.length ? { enum: pipelines } : {}),
+					},
 				},
 			},
 			values: {
 				...(params.config ?? {}),
 				...(configPath ? { configPath } : {}),
+				...(pipeline ? { pipeline } : {}),
 				mode: chatModeConfig(params.config),
 			},
 		};
@@ -186,15 +195,17 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		}
 
 		const cliPath = resolveSkipprCli();
+		const pipeline = state.pipeline;
+		const effectiveState = pipeline ? { ...state, pipeline } : state;
 		const args = [
-			...(state.configPath && state.pipeline ? ['--config', state.configPath] : []),
+			...(state.configPath ? ['--config', state.configPath] : []),
 			'chat',
 			'send',
-			...(state.pipeline ? ['--pipeline', state.pipeline] : []),
+			...(pipeline ? ['--pipeline', pipeline] : []),
 			'--mode',
 			state.mode,
 			'--message',
-			buildIdeChatMessage(prompt, state),
+			buildIdeChatMessage(prompt, effectiveState),
 			...(state.threadId ? ['--thread', state.threadId] : []),
 			'--output',
 			'jsonl',
@@ -212,6 +223,9 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		const cwd = cargoCwd ?? state.workspaceRoot;
 		this._logService.info(`[SkipprCliAgent] $ ${[command, ...commandArgs].join(' ')}`);
 
+		if (effectiveState.mode === 'ask') {
+			this._writeAskQueryRunningBridgeMessage(effectiveState, prompt);
+		}
 		await this._runCli(state, turnId, command, commandArgs, cwd);
 	}
 
@@ -639,6 +653,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			if (markdown) {
 				this._emitMarkdown(state.session, turnId, markdown);
 			}
+			this._writeAskQueryResultBridgeMessage(state, o);
 			return;
 		}
 		if (type === 'ChatSummary') {
@@ -841,6 +856,54 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		this._onDidSessionProgress.fire({ kind: 'action', session, action });
 	}
 
+	private _writeAskQueryResultBridgeMessage(state: ISkipprSession, event: Record<string, unknown>): void {
+		if (!state.workspaceRoot) {
+			return;
+		}
+		const result = objectField(event, 'result');
+		if (!result || stringField(result, 'kind') !== 'ask') {
+			return;
+		}
+		const payload = objectField(result, 'payload');
+		if (!payload || (!payload.data && !payload.sql && !payload.chart)) {
+			return;
+		}
+		const bridgeDir = agentBridgeDirForWorkspace(state.workspaceRoot);
+		fs.mkdirSync(bridgeDir, { recursive: true });
+		const id = `query-${generateUuid()}`;
+		const message = {
+			id,
+			type: 'queryResults',
+			status: 'success',
+			source: 'agent',
+			pipeline: state.pipeline,
+			pipelines_used: stringArrayField(payload, 'pipelines_used'),
+			answer: stringField(payload, 'answer') ?? stringField(result, 'display'),
+			sql: stringField(payload, 'sql'),
+			data: payload.data,
+			chart: payload.chart,
+		};
+		fs.writeFileSync(path.join(bridgeDir, `${id}.query-result.json`), JSON.stringify(message), 'utf8');
+	}
+
+	private _writeAskQueryRunningBridgeMessage(state: ISkipprSession, prompt: string): void {
+		if (!state.workspaceRoot) {
+			return;
+		}
+		const bridgeDir = agentBridgeDirForWorkspace(state.workspaceRoot);
+		fs.mkdirSync(bridgeDir, { recursive: true });
+		const id = `query-${generateUuid()}`;
+		const message = {
+			id,
+			type: 'queryResults',
+			status: 'running',
+			source: 'agent',
+			pipeline: state.pipeline,
+			question: prompt,
+		};
+		fs.writeFileSync(path.join(bridgeDir, `${id}.query-result.json`), JSON.stringify(message), 'utf8');
+	}
+
 	private _toolResultText(event: Record<string, unknown>): string {
 		if (stringField(event, 'name') === 'local_ide') {
 			return localIdePastTenseMessage(event, false);
@@ -890,6 +953,71 @@ function findWorkspaceConfigPath(workspaceRoot: string | undefined): string | un
 	return undefined;
 }
 
+function listPipelinesFromConfig(configPath: string | undefined): string[] {
+	if (!configPath) {
+		return [];
+	}
+	let text: string;
+	try {
+		text = fs.readFileSync(configPath, 'utf8');
+	} catch {
+		return [];
+	}
+	const lines = text.split(/\r?\n/);
+	const out: string[] = [];
+	let inPipelines = false;
+	let sectionIndent = 0;
+	let childIndent: number | undefined;
+	for (const raw of lines) {
+		const trimmed = raw.trim();
+		if (!trimmed || trimmed.startsWith('#')) {
+			continue;
+		}
+		const indent = raw.match(/^(\s*)/)?.[1].length ?? 0;
+		const keyMatch = trimmed.match(/^([a-zA-Z0-9_.-]+)\s*:\s*(.*)$/);
+		const key = keyMatch?.[1];
+		const rest = keyMatch?.[2] ?? '';
+		const valuePart = rest.replace(/\s+#.*$/, '').trim();
+		if (key === 'pipelines') {
+			inPipelines = true;
+			sectionIndent = indent;
+			childIndent = undefined;
+			continue;
+		}
+		if (!inPipelines) {
+			continue;
+		}
+		if (indent <= sectionIndent) {
+			inPipelines = false;
+			continue;
+		}
+		const listPlain = trimmed.match(/^-\s*([a-zA-Z0-9_.-]+)\s*$/);
+		if (listPlain) {
+			out.push(listPlain[1]);
+			childIndent ??= indent;
+			continue;
+		}
+		const listNamed = trimmed.match(/^-\s*name\s*:\s*([a-zA-Z0-9_.-]+)\s*$/i);
+		if (listNamed) {
+			out.push(listNamed[1]);
+			childIndent ??= indent;
+			continue;
+		}
+		if (!keyMatch) {
+			continue;
+		}
+		childIndent ??= indent;
+		if (indent !== childIndent || trimmed.startsWith('- ')) {
+			continue;
+		}
+		if (valuePart && valuePart !== '|' && valuePart !== '>' && !valuePart.startsWith('{') && !valuePart.startsWith('[')) {
+			continue;
+		}
+		out.push(key!);
+	}
+	return [...new Set(out)];
+}
+
 function buildIdeChatMessage(prompt: string, state: ISkipprSession): string {
 	return JSON.stringify({
 		user: prompt,
@@ -897,6 +1025,7 @@ function buildIdeChatMessage(prompt: string, state: ISkipprSession): string {
 		context: {
 			workspace_root: state.workspaceRoot,
 			config_path: state.configPath,
+			pipeline: state.pipeline,
 		},
 	});
 }
@@ -917,6 +1046,21 @@ function stringField(value: unknown, key: string): string | undefined {
 	}
 	const field = (value as Record<string, unknown>)[key];
 	return typeof field === 'string' && field.trim() ? field.trim() : undefined;
+}
+
+function stringArrayField(value: unknown, key: string): string[] | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const field = (value as Record<string, unknown>)[key];
+	if (!Array.isArray(field)) {
+		return undefined;
+	}
+	const strings = field
+		.filter((item): item is string => typeof item === 'string')
+		.map(item => item.trim())
+		.filter(Boolean);
+	return strings.length ? strings : undefined;
 }
 
 function scalarStringField(value: unknown, key: string): string | undefined {

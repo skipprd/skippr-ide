@@ -204,11 +204,11 @@ suite('SkipprCliAgent', () => {
 		assert.strictEqual(capturedCwd, '/workspace/no-config');
 	});
 
-	test('sendMessage does not pass workspace config without a selected pipeline', async () => {
+	test('sendMessage passes config without silently inferring pipeline', async () => {
 		const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skippr-cli-agent-'));
 		const oldCliPath = process.env.SKIPPR_CLI_PATH;
 		process.env.SKIPPR_CLI_PATH = 'skippr';
-		fs.writeFileSync(path.join(workspaceRoot, 'skippr.yml'), 'project: incomplete\n');
+		fs.writeFileSync(path.join(workspaceRoot, 'skippr.yml'), 'pipelines:\n  bikehire:\n    source: demo\n');
 		const created = await agent.createSession({
 			workingDirectory: URI.file(workspaceRoot),
 			config: {
@@ -235,11 +235,12 @@ suite('SkipprCliAgent', () => {
 		}
 
 		assert.ok(capturedArgs, 'expected Skippr CLI to be invoked');
-		assert.ok(!capturedArgs.includes('--config'), 'chat without a selected pipeline must not pass --config');
-		assert.ok(!capturedArgs.includes('--pipeline'), 'chat without a selected pipeline must not pass --pipeline');
+		assert.deepStrictEqual(capturedArgs.slice(0, 4), ['--config', path.join(workspaceRoot, 'skippr.yml'), 'chat', 'send']);
+		assert.ok(!capturedArgs.includes('--pipeline'), 'chat without selected pipeline must not pass --pipeline');
 		const messageIndex = capturedArgs.indexOf('--message');
 		assert.ok(messageIndex >= 0);
 		const message = JSON.parse(capturedArgs[messageIndex + 1]);
 		assert.strictEqual(message.context.config_path, path.join(workspaceRoot, 'skippr.yml'));
+		assert.strictEqual(message.context.pipeline, undefined);
 	});
 });

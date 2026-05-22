@@ -114,6 +114,25 @@
 	margin-right: 4px;
 }
 
+.monaco-workbench .part.editor > .content .editor-group-container > .title > .title-actions .action-item.skippr-sql-run-action > .action-label {
+	display: inline-flex;
+	align-items: center;
+	height: 22px;
+	padding: 0 10px;
+	border-radius: 999px;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-testing-iconPassed);
+	font-weight: 600;
+	line-height: 22px;
+}
+
+.monaco-workbench .part.editor > .content .editor-group-container > .title > .title-actions .action-item.skippr-sql-run-action > .action-label::before {
+	content: "▶";
+	margin-right: 6px;
+	font-size: 10px;
+	line-height: 1;
+}
+
 .monaco-workbench .part.editor > .content .editor-group-container.active > .title > .title-actions {
 	opacity: 1;
 }

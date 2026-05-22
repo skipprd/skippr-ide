@@ -193,7 +193,8 @@ export class MenuEntryActionViewItem<T extends IMenuEntryActionViewItemOptions =
 		@IContextMenuService protected readonly _contextMenuService: IContextMenuService,
 		@IAccessibilityService private readonly _accessibilityService: IAccessibilityService
 	) {
-		super(undefined, action, { icon: !!(action.class || action.item.icon), label: !action.class && !action.item.icon, draggable: _options?.draggable, keybinding: _options?.keybinding, hoverDelegate: _options?.hoverDelegate, keybindingNotRenderedWithLabel: _options?.keybindingNotRenderedWithLabel });
+		const isSkipprSqlRunAction = action.id === 'skippr.sql.runDocument' || action.id === 'skippr.sql.runDbtDocument';
+		super(undefined, action, { icon: isSkipprSqlRunAction ? false : !!(action.class || action.item.icon), label: isSkipprSqlRunAction ? true : !action.class && !action.item.icon, draggable: _options?.draggable, keybinding: _options?.keybinding, hoverDelegate: _options?.hoverDelegate, keybindingNotRenderedWithLabel: _options?.keybindingNotRenderedWithLabel });
 		this._altKey = ModifierKeyEmitter.getInstance();
 	}
 
@@ -224,6 +225,9 @@ export class MenuEntryActionViewItem<T extends IMenuEntryActionViewItemOptions =
 	override render(container: HTMLElement): void {
 		super.render(container);
 		container.classList.add('menu-entry');
+		if (this._menuItemAction.id === 'skippr.sql.runDocument' || this._menuItemAction.id === 'skippr.sql.runDbtDocument') {
+			container.classList.add('skippr-sql-run-action');
+		}
 
 		if (this.options.icon) {
 			this._updateItemClass(this._menuItemAction.item);

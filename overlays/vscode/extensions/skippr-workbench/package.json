@@ -179,12 +179,12 @@
       {
         "command": "skippr.sql.runDocument",
         "title": "Run SQL",
-        "icon": "$(debug-start)"
+        "icon": "$(play)"
       },
       {
         "command": "skippr.sql.runDbtDocument",
-        "title": "Run SQL|DBT",
-        "icon": "$(debug-start)"
+        "title": "Run DBT SQL",
+        "icon": "$(play)"
       },
       {
         "command": "skippr.sql.pickRunMode",
@@ -207,7 +207,7 @@
     "submenus": [
       {
         "id": "skippr.sql.runMode",
-        "label": "Run SQL|DBT mode"
+        "label": "Run DBT SQL mode"
       }
     ],
     "viewsContainers": {

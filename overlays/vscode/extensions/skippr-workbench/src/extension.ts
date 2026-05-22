@@ -22,6 +22,7 @@ import {
   SkipprPipelineCodeLensProvider,
   skipprConfigDocumentSelector
 } from "./skipprPipelineCodeLens";
+import { resolvePipelineForFile, type SkipprFilePipelineResolution } from "./skipprFilePipelineIndex";
 import type { SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
 import { getSkipprPipelineLensTarget } from "./skipprPipelineLensContext";
 import { openSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
@@ -677,6 +678,87 @@ function renderRunConfigHtml(kind: SkipprRunnableKind, pipelines: string[], conf
 </html>`;
 }
 
+function renderSqlPipelineSelectorHtml(pipelines: string[], inferred: SkipprFilePipelineResolution | undefined): string {
+  const options = pipelines.map((pipeline) => `<option value="${escapeHtml(pipeline)}">${escapeHtml(pipeline)}</option>`).join("");
+  const reason = inferred?.reason ? `<p class="hint">Candidate context: ${escapeHtml(inferred.reason)}</p>` : "";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+  <style>
+    body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 13px var(--vscode-font-family); }
+    main { max-width: 520px; margin: 28px auto; padding: 0 20px; }
+    .eyebrow { color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 8px 0 8px; font-size: 20px; font-weight: 600; }
+    p { margin: 0 0 14px; color: var(--vscode-descriptionForeground); line-height: 1.45; }
+    .hint { padding: 8px 10px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; background: var(--vscode-textCodeBlock-background, transparent); }
+    label { display: block; margin: 16px 0 6px; font-weight: 600; }
+    select { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
+    .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+    button { all: unset; box-sizing: border-box; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+    button.secondary { border: 1px solid var(--vscode-button-border, var(--vscode-panel-border)); color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+    button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+    button:hover { filter: brightness(1.08); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Skippr SQL</div>
+    <h1>Select Pipeline</h1>
+    <p>This SQL file does not map to exactly one pipeline. Choose the pipeline to use for this run.</p>
+    ${reason}
+    <label for="pipeline">Pipeline</label>
+    <select id="pipeline">${options}</select>
+    <div class="actions">
+      <button class="secondary" id="cancel">Cancel</button>
+      <button class="primary" id="run">Run SQL</button>
+    </div>
+  </main>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.getElementById("cancel").addEventListener("click", () => vscode.postMessage({ command: "cancel" }));
+    document.getElementById("run").addEventListener("click", () => vscode.postMessage({
+      command: "select",
+      pipeline: document.getElementById("pipeline").value
+    }));
+  </script>
+</body>
+</html>`;
+}
+
+async function selectPipelineForSqlRun(
+  pipelines: string[],
+  inferred: SkipprFilePipelineResolution | undefined
+): Promise<string | undefined> {
+  const panel = vscode.window.createWebviewPanel("skippr.sqlPipeline", "Skippr: Select Pipeline", vscode.ViewColumn.Active, {
+    enableScripts: true
+  });
+  panel.webview.html = renderSqlPipelineSelectorHtml(pipelines, inferred);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: string | undefined) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+      panel.dispose();
+    };
+    panel.onDidDispose(() => finish(undefined));
+    panel.webview.onDidReceiveMessage((message: { command?: string; pipeline?: string }) => {
+      if (message.command === "cancel") {
+        finish(undefined);
+        return;
+      }
+      if (message.command === "select") {
+        const pipeline = message.pipeline?.trim();
+        finish(pipeline || undefined);
+      }
+    });
+  });
+}
+
 async function showRunConfigModal(kind: SkipprRunnableKind, output: vscode.LogOutputChannel): Promise<SkipprRunRequest | undefined> {
   const configs = await detectSkipprConfigs();
   const configPath = activeConfigPath || configs[0];
@@ -869,6 +951,7 @@ function postQueryResults(payload: SkipprQueryResultsPanelPayload): void {
 }
 
 async function showQueryResultsPanel(): Promise<void> {
+  await runWorkbenchCommand("workbench.action.focusPanel");
   await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_QUERY_RESULTS_CONTAINER_ID}`);
   await runWorkbenchCommand(`${SKIPPR_QUERY_RESULTS_VIEW_ID}.focus`);
   postQueryResults(queryResultsLastPayload);
@@ -1803,6 +1886,20 @@ function scanAgentModelBridgeDir(
     return;
   }
   for (const entry of entries) {
+    if (entry.endsWith(".query-result.json")) {
+      const resultPath = path.join(bridgeDir, entry);
+      if (processed.has(resultPath)) {
+        continue;
+      }
+      processed.add(resultPath);
+      const payload = readAgentQueryResultBridgePayload(resultPath);
+      if (payload) {
+        postQueryResults(payload);
+        void showQueryResultsPanel();
+      }
+      cleanupAgentBridgeRequest(resultPath);
+      continue;
+    }
     if (!entry.endsWith(".request.json")) {
       continue;
     }
@@ -1829,6 +1926,31 @@ function scanAgentModelBridgeDir(
           cleanupAgentBridgeRequest(requestPath);
         }
       );
+  }
+}
+
+function readAgentQueryResultBridgePayload(resultPath: string): SkipprQueryResultsPanelPayload | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resultPath, "utf8")) as SkipprQueryResultsPanelPayload;
+    if (parsed?.type !== "queryResults") {
+      return undefined;
+    }
+    return {
+      type: "queryResults",
+      status: parsed.status === "running" ? "running" : parsed.status === "error" ? "error" : "success",
+      source: "agent",
+      pipeline: typeof parsed.pipeline === "string" ? parsed.pipeline : undefined,
+      pipelines_used: Array.isArray(parsed.pipelines_used) ? parsed.pipelines_used.filter((value): value is string => typeof value === "string" && value.trim().length > 0) : undefined,
+      question: typeof parsed.question === "string" ? parsed.question : undefined,
+      answer: typeof parsed.answer === "string" ? parsed.answer : undefined,
+      sql: typeof parsed.sql === "string" ? parsed.sql : undefined,
+      data: normalizeQueryData(parsed.data),
+      chart: normalizeQueryChart(parsed.chart),
+      elapsedMs: typeof parsed.elapsedMs === "number" ? parsed.elapsedMs : undefined,
+      error: typeof parsed.error === "string" ? parsed.error : undefined
+    };
+  } catch {
+    return undefined;
   }
 }
 
@@ -2071,7 +2193,7 @@ function payloadFromQueryResult(result: SkipprQueryCliResult, fallback: Pick<Ski
     answer: result.answer,
     sql: result.sql,
     data: normalizeQueryData(result.data),
-    chart: normalizeQueryChart(result.chart),
+    chart: fallback.source === "agent" ? normalizeQueryChart(result.chart) : undefined,
     elapsedMs: result.elapsed_ms,
     error: result.error
   };
@@ -2103,7 +2225,10 @@ function payloadFromAgentJsonLine(line: unknown, pipeline: string, question: str
   };
 }
 
-async function resolveSqlQueryContext(output: vscode.LogOutputChannel): Promise<SkipprQueryContext | undefined> {
+async function resolveSqlQueryContext(
+  output: vscode.LogOutputChannel,
+  editor: vscode.TextEditor | undefined = vscode.window.activeTextEditor
+): Promise<SkipprQueryContext | undefined> {
   const configPath = activeConfigPath || (await chooseActiveConfig(output));
   if (!configPath) {
     vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
@@ -2121,15 +2246,19 @@ async function resolveSqlQueryContext(output: vscode.LogOutputChannel): Promise<
   const folderUri = workspaceFolderForConfigPath(configPath);
   const configuredDefault = vscode.workspace.getConfiguration(undefined, folderUri).get<string>(defaultPipelineKey, "").trim();
   const candidates = show?.pipelines?.length ? show.pipelines : configuredDefault ? [configuredDefault] : [];
-  let pipeline = configuredDefault;
-  if (!pipeline || (candidates.length > 0 && !candidates.includes(pipeline))) {
-    if (candidates.length === 1) {
-      pipeline = candidates[0];
-    } else if (candidates.length > 1) {
-      pipeline = (await vscode.window.showQuickPick(candidates, { placeHolder: "Select a Skippr pipeline for this query" })) ?? "";
-    } else {
-      pipeline = (await vscode.window.showInputBox({ prompt: "Pipeline name for this query" }))?.trim() ?? "";
-    }
+  const inferred = resolvePipelineForFile(editor?.document.uri, configPath, candidates);
+  let pipeline = inferred?.pipeline ?? "";
+  if (!pipeline && candidates.length === 1) {
+    pipeline = candidates[0];
+  }
+  if (!pipeline && configuredDefault && (candidates.length === 0 || candidates.includes(configuredDefault))) {
+    pipeline = configuredDefault;
+  }
+  if (!pipeline && candidates.length > 1) {
+    pipeline = (await selectPipelineForSqlRun(candidates, inferred)) ?? "";
+  }
+  if (!pipeline && candidates.length === 0) {
+    vscode.window.showWarningMessage("No pipelines found in skippr.yml for this SQL query.");
   }
   if (!pipeline) {
     return undefined;
@@ -2143,7 +2272,7 @@ async function resolveSqlQueryContextForEditor(
 ): Promise<SkipprQueryContext | undefined> {
   const documentContext = editor ? sqlDocumentContexts.get(editor.document.uri.toString()) : undefined;
   if (!documentContext) {
-    return resolveSqlQueryContext(output);
+    return resolveSqlQueryContext(output, editor);
   }
   const cliPath = await resolveCliOrOfferInstall(output);
   if (!cliPath) {
@@ -2447,11 +2576,11 @@ async function runDbtDocument(
     vscode.window.showErrorMessage(detected.layoutError);
     return;
   }
-  const ctx = await resolveSqlQueryContext(output);
+  const ctx = await resolveSqlQueryContextForEditor(output, editor);
   if (!ctx) {
     return;
   }
-  const dbtCtx = detected.pipelineFromPath ? { ...ctx, pipeline: detected.pipelineFromPath } : ctx;
+  const dbtCtx = ctx;
   const dbtFilePath = detected.filePath;
   const cwd = getConfigCwd(dbtCtx.configPath);
   const env = await skipprSpawnEnv(dbtCtx.configPath, dbtCtx.pipeline, output);
@@ -2577,7 +2706,7 @@ async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
   if (!question) {
     return;
   }
-  const ctx = await resolveSqlQueryContext(output);
+  const ctx = await resolveSqlQueryContext(output, vscode.window.activeTextEditor);
   if (!ctx) {
     return;
   }
@@ -4070,7 +4199,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           { label: "Tests", description: "Run dbt tests for this model", mode: "tests" as const }
         ],
         {
-          title: "Run SQL|DBT",
+          title: "Run DBT SQL",
           placeHolder: `Current: ${dbtRunModeMenuTitle(dbtEditorRunMode)}`
         }
       );
