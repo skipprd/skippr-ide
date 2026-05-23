@@ -92,7 +92,7 @@ case "${PLATFORM}-${ARCH}" in
     APP_DIR="${ROOT_DIR}/VSCode-win32-${ARCH}"
     OUTPUT="${ARTIFACTS_DIR}/skippr-ide-win32-${ARCH}.zip"
     rm -f "${OUTPUT}"
-    (cd "${ROOT_DIR}" && tar -a -c -f "${OUTPUT}" "VSCode-win32-${ARCH}")
+    (cd "${ROOT_DIR}" && tar -a -c -f "artifacts/skippr-ide-win32-${ARCH}.zip" "VSCode-win32-${ARCH}")
     ;;
   *)
     echo "Unsupported target: ${PLATFORM}-${ARCH}"
