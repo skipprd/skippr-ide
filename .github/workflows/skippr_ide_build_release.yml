@@ -40,46 +40,26 @@ jobs:
   package:
     name: Package ${{ matrix.target.id }}
     needs: verify
-    if: matrix.target.enabled == true
     strategy:
       fail-fast: false
       matrix:
         target:
           - id: darwin-x64
-            enabled: true
             runner: macos-13
             npm_script: package:darwin:x64
             artifact_glob: artifacts/skippr-ide-darwin-x64.zip
           - id: darwin-arm64
-            enabled: true
             runner: macos-14
             npm_script: package:darwin:arm64
             artifact_glob: artifacts/skippr-ide-darwin-arm64.zip
           - id: linux-x64
-            enabled: true
             runner: ubuntu-24.04
             npm_script: package:linux:x64
             artifact_glob: artifacts/skippr-ide-linux-x64.tar.gz
-          - id: linux-arm64
-            enabled: true
-            runner: ubuntu-24.04-arm
-            npm_script: package:linux:arm64
-            artifact_glob: artifacts/skippr-ide-linux-arm64.tar.gz
-          - id: linux-armhf
-            enabled: false
-            runner: ubuntu-24.04
-            npm_script: package:linux:armhf
-            artifact_glob: artifacts/skippr-ide-linux-armhf.tar.gz
           - id: win32-x64
-            enabled: true
             runner: windows-2022
             npm_script: package:win32:x64
             artifact_glob: artifacts/skippr-ide-win32-x64.zip
-          - id: win32-arm64
-            enabled: false
-            runner: windows-11-arm
-            npm_script: package:win32:arm64
-            artifact_glob: artifacts/skippr-ide-win32-arm64.zip
     runs-on: ${{ matrix.target.runner }}
     defaults:
       run:
