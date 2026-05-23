@@ -206,6 +206,10 @@ function ensureAgentHarnessLink(sourceRelativePath: string, linkPath: string): '
 	}
 
 	const sourcePath = path.resolve(path.dirname(linkPath), sourceRelativePath);
+	if (!fs.existsSync(sourcePath)) {
+		return 'existing';
+	}
+
 	const isDirectory = fs.statSync(sourcePath).isDirectory();
 
 	try {
