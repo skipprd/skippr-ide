@@ -7,7 +7,7 @@ linux_gssapi_headers_present() {
 
 ensure_posix_shell() {
   case "$(uname -s)" in
-    Linux) ;;
+    Linux|Darwin) ;;
     *) return 0 ;;
   esac
 
@@ -26,6 +26,26 @@ ensure_posix_shell() {
   sudo ln -sf "${bash_path}" /bin/sh
 }
 
+ensure_unix_npm_script_shell() {
+  case "$(uname -s)" in
+    Linux|Darwin) ;;
+    *) return 0 ;;
+  esac
+
+  if [ -n "${npm_config_script_shell:-}" ]; then
+    return 0
+  fi
+
+  local bash_path
+  bash_path="$(command -v bash || true)"
+  if [ -z "${bash_path}" ]; then
+    echo "Missing bash; npm lifecycle scripts need a shell."
+    return 1
+  fi
+
+  export npm_config_script_shell="${bash_path}"
+}
+
 ensure_windows_npm_script_shell() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) ;;
@@ -42,6 +62,15 @@ ensure_windows_npm_script_shell() {
   fi
 
   export npm_config_script_shell="bash"
+}
+
+configure_windows_native_builds() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) return 0 ;;
+  esac
+
+  export npm_config_foreground_scripts="${npm_config_foreground_scripts:-true}"
 }
 
 ensure_linux_build_dependencies() {
@@ -101,7 +130,9 @@ ensure_vscode_node() {
 ensure_vscode_dependencies() {
   local vscode_dir="$1"
   ensure_posix_shell
+  ensure_unix_npm_script_shell
   ensure_windows_npm_script_shell
+  configure_windows_native_builds
   ensure_linux_build_dependencies
   if [ ! -d "${vscode_dir}/node_modules" ]; then
     (cd "${vscode_dir}" && npm install)

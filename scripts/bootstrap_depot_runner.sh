@@ -38,6 +38,27 @@ ensure_unix_shell() {
   sudo ln -sf "${bash_path}" /bin/sh
 }
 
+ensure_unix_npm_script_shell() {
+  case "${UNAME}" in
+    Linux|Darwin) ;;
+    *) return 0 ;;
+  esac
+
+  local bash_path
+  bash_path="$(command -v bash || true)"
+  if [ -z "${bash_path}" ]; then
+    log "missing bash; npm lifecycle scripts need a shell"
+    return 1
+  fi
+
+  log "using ${bash_path} as npm script shell"
+  export npm_config_script_shell="${bash_path}"
+  npm config set script-shell "${bash_path}"
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'npm_config_script_shell=%s\n' "${bash_path}" >> "${GITHUB_ENV}"
+  fi
+}
+
 ensure_windows_shell() {
   case "${UNAME}" in
     MINGW*|MSYS*|CYGWIN*) ;;
@@ -59,6 +80,20 @@ ensure_windows_shell() {
   npm config set script-shell bash
   if [ -n "${GITHUB_ENV:-}" ]; then
     printf 'npm_config_script_shell=bash\n' >> "${GITHUB_ENV}"
+  fi
+}
+
+configure_windows_native_builds() {
+  case "${UNAME}" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) return 0 ;;
+  esac
+
+  log "using foreground npm scripts to avoid concurrent MSBuild file locks"
+  export npm_config_foreground_scripts="true"
+  npm config set foreground-scripts true
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'npm_config_foreground_scripts=true\n' >> "${GITHUB_ENV}"
   fi
 }
 
@@ -110,6 +145,8 @@ show_diagnostics() {
 }
 
 ensure_unix_shell
+ensure_unix_npm_script_shell
 ensure_windows_shell
+configure_windows_native_builds
 install_linux_dependencies
 show_diagnostics
