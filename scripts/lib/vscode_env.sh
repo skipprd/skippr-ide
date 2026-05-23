@@ -43,7 +43,7 @@ ensure_unix_npm_script_shell() {
     return 1
   fi
 
-  export npm_config_script_shell="${bash_path}"
+  export npm_config_script_shell="bash"
 }
 
 ensure_windows_npm_script_shell() {

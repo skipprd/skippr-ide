@@ -52,10 +52,10 @@ ensure_unix_npm_script_shell() {
   fi
 
   log "using ${bash_path} as npm script shell"
-  export npm_config_script_shell="${bash_path}"
-  npm config set script-shell "${bash_path}"
+  export npm_config_script_shell="bash"
+  npm config set script-shell bash
   if [ -n "${GITHUB_ENV:-}" ]; then
-    printf 'npm_config_script_shell=%s\n' "${bash_path}" >> "${GITHUB_ENV}"
+    printf 'npm_config_script_shell=bash\n' >> "${GITHUB_ENV}"
   fi
 }
 
