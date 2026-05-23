@@ -188,6 +188,18 @@ function configureGit(): void {
 	child_process.execFileSync('git', ['config', 'blame.ignoreRevsFile', '.git-blame-ignore-revs'], { cwd: root });
 }
 
+function npmInstallConcurrency(): number {
+	const raw = process.env['VSCODE_NPM_INSTALL_CONCURRENCY'];
+	if (raw) {
+		const parsed = Number.parseInt(raw, 10);
+		if (Number.isInteger(parsed) && parsed > 0) {
+			return parsed;
+		}
+	}
+
+	return Math.min(os.cpus().length, 8);
+}
+
 function ensureAgentHarnessLink(sourceRelativePath: string, linkPath: string): 'existing' | 'junction' | 'symlink' | 'hard link' {
 	if (fs.existsSync(linkPath)) {
 		return 'existing';
@@ -310,7 +322,7 @@ async function main() {
 	}
 
 	// JS-only dirs run in parallel
-	const concurrency = Math.min(os.cpus().length, 8);
+	const concurrency = npmInstallConcurrency();
 	log('.', `Running ${parallelTasks.length} npm installs with concurrency ${concurrency}...`);
 	await runWithConcurrency(parallelTasks, concurrency);
 

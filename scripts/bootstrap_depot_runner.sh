@@ -59,6 +59,14 @@ ensure_unix_npm_script_shell() {
   fi
 }
 
+configure_vscode_postinstall() {
+  log "using sequential VS Code nested npm installs on Depot runners"
+  export VSCODE_NPM_INSTALL_CONCURRENCY="1"
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'VSCODE_NPM_INSTALL_CONCURRENCY=1\n' >> "${GITHUB_ENV}"
+  fi
+}
+
 ensure_windows_shell() {
   case "${UNAME}" in
     MINGW*|MSYS*|CYGWIN*) ;;
@@ -146,6 +154,7 @@ show_diagnostics() {
 
 ensure_unix_shell
 ensure_unix_npm_script_shell
+configure_vscode_postinstall
 ensure_windows_shell
 configure_windows_native_builds
 install_linux_dependencies

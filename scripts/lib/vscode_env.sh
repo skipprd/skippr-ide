@@ -46,6 +46,10 @@ ensure_unix_npm_script_shell() {
   export npm_config_script_shell="bash"
 }
 
+configure_vscode_postinstall() {
+  export VSCODE_NPM_INSTALL_CONCURRENCY="${VSCODE_NPM_INSTALL_CONCURRENCY:-1}"
+}
+
 ensure_windows_npm_script_shell() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) ;;
@@ -131,6 +135,7 @@ ensure_vscode_dependencies() {
   local vscode_dir="$1"
   ensure_posix_shell
   ensure_unix_npm_script_shell
+  configure_vscode_postinstall
   ensure_windows_npm_script_shell
   configure_windows_native_builds
   ensure_linux_build_dependencies
