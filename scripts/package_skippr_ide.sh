@@ -44,6 +44,14 @@ declare module 'vscode' {
 	export namespace window {
 		export const onDidWriteTerminalData: Event<TerminalDataWriteEvent>;
 	}
+
+	export namespace extensions {
+		export const allAcrossExtensionHosts: readonly Extension<any>[];
+	}
+
+	export interface AuthenticationProviderOptions {
+		readonly supportedAuthorizationServers?: readonly Uri[];
+	}
 }
 EOF
 
