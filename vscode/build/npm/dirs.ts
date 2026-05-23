@@ -5,10 +5,12 @@
 
 import { existsSync } from 'fs';
 
+const root = `${import.meta.dirname}/../..`;
+
 /**
  * Complete list of directories where npm should be executed to install node modules
  */
-export const dirs = [
+const allDirs = [
 	'',
 	'build',
 	'build/rspack',
@@ -65,7 +67,9 @@ export const dirs = [
 ];
 
 if (existsSync(`${import.meta.dirname}/../../.build/distro/npm`)) {
-	dirs.push('.build/distro/npm');
-	dirs.push('.build/distro/npm/remote');
-	dirs.push('.build/distro/npm/remote/web');
+	allDirs.push('.build/distro/npm');
+	allDirs.push('.build/distro/npm/remote');
+	allDirs.push('.build/distro/npm/remote/web');
 }
+
+export const dirs = allDirs.filter(dir => dir === '' || existsSync(`${root}/${dir}/package.json`));
