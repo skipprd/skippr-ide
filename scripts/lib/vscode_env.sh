@@ -1,6 +1,77 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+linux_gssapi_headers_present() {
+  [ -f /usr/include/gssapi/gssapi.h ] || [ -f /usr/include/gssapi/gssapi_ext.h ]
+}
+
+ensure_posix_shell() {
+  case "$(uname -s)" in
+    Linux) ;;
+    *) return 0 ;;
+  esac
+
+  if [ -x /bin/sh ]; then
+    return 0
+  fi
+
+  local bash_path
+  bash_path="$(command -v bash || true)"
+  if [ -z "${bash_path}" ]; then
+    echo "Missing /bin/sh and bash; install bash before running VS Code npm install."
+    return 1
+  fi
+
+  echo "Creating /bin/sh symlink required by VS Code npm postinstall..."
+  sudo ln -sf "${bash_path}" /bin/sh
+}
+
+ensure_windows_npm_script_shell() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) return 0 ;;
+  esac
+
+  if [ -n "${npm_config_script_shell:-}" ]; then
+    return 0
+  fi
+
+  if ! command -v bash >/dev/null 2>&1; then
+    echo "Missing bash; npm lifecycle scripts need bash on Depot Windows."
+    return 1
+  fi
+
+  export npm_config_script_shell="bash"
+}
+
+ensure_linux_build_dependencies() {
+  if [ "$(uname -s)" != "Linux" ]; then
+    return 0
+  fi
+
+  if linux_gssapi_headers_present; then
+    return 0
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Missing GSSAPI headers (gssapi/gssapi.h). Install krb5 development packages for your distro."
+    return 1
+  fi
+
+  echo "Installing Linux build dependencies required by vscode npm install..."
+  sudo apt-get update -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libx11-dev \
+    libx11-xcb-dev \
+    libxkbfile-dev \
+    libnotify-bin \
+    libkrb5-dev \
+    libgbm1 \
+    libgtk-3-0
+}
+
 ensure_vscode_node() {
   local vscode_dir="$1"
   local required
@@ -29,6 +100,9 @@ ensure_vscode_node() {
 
 ensure_vscode_dependencies() {
   local vscode_dir="$1"
+  ensure_posix_shell
+  ensure_windows_npm_script_shell
+  ensure_linux_build_dependencies
   if [ ! -d "${vscode_dir}/node_modules" ]; then
     (cd "${vscode_dir}" && npm install)
   fi

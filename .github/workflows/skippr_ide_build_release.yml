@@ -16,7 +16,9 @@ on:
 jobs:
   verify:
     name: Verify Fork Tooling
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-22.04-16
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,24 +45,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Depot runners are bootstrapped before VS Code dependency installation.
         target:
-          - id: darwin-x64
-            runner: macos-13
-            npm_script: package:darwin:x64
-            artifact_glob: artifacts/skippr-ide-darwin-x64.zip
           - id: darwin-arm64
-            runner: macos-14
+            runner: depot-macos-14
             npm_script: package:darwin:arm64
             artifact_glob: artifacts/skippr-ide-darwin-arm64.zip
           - id: linux-x64
-            runner: ubuntu-24.04
+            runner: depot-ubuntu-22.04-16
             npm_script: package:linux:x64
             artifact_glob: artifacts/skippr-ide-linux-x64.tar.gz
+          - id: linux-arm64
+            runner: depot-ubuntu-24.04-arm-16
+            npm_script: package:linux:arm64
+            artifact_glob: artifacts/skippr-ide-linux-arm64.tar.gz
+          - id: linux-armhf
+            runner: depot-ubuntu-22.04-16
+            npm_script: package:linux:armhf
+            artifact_glob: artifacts/skippr-ide-linux-armhf.tar.gz
           - id: win32-x64
-            runner: windows-2022
+            runner: depot-windows-2022-16
             npm_script: package:win32:x64
             artifact_glob: artifacts/skippr-ide-win32-x64.zip
+          - id: win32-arm64
+            runner: depot-windows-2022-16
+            npm_script: package:win32:arm64
+            artifact_glob: artifacts/skippr-ide-win32-arm64.zip
     runs-on: ${{ matrix.target.runner }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     defaults:
       run:
         shell: bash
@@ -79,6 +92,7 @@ jobs:
       - name: Build target package
         working-directory: .
         run: |
+          . ./scripts/bootstrap_depot_runner.sh "${{ matrix.target.id }}"
           npm install
           npm run bootstrap:fork
           npm run ${{ matrix.target.npm_script }}
@@ -94,7 +108,7 @@ jobs:
     name: Publish Release
     needs: package
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-22.04-16
     permissions:
       contents: write
     steps:
