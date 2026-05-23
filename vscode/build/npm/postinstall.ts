@@ -11,6 +11,7 @@ import { dirs } from './dirs.ts';
 import { root, stateFile, stateContentsFile, computeState, computeContents, isUpToDate } from './installStateHash.ts';
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const npmShell = process.env['npm_config_script_shell'] || true;
 const rootNpmrcConfigKeys = getNpmrcConfigKeys(path.join(root, '.npmrc'));
 
 function log(dir: string, message: string) {
@@ -57,7 +58,7 @@ async function npmInstallAsync(dir: string, opts?: child_process.SpawnOptions): 
 		env: { ...process.env },
 		...(opts ?? {}),
 		cwd: path.join(root, dir),
-		shell: true,
+		shell: npmShell,
 	};
 
 	const command = process.env['npm_command'] || 'install';
@@ -67,7 +68,7 @@ async function npmInstallAsync(dir: string, opts?: child_process.SpawnOptions): 
 			env: finalOpts.env,
 			cwd: root,
 			stdio: 'inherit',
-			shell: true,
+			shell: npmShell,
 		};
 		const userinfo = os.userInfo();
 		log(dir, `Installing dependencies inside container ${process.env['VSCODE_REMOTE_DEPENDENCIES_CONTAINER_NAME']}...`);
@@ -182,6 +183,11 @@ function clearInheritedNpmrcConfig(dir: string, env: NodeJS.ProcessEnv): void {
 	}
 }
 
+function configureGit(): void {
+	child_process.execFileSync('git', ['config', 'pull.rebase', 'merges'], { cwd: root });
+	child_process.execFileSync('git', ['config', 'blame.ignoreRevsFile', '.git-blame-ignore-revs'], { cwd: root });
+}
+
 function ensureAgentHarnessLink(sourceRelativePath: string, linkPath: string): 'existing' | 'junction' | 'symlink' | 'hard link' {
 	if (fs.existsSync(linkPath)) {
 		return 'existing';
@@ -236,8 +242,7 @@ async function runWithConcurrency(tasks: (() => Promise<void>)[], concurrency: n
 async function main() {
 	if (!process.env['VSCODE_FORCE_INSTALL'] && isUpToDate()) {
 		log('.', 'All dependencies up to date, skipping postinstall.');
-		child_process.execSync('git config pull.rebase merges');
-		child_process.execSync('git config blame.ignoreRevsFile .git-blame-ignore-revs');
+		configureGit();
 		return;
 	}
 
@@ -309,8 +314,7 @@ async function main() {
 	log('.', `Running ${parallelTasks.length} npm installs with concurrency ${concurrency}...`);
 	await runWithConcurrency(parallelTasks, concurrency);
 
-	child_process.execSync('git config pull.rebase merges');
-	child_process.execSync('git config blame.ignoreRevsFile .git-blame-ignore-revs');
+	configureGit();
 
 	fs.writeFileSync(stateFile, JSON.stringify(_state));
 	fs.writeFileSync(stateContentsFile, JSON.stringify(computeContents()));
