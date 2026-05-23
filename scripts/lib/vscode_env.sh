@@ -75,7 +75,7 @@ configure_windows_native_builds() {
   esac
 
   export npm_config_foreground_scripts="${npm_config_foreground_scripts:-true}"
-  export npm_config_optional="${npm_config_optional:-false}"
+  export npm_config_omit="${npm_config_omit:-optional}"
 }
 
 ensure_linux_build_dependencies() {

@@ -99,12 +99,12 @@ configure_windows_native_builds() {
 
   log "using foreground npm scripts to avoid concurrent MSBuild file locks"
   export npm_config_foreground_scripts="true"
-  export npm_config_optional="false"
+  export npm_config_omit="optional"
   npm config set foreground-scripts true
-  npm config set optional false
+  npm config set omit optional
   if [ -n "${GITHUB_ENV:-}" ]; then
     printf 'npm_config_foreground_scripts=true\n' >> "${GITHUB_ENV}"
-    printf 'npm_config_optional=false\n' >> "${GITHUB_ENV}"
+    printf 'npm_config_omit=optional\n' >> "${GITHUB_ENV}"
   fi
 }
 
