@@ -28,8 +28,11 @@ ensure_skippr_data_agent_dependencies "${VSCODE_DIR}"
 
 echo "Preparing VS Code extension API typings..."
 mkdir -p "${VSCODE_DIR}/src/vscode-dts"
-cp "${VSCODE_DIR}/extensions/skippr-workbench/node_modules/@types/vscode/index.d.ts" \
-  "${VSCODE_DIR}/src/vscode-dts/vscode.d.ts"
+if ! curl -fsSL "https://raw.githubusercontent.com/microsoft/vscode/${UPSTREAM_REF:-main}/src/vscode-dts/vscode.d.ts" \
+  -o "${VSCODE_DIR}/src/vscode-dts/vscode.d.ts"; then
+  cp "${VSCODE_DIR}/extensions/skippr-workbench/node_modules/@types/vscode/index.d.ts" \
+    "${VSCODE_DIR}/src/vscode-dts/vscode.d.ts"
+fi
 
 echo "Compiling Rust core..."
 cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml"
