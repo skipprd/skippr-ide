@@ -33,6 +33,19 @@ if ! curl -fsSL "https://raw.githubusercontent.com/microsoft/vscode/${UPSTREAM_R
   cp "${VSCODE_DIR}/extensions/skippr-workbench/node_modules/@types/vscode/index.d.ts" \
     "${VSCODE_DIR}/src/vscode-dts/vscode.d.ts"
 fi
+cat >> "${VSCODE_DIR}/src/vscode-dts/vscode.d.ts" <<'EOF'
+
+declare module 'vscode' {
+	export interface TerminalDataWriteEvent {
+		readonly terminal: Terminal;
+		readonly data: string;
+	}
+
+	export namespace window {
+		export const onDidWriteTerminalData: Event<TerminalDataWriteEvent>;
+	}
+}
+EOF
 
 echo "Compiling Rust core..."
 cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml"
