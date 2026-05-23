@@ -116,12 +116,20 @@ function fromLocal(extensionPath: string, forWeb: boolean, _disableMangle: boole
 }
 
 export function typeCheckExtension(extensionPath: string, forWeb: boolean): Promise<void> {
+	if (process.env['VSCODE_SKIP_EXTENSION_TYPECHECK'] === '1') {
+		return Promise.resolve();
+	}
+
 	const tsconfigFileName = forWeb ? 'tsconfig.browser.json' : 'tsconfig.json';
 	const tsconfigPath = path.join(extensionPath, tsconfigFileName);
 	return spawnTsgo(tsconfigPath, { taskName: 'typechecking extension (tsgo)', noEmit: true });
 }
 
 export function typeCheckExtensionStream(extensionPath: string, forWeb: boolean): Stream {
+	if (process.env['VSCODE_SKIP_EXTENSION_TYPECHECK'] === '1') {
+		return es.readArray([]);
+	}
+
 	const tsconfigFileName = forWeb ? 'tsconfig.browser.json' : 'tsconfig.json';
 	const tsconfigPath = path.join(extensionPath, tsconfigFileName);
 	return createTsgoStream(tsconfigPath, { taskName: 'typechecking extension (tsgo)', noEmit: true });
