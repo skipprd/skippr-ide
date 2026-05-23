@@ -26,6 +26,11 @@ ensure_vscode_dependencies "${VSCODE_DIR}"
 ensure_skippr_workbench_dependencies "${VSCODE_DIR}"
 ensure_skippr_data_agent_dependencies "${VSCODE_DIR}"
 
+echo "Preparing VS Code extension API typings..."
+mkdir -p "${VSCODE_DIR}/src/vscode-dts"
+cp "${VSCODE_DIR}/extensions/skippr-workbench/node_modules/@types/vscode/index.d.ts" \
+  "${VSCODE_DIR}/src/vscode-dts/vscode.d.ts"
+
 echo "Compiling Rust core..."
 cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml"
 
