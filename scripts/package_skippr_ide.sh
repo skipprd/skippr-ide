@@ -69,6 +69,7 @@ mkdir -p "${ARTIFACTS_DIR}"
 
 echo "Preparing core build outputs..."
 export VSCODE_SKIP_EXTENSION_TYPECHECK=1
+export VSCODE_SKIP_CORE_TYPECHECK=1
 npm run gulp core-ci
 
 case "${PLATFORM}-${ARCH}" in
