@@ -18,7 +18,7 @@ import { IDiffComputeService } from '../../common/diffComputeService.js';
 import type { AgentSignal } from '../../common/agentService.js';
 import { ISessionDatabase, ISessionDataService } from '../../common/sessionDataService.js';
 import { ActionType } from '../../common/state/sessionActions.js';
-import { ToolResultContentType } from '../../common/state/sessionState.js';
+import { SessionInputQuestionKind, ToolResultContentType } from '../../common/state/sessionState.js';
 import { SessionDatabase } from '../../node/sessionDatabase.js';
 import { SkipprCliAgent } from '../../node/skipprCliAgent.js';
 import { createZeroDiffComputeService } from '../common/sessionTestHelpers.js';
@@ -242,5 +242,93 @@ suite('SkipprCliAgent', () => {
 		const message = JSON.parse(capturedArgs[messageIndex + 1]);
 		assert.strictEqual(message.context.config_path, path.join(workspaceRoot, 'skippr.yml'));
 		assert.strictEqual(message.context.pipeline, undefined);
+	});
+
+	test('ChatSummary sets threadId for follow-up sendMessage', async () => {
+		const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skippr-cli-agent-thread-'));
+		const oldCliPath = process.env.SKIPPR_CLI_PATH;
+		process.env.SKIPPR_CLI_PATH = 'skippr';
+		fs.writeFileSync(path.join(workspaceRoot, 'skippr.yml'), 'pipelines:\n  bike_hire:\n    source: demo\n');
+		const created = await agent.createSession({
+			workingDirectory: URI.file(workspaceRoot),
+			config: { configPath: path.join(workspaceRoot, 'skippr.yml'), pipeline: 'bike_hire', mode: 'ask' },
+		});
+		const state = (agent as unknown as { _sessions: Map<string, { threadId?: string }> })._sessions.get(created.session.toString());
+		assert.ok(state);
+
+		const tools = new Map<string, unknown>();
+		await (agent as unknown as {
+			_handleJsonlLine(state: unknown, turnId: string, tools: Map<string, unknown>, line: string): Promise<void>;
+		})._handleJsonlLine(state, 'turn-1', tools, JSON.stringify({
+			type: 'ChatSummary',
+			thread_id: '11111111-1111-4111-8111-111111111111',
+			ok: true,
+		}));
+
+		let capturedArgs: string[] | undefined;
+		(agent as unknown as {
+			_runCli(state: unknown, turnId: string, command: string, commandArgs: string[], cwd: string): Promise<void>;
+		})._runCli = async (_state, _turnId, _command, commandArgs) => {
+			capturedArgs = commandArgs;
+		};
+
+		try {
+			await agent.sendMessage(created.session, 'follow-up question', [], 'turn-2');
+		} finally {
+			fs.rmSync(workspaceRoot, { recursive: true, force: true });
+			if (oldCliPath === undefined) {
+				delete process.env.SKIPPR_CLI_PATH;
+			} else {
+				process.env.SKIPPR_CLI_PATH = oldCliPath;
+			}
+		}
+
+		assert.strictEqual(state.threadId, '11111111-1111-4111-8111-111111111111');
+		assert.ok(capturedArgs?.includes('--thread'));
+		const threadIndex = capturedArgs!.indexOf('--thread');
+		assert.strictEqual(capturedArgs![threadIndex + 1], '11111111-1111-4111-8111-111111111111');
+	});
+
+	test('thread_assigned sets threadId before ChatSummary', async () => {
+		const created = await agent.createSession({
+			config: { mode: 'ask', pipeline: 'bike_hire' },
+		});
+		const state = (agent as unknown as { _sessions: Map<string, { threadId?: string }> })._sessions.get(created.session.toString());
+		assert.ok(state);
+
+		const tools = new Map<string, unknown>();
+		await (agent as unknown as {
+			_handleJsonlLine(state: unknown, turnId: string, tools: Map<string, unknown>, line: string): Promise<void>;
+		})._handleJsonlLine(state, 'turn-1', tools, JSON.stringify({
+			type: 'thread_assigned',
+			thread_id: '22222222-2222-4222-8222-222222222222',
+		}));
+
+		assert.strictEqual(state.threadId, '22222222-2222-4222-8222-222222222222');
+	});
+
+	test('await_user emits SessionInputRequested', async () => {
+		const created = await agent.createSession({ config: { mode: 'ask' } });
+		const state = (agent as unknown as { _sessions: Map<string, unknown> })._sessions.get(created.session.toString());
+		assert.ok(state);
+
+		const signals: AgentSignal[] = [];
+		const sub = agent.onDidSessionProgress(signal => signals.push(signal));
+		disposables.add(sub);
+
+		const tools = new Map<string, unknown>();
+		await (agent as unknown as {
+			_handleJsonlLine(state: unknown, turnId: string, tools: Map<string, unknown>, line: string): Promise<void>;
+		})._handleJsonlLine(state, 'turn-1', tools, JSON.stringify({
+			type: 'await_user',
+			prompt: 'Which date range should I use?',
+		}));
+
+		const inputRequested = signals
+			.filter((signal): signal is Extract<AgentSignal, { kind: 'action' }> => signal.kind === 'action')
+			.map(signal => signal.action)
+			.find(action => action.type === ActionType.SessionInputRequested);
+		assert.ok(inputRequested);
+		assert.strictEqual(inputRequested.request.questions[0].kind, SessionInputQuestionKind.Text);
 	});
 });

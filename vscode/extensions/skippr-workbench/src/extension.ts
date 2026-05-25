@@ -2701,6 +2701,33 @@ function scheduleDbtEditorContextRefresh(output: vscode.LogOutputChannel): void 
   }, 600);
 }
 
+function chatThreadGlobalStateKey(configPath: string, pipeline: string): string {
+  return `skippr.chatThread.${configPath}::${pipeline}`;
+}
+
+function readPersistedChatThreadId(configPath: string, pipeline: string): string | undefined {
+  const value = workbenchExtensionContext?.globalState.get<string>(chatThreadGlobalStateKey(configPath, pipeline));
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function threadIdFromChatJsonLines(lines: unknown[]): string | undefined {
+  for (const line of lines) {
+    if (!line || typeof line !== "object") {
+      continue;
+    }
+    const record = line as Record<string, unknown>;
+    const type = record.type;
+    if (type !== "ChatSummary" && type !== "thread_assigned" && type !== "ThreadAssigned") {
+      continue;
+    }
+    const threadId = record.thread_id ?? record.threadId;
+    if (typeof threadId === "string" && threadId.trim()) {
+      return threadId.trim();
+    }
+  }
+  return undefined;
+}
+
 async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
   const question = (await vscode.window.showInputBox({ prompt: "Ask a data question", placeHolder: "e.g. Which customers drove revenue last month?" }))?.trim();
   if (!question) {
@@ -2710,6 +2737,7 @@ async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
   if (!ctx) {
     return;
   }
+  const persistedThreadId = readPersistedChatThreadId(ctx.configPath, ctx.pipeline);
   postQueryResults({
     type: "queryResults",
     status: "running",
@@ -2723,16 +2751,39 @@ async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
     execution_surface: "ide_chat",
     context: { surface: "sql_results_panel" }
   });
+  const chatArgs = [
+    "--config",
+    ctx.configPath,
+    "--log",
+    getLogLevel(),
+    "chat",
+    "send",
+    "--pipeline",
+    ctx.pipeline,
+    "--mode",
+    "ask",
+    "--message",
+    message,
+    "--output",
+    "jsonl"
+  ];
+  if (persistedThreadId) {
+    chatArgs.push("--thread", persistedThreadId);
+  }
   const tokenSource = new vscode.CancellationTokenSource();
   try {
     const result = await runSkipprJsonLines(
       ctx.cliPath,
-      ["--config", ctx.configPath, "--log", getLogLevel(), "chat", "send", "--pipeline", ctx.pipeline, "--mode", "ask", "--message", message, "--output", "jsonl"],
+      chatArgs,
       getConfigCwd(ctx.configPath),
       output,
       tokenSource.token,
       await skipprSpawnEnv(ctx.configPath, ctx.pipeline, output)
     );
+    const threadId = threadIdFromChatJsonLines(result.lines as unknown[]);
+    if (threadId && workbenchExtensionContext) {
+      await workbenchExtensionContext.globalState.update(chatThreadGlobalStateKey(ctx.configPath, ctx.pipeline), threadId);
+    }
     const finalPayload = (result.lines as unknown[])
       .map((line) => payloadFromAgentJsonLine(line, ctx.pipeline, question))
       .find((payload): payload is SkipprQueryResultsPanelPayload => Boolean(payload));

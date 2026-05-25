@@ -22,7 +22,7 @@ import { ISessionDataService } from '../common/sessionDataService.js';
 import type { ResolveSessionConfigResult, SessionConfigCompletionsResult } from '../common/state/protocol/commands.js';
 import type { MessageAttachment, ModelSelection, ToolCallResult, ToolDefinition } from '../common/state/protocol/state.js';
 import { ActionType, type SessionAction } from '../common/state/sessionActions.js';
-import { FileEditKind, PolicyState, ResponsePartKind, SessionStatus, ToolCallConfirmationReason, ToolResultContentType, type CustomizationRef, type PendingMessage, type SessionInputAnswer, type SessionInputResponseKind, type ToolResultContent, type ToolResultFileEditContent, type Turn } from '../common/state/sessionState.js';
+import { FileEditKind, PolicyState, ResponsePartKind, SessionInputAnswerState, SessionInputAnswerValueKind, SessionInputQuestionKind, SessionStatus, ToolCallConfirmationReason, ToolResultContentType, type CustomizationRef, type PendingMessage, type SessionInputAnswer, type SessionInputResponseKind, type ToolResultContent, type ToolResultFileEditContent, type Turn } from '../common/state/sessionState.js';
 import { buildSessionDbUri } from './shared/fileEditTracker.js';
 import {
 	buildSkipprCliInvocation,
@@ -48,6 +48,8 @@ interface ISkipprSession {
 	child?: cp.ChildProcessWithoutNullStreams;
 	threadId?: string;
 	modelBridgeInFlight?: boolean;
+	awaitingUserInput?: boolean;
+	pendingInput?: { requestId: string; turnId: string; prompt: string };
 }
 
 interface ISkipprToolCall {
@@ -114,7 +116,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		const session = config?.session ?? AgentSession.uri(this.id, generateUuid());
 		const project = workingDirectory ? { uri: workingDirectory, displayName: path.basename(workingDirectory.fsPath) || 'Skippr' } : undefined;
 
-		this._sessions.set(session.toString(), {
+		const state: ISkipprSession = {
 			session,
 			createdAt: Date.now(),
 			modifiedAt: Date.now(),
@@ -124,7 +126,12 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			mode,
 			workingDirectory,
 			project,
-		});
+		};
+		const persistedThreadId = loadPersistedChatThreadId(state);
+		if (persistedThreadId) {
+			state.threadId = persistedThreadId;
+		}
+		this._sessions.set(session.toString(), state);
 
 		return { session, workingDirectory, project };
 	}
@@ -188,6 +195,14 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		}
 
 		state.modifiedAt = Date.now();
+		state.awaitingUserInput = false;
+		state.pendingInput = undefined;
+		if (!state.threadId) {
+			const persistedThreadId = loadPersistedChatThreadId(state);
+			if (persistedThreadId) {
+				state.threadId = persistedThreadId;
+			}
+		}
 		const modelSlash = parseModelSlashPrompt(prompt, state);
 		if (modelSlash) {
 			await this._runModelSubagent(state, turnId, modelSlash);
@@ -255,8 +270,30 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		// Skippr CLI handles approval prompts in its own protocol.
 	}
 
-	respondToUserInputRequest(_requestId: string, _response: SessionInputResponseKind, _answers?: Record<string, SessionInputAnswer>): void {
-		// Skippr CLI handles approval prompts in its own protocol.
+	respondToUserInputRequest(requestId: string, response: SessionInputResponseKind, answers?: Record<string, SessionInputAnswer>): void {
+		for (const state of this._sessions.values()) {
+			const pending = state.pendingInput;
+			if (!pending || pending.requestId !== requestId) {
+				continue;
+			}
+			state.pendingInput = undefined;
+			state.awaitingUserInput = false;
+			this._emitAction(state.session, {
+				type: ActionType.SessionInputCompleted,
+				session: state.session,
+				requestId,
+				response,
+				answers,
+			});
+			if (response !== SessionInputResponseKind.Accept || !state.workspaceRoot) {
+				return;
+			}
+			const userText = extractSubmittedInputText(answers) ?? pending.prompt;
+			void this.sendMessage(state.session, userText, [], pending.turnId).catch(err => {
+				this._logService.error('[SkipprCliAgent] failed to resume after user input', err);
+			});
+			return;
+		}
 	}
 
 	async listSessions(): Promise<IAgentSessionMetadata[]> {
@@ -323,6 +360,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			shell: false,
 		});
 		state.child = child;
+		state.awaitingUserInput = false;
 
 		let stdoutBuffer = '';
 		let stderr = '';
@@ -371,6 +409,10 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 						handleLine(tail, 'chat tail');
 					}
 					void Promise.allSettled([...pendingLineHandlers]).then(() => {
+						if (state.awaitingUserInput && (code === 0 || code === 2) && !signal) {
+							resolve();
+							return;
+						}
 						if (code === 0 && !signal) {
 							resolve();
 						} else {
@@ -379,7 +421,9 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 					});
 				});
 			});
-			this._emitAction(state.session, { type: ActionType.SessionTurnComplete, session: state.session.toString(), turnId });
+			if (!state.awaitingUserInput) {
+				this._emitAction(state.session, { type: ActionType.SessionTurnComplete, session: state.session.toString(), turnId });
+			}
 		} catch (err) {
 			const raw = err instanceof Error ? err.message : String(err);
 			const message = enrichCargoFailureDetail(raw, stderr) ?? raw;
@@ -656,10 +700,27 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			this._writeAskQueryResultBridgeMessage(state, o);
 			return;
 		}
+		if (type === 'thread_assigned' || type === 'ThreadAssigned') {
+			const threadId = stringFieldFromObject(o, ['thread_id', 'threadId']);
+			if (threadId) {
+				applyChatThreadId(state, threadId);
+			}
+			return;
+		}
+		if (type === 'await_user' || type === 'AwaitUser') {
+			const prompt = stringField(o, 'prompt') ?? 'Additional context is required to continue.';
+			this._emitAwaitUserInput(state, turnId, prompt);
+			return;
+		}
+		if (type === 'await_approval' || type === 'AwaitApproval') {
+			const prompt = stringField(o, 'prompt') ?? 'Approval is required to continue.';
+			this._emitAwaitUserInput(state, turnId, prompt);
+			return;
+		}
 		if (type === 'ChatSummary') {
 			const threadId = stringFieldFromObject(o, ['thread_id', 'threadId']);
 			if (threadId) {
-				state.threadId = threadId;
+				applyChatThreadId(state, threadId);
 			}
 			if (o.ok === false) {
 				const failure = stringField(o, 'failure_summary') ?? stringField(o, 'bootstrap_error') ?? 'Skippr chat failed.';
@@ -915,6 +976,27 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		return stringField(event, 'error') ?? stringField(event, 'clean_name') ?? stringField(event, 'name') ?? 'Tool complete';
 	}
 
+	private _emitAwaitUserInput(state: ISkipprSession, turnId: string, prompt: string): void {
+		const requestId = generateUuid();
+		state.awaitingUserInput = true;
+		state.pendingInput = { requestId, turnId, prompt };
+		this._emitMarkdown(state.session, turnId, prompt);
+		this._emitAction(state.session, {
+			type: ActionType.SessionInputRequested,
+			session: state.session,
+			request: {
+				id: requestId,
+				message: prompt,
+				questions: [{
+					id: 'q-1',
+					kind: SessionInputQuestionKind.Text,
+					message: prompt,
+					required: true,
+				}],
+			},
+		});
+	}
+
 	private async _diffCounts(before: string, after: string): Promise<{ added: number; removed: number }> {
 		try {
 			return await this._diffComputeService.computeDiffCounts(before, after);
@@ -1016,6 +1098,79 @@ function listPipelinesFromConfig(configPath: string | undefined): string[] {
 		out.push(key!);
 	}
 	return [...new Set(out)];
+}
+
+function chatThreadStorePath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, '.skippr', 'ide', 'chat-thread.json');
+}
+
+function chatThreadStoreKey(state: ISkipprSession): string | undefined {
+	if (!state.workspaceRoot) {
+		return undefined;
+	}
+	return crypto.createHash('sha256').update([
+		state.workspaceRoot,
+		state.configPath ?? '',
+		state.pipeline ?? '',
+		state.mode,
+	].join('\0')).digest('hex');
+}
+
+function loadPersistedChatThreadId(state: ISkipprSession): string | undefined {
+	const key = chatThreadStoreKey(state);
+	if (!key || !state.workspaceRoot) {
+		return undefined;
+	}
+	try {
+		const raw = fs.readFileSync(chatThreadStorePath(state.workspaceRoot), 'utf8');
+		const parsed = JSON.parse(raw) as { threads?: Record<string, string> };
+		const threadId = parsed.threads?.[key];
+		return typeof threadId === 'string' && threadId.trim() ? threadId.trim() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function persistChatThreadId(state: ISkipprSession, threadId: string): void {
+	const key = chatThreadStoreKey(state);
+	if (!key || !state.workspaceRoot) {
+		return;
+	}
+	const storePath = chatThreadStorePath(state.workspaceRoot);
+	try {
+		fs.mkdirSync(path.dirname(storePath), { recursive: true });
+		let threads: Record<string, string> = {};
+		try {
+			const parsed = JSON.parse(fs.readFileSync(storePath, 'utf8')) as { threads?: Record<string, string> };
+			threads = parsed.threads ?? {};
+		} catch {
+			threads = {};
+		}
+		threads[key] = threadId;
+		fs.writeFileSync(storePath, JSON.stringify({ threads }, null, 2), 'utf8');
+	} catch (err) {
+		// Non-fatal: in-memory thread id still works for the active session.
+	}
+}
+
+function applyChatThreadId(state: ISkipprSession, threadId: string): void {
+	state.threadId = threadId;
+	persistChatThreadId(state, threadId);
+}
+
+function extractSubmittedInputText(answers: Record<string, SessionInputAnswer> | undefined): string | undefined {
+	if (!answers) {
+		return undefined;
+	}
+	for (const answer of Object.values(answers)) {
+		if (answer.state !== SessionInputAnswerState.Submitted) {
+			continue;
+		}
+		if (answer.value?.kind === SessionInputAnswerValueKind.Text && answer.value.value.trim()) {
+			return answer.value.value.trim();
+		}
+	}
+	return undefined;
 }
 
 function buildIdeChatMessage(prompt: string, state: ISkipprSession): string {
