@@ -22,7 +22,7 @@ import { ISessionDataService } from '../common/sessionDataService.js';
 import type { ResolveSessionConfigResult, SessionConfigCompletionsResult } from '../common/state/protocol/commands.js';
 import type { MessageAttachment, ModelSelection, ToolCallResult, ToolDefinition } from '../common/state/protocol/state.js';
 import { ActionType, type SessionAction } from '../common/state/sessionActions.js';
-import { FileEditKind, PolicyState, ResponsePartKind, SessionInputAnswerState, SessionInputAnswerValueKind, SessionInputQuestionKind, SessionStatus, ToolCallConfirmationReason, ToolResultContentType, type CustomizationRef, type PendingMessage, type SessionInputAnswer, type SessionInputResponseKind, type ToolResultContent, type ToolResultFileEditContent, type Turn } from '../common/state/sessionState.js';
+import { FileEditKind, PolicyState, ResponsePartKind, SessionInputAnswerState, SessionInputAnswerValueKind, SessionInputQuestionKind, SessionInputResponseKind, SessionStatus, ToolCallConfirmationReason, ToolResultContentType, type CustomizationRef, type PendingMessage, type SessionInputAnswer, type ToolResultContent, type ToolResultFileEditContent, type Turn } from '../common/state/sessionState.js';
 import { buildSessionDbUri } from './shared/fileEditTracker.js';
 import {
 	buildSkipprCliInvocation,
@@ -127,9 +127,9 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			workingDirectory,
 			project,
 		};
-		const persistedThreadId = loadPersistedChatThreadId(state);
-		if (persistedThreadId) {
-			state.threadId = persistedThreadId;
+		const resolvedThreadId = await resolveChatThreadIdFromStorage(state);
+		if (resolvedThreadId) {
+			state.threadId = resolvedThreadId;
 		}
 		this._sessions.set(session.toString(), state);
 
@@ -198,9 +198,9 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		state.awaitingUserInput = false;
 		state.pendingInput = undefined;
 		if (!state.threadId) {
-			const persistedThreadId = loadPersistedChatThreadId(state);
-			if (persistedThreadId) {
-				state.threadId = persistedThreadId;
+			const resolvedThreadId = await resolveChatThreadIdFromStorage(state);
+			if (resolvedThreadId) {
+				state.threadId = resolvedThreadId;
 			}
 		}
 		const modelSlash = parseModelSlashPrompt(prompt, state);
@@ -280,7 +280,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 			state.awaitingUserInput = false;
 			this._emitAction(state.session, {
 				type: ActionType.SessionInputCompleted,
-				session: state.session,
+				session: state.session.toString(),
 				requestId,
 				response,
 				answers,
@@ -983,7 +983,7 @@ export class SkipprCliAgent extends Disposable implements IAgent {
 		this._emitMarkdown(state.session, turnId, prompt);
 		this._emitAction(state.session, {
 			type: ActionType.SessionInputRequested,
-			session: state.session,
+			session: state.session.toString(),
 			request: {
 				id: requestId,
 				message: prompt,
@@ -1114,6 +1114,54 @@ function chatThreadStoreKey(state: ISkipprSession): string | undefined {
 		state.pipeline ?? '',
 		state.mode,
 	].join('\0')).digest('hex');
+}
+
+async function resolveChatThreadIdFromStorage(state: ISkipprSession): Promise<string | undefined> {
+	if (!state.configPath?.trim() || !state.pipeline?.trim() || !state.workspaceRoot) {
+		return loadPersistedChatThreadId(state);
+	}
+	try {
+		const cliPath = resolveSkipprCli();
+		const args = [
+			'--config',
+			state.configPath,
+			'thread',
+			'resolve',
+			'--pipeline',
+			state.pipeline,
+			'--output',
+			'json',
+		];
+		const extraManifestCandidates = [path.join(path.dirname(state.workspaceRoot), 'skipprd/Cargo.toml')];
+		const extraReactSearchPaths = [path.join(path.dirname(state.workspaceRoot), 'react')];
+		const { command, argv: commandArgs, cwd: cargoCwd } = buildSkipprCliInvocation(cliPath, args, {
+			extraManifestCandidates,
+			extraReactSearchPaths,
+		});
+		const stdout = await new Promise<string>((resolve, reject) => {
+			cp.execFile(
+				command,
+				commandArgs,
+				{ cwd: cargoCwd, maxBuffer: 10 * 1024 * 1024, timeout: 120_000 },
+				(err, out) => {
+					if (err) {
+						reject(err);
+						return;
+					}
+					resolve(out);
+				},
+			);
+		});
+		const parsed = JSON.parse(stdout.trim()) as { threadId?: string | null };
+		const threadId = typeof parsed.threadId === 'string' ? parsed.threadId.trim() : undefined;
+		if (threadId) {
+			persistChatThreadId(state, threadId);
+			return threadId;
+		}
+	} catch {
+		// Storage resolve failed; fall back to local cache.
+	}
+	return loadPersistedChatThreadId(state);
 }
 
 function loadPersistedChatThreadId(state: ISkipprSession): string | undefined {

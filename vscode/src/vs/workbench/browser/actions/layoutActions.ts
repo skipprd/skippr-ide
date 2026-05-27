@@ -491,7 +491,7 @@ registerAction2(class extends Action2 {
 		const viewDescriptorService = accessor.get(IViewDescriptorService);
 		const runContainerIds = [
 			'skippr.run.timeline.panel',
-			'skippr.run.schema.panel',
+			'skippr.query.results.panel',
 			'skippr.run.deadletters.panel'
 		];
 

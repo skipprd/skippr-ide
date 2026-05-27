@@ -329,6 +329,6 @@ suite('SkipprCliAgent', () => {
 			.map(signal => signal.action)
 			.find(action => action.type === ActionType.SessionInputRequested);
 		assert.ok(inputRequested);
-		assert.strictEqual(inputRequested.request.questions[0].kind, SessionInputQuestionKind.Text);
+		assert.strictEqual(inputRequested.request.questions?.[0]?.kind, SessionInputQuestionKind.Text);
 	});
 });

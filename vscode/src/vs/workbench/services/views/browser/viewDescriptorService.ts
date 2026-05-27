@@ -34,6 +34,16 @@ interface IViewsCustomizations {
 
 function getViewContainerStorageId(viewContainerId: string): string { return `${viewContainerId}.state`; }
 
+const SKIPPR_PINNED_RUN_PANEL_CONTAINERS = new Set([
+	'skippr.run.timeline.panel',
+	'skippr.query.results.panel',
+	'skippr.run.deadletters.panel',
+]);
+
+function isSkipprPinnedRunPanelContainer(viewContainerId: string): boolean {
+	return SKIPPR_PINNED_RUN_PANEL_CONTAINERS.has(viewContainerId);
+}
+
 export class ViewDescriptorService extends Disposable implements IViewDescriptorService {
 
 	declare readonly _serviceBrand: undefined;
@@ -304,6 +314,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 	}
 
 	getViewContainerLocation(viewContainer: ViewContainer): ViewContainerLocation {
+		if (isSkipprPinnedRunPanelContainer(viewContainer.id)) {
+			return ViewContainerLocation.Panel;
+		}
 		const location = this.viewContainersCustomLocations.get(viewContainer.id) ?? this.getDefaultViewContainerLocation(viewContainer);
 		return this.getEffectiveViewContainerLocation(location);
 	}
@@ -364,6 +377,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 	moveViewContainerToLocation(viewContainer: ViewContainer, location: ViewContainerLocation, requestedIndex?: number, reason?: string): void {
 		if (!this.canMoveViews()) {
 			return;
+		}
+		if (isSkipprPinnedRunPanelContainer(viewContainer.id) && reason !== 'skippr.forceRunPanels') {
+			location = ViewContainerLocation.Panel;
 		}
 		this.logger.value.trace(`moveViewContainerToLocation: viewContainer:${viewContainer.id} location:${location} reason:${reason}`);
 		this.moveViewContainerToLocationWithoutSaving(viewContainer, location, requestedIndex);
