@@ -4762,12 +4762,7 @@ async function enterBusinessUserLayout(context: vscode.ExtensionContext, output:
   await runWorkbenchCommand("skippr.workbench.forceActivityBar");
   await runWorkbenchCommand("workbench.action.closeSidebar");
   await runWorkbenchCommand("workbench.action.closePanel");
-  await openBusinessDashboardPanel(
-    context,
-    output,
-    () => resolveCliOrOfferInstall(output),
-    async () => resolveSkipprConfigAtCwd()
-  );
+  await openBusinessDashboardPanel(context);
   await runWorkbenchCommand("workbench.action.restoreAuxiliaryBar");
   const pipeline = vscode.workspace.getConfiguration().get<string>(defaultPipelineKey, "").trim();
   await vscode.commands.executeCommand(`workbench.action.chat.openNewSessionSidebar.${SKIPPR_AGENT_HOST_SESSION_TYPE}`, {
@@ -5362,7 +5357,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
   registerAgentModelBridge(context, output, runStatusItem);
-  registerDashboardContributions(context, output, () => resolveCliOrOfferInstall(output), async () => resolveSkipprConfigAtCwd());
+  registerDashboardContributions(context);
   if (getExperienceMode(context) === "business" && vscode.workspace.workspaceFolders?.length) {
     void enterBusinessUserLayout(context, output);
   }

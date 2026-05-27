@@ -30,6 +30,7 @@ export function renderDashboardPanelHtml(mode: DashboardPanelMode, lightTheme: b
     .widget { grid-column: span 6; border: 1px solid var(--skippr-border, var(--vscode-panel-border)); border-radius: 8px; background: var(--skippr-surface, var(--vscode-editor-background)); min-height: 200px; overflow: hidden; }
     .widget h2 { margin: 0; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid var(--skippr-border, var(--vscode-panel-border)); }
     .widget-body { padding: 0; }
+    .widget-sql { margin: 0; padding: 10px; overflow: auto; max-height: 220px; border-top: 1px solid var(--skippr-border, var(--vscode-panel-border)); color: var(--skippr-muted, var(--vscode-descriptionForeground)); background: var(--skippr-bg, var(--vscode-editor-background)); white-space: pre-wrap; }
     .empty, .error { padding: 16px; color: var(--skippr-muted, var(--vscode-descriptionForeground)); }
     .error { color: var(--vscode-errorForeground, #c92a2a); }
     .toolbar-actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -43,7 +44,6 @@ export function renderDashboardPanelHtml(mode: DashboardPanelMode, lightTheme: b
     <div class="toolbar-actions">
       ${business ? '<button type="button" class="secondary" data-action="askAbout">Ask about dashboard</button>' : `
         <button type="button" class="secondary" data-action="refresh">Refresh</button>
-        <button type="button" class="secondary" data-action="suggestFilters">Suggest filters</button>
         <button type="button" class="secondary" data-action="addFromEditor">Add chart from editor</button>
         <button type="button" class="secondary" data-action="newDashboard">New dashboard</button>
         <button type="button" class="secondary" data-action="togglePublished">Publish</button>
@@ -133,6 +133,8 @@ export function renderDashboardPanelHtml(mode: DashboardPanelMode, lightTheme: b
             body = '<div class="error">' + esc(w.error) + '</div>';
           } else if (w.data && w.data.header) {
             body = '<div class="widget-body">' + window.SkipprChart.chartHtml(w.data, window.SkipprChart.inferChart(w.data.header, w.data.rows || [], w.chart)) + '</div>';
+          } else if (w.sql) {
+            body = '<div class="empty">SQL saved in dashboard YAML.</div><pre class="widget-sql">' + esc(w.sql) + '</pre>';
           } else {
             body = '<div class="empty">No data</div>';
           }

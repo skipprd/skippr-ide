@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { renderDashboardPanelHtml } from "./skipprDashboardPanelHtml";
-import { pipelineName, runSkipprJson } from "./skipprRunner";
+import { pipelineName } from "./skipprRunner";
 
 export const SKIPPR_DASHBOARDS_VIEW_ID = "skippr.dashboards";
 export const SKIPPR_DASHBOARDS_CONTAINER_ID = "skippr.dashboards.activity";
@@ -58,33 +58,161 @@ function dashboardFilePath(workspaceRoot: string, id: string): string {
   return path.join(dashboardsDir(workspaceRoot), `${id}.yaml`);
 }
 
-function readDashboardYamlMeta(filePath: string): DashboardYamlSpec | undefined {
+function unquoteYamlScalar(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function readTopLevelScalar(lines: string, key: string): string | undefined {
+  const match = new RegExp(`^${key}:\\s*(.+)$`, "m").exec(lines);
+  return match ? unquoteYamlScalar(match[1]) : undefined;
+}
+
+function readIndentedScalar(block: string, indent: number, key: string): string | undefined {
+  const match = new RegExp(`^${" ".repeat(indent)}${key}:\\s*(.+)$`, "m").exec(block);
+  return match ? unquoteYamlScalar(match[1]) : undefined;
+}
+
+function readIndentedBlockScalar(block: string, indent: number, key: string): string | undefined {
+  const lines = block.split(/\r?\n/);
+  const marker = `${" ".repeat(indent)}${key}: |`;
+  const start = lines.findIndex((line) => line.trimEnd() === marker.trimEnd());
+  if (start < 0) {
+    return undefined;
+  }
+  const contentIndent = indent + 2;
+  const content: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() && line.search(/\S/) < contentIndent) {
+      break;
+    }
+    content.push(line.startsWith(" ".repeat(contentIndent)) ? line.slice(contentIndent) : line.trimEnd());
+  }
+  return content.join("\n").trimEnd();
+}
+
+function readInlineNumberMap(block: string, indent: number, key: string): { x?: number; y?: number; w?: number; h?: number } | undefined {
+  const raw = readIndentedScalar(block, indent, key);
+  if (!raw?.startsWith("{") || !raw.endsWith("}")) {
+    return undefined;
+  }
+  const result: { x?: number; y?: number; w?: number; h?: number } = {};
+  for (const part of raw.slice(1, -1).split(",")) {
+    const [name, value] = part.split(":").map((item) => item.trim());
+    if ((name === "x" || name === "y" || name === "w" || name === "h") && Number.isFinite(Number(value))) {
+      result[name] = Number(value);
+    }
+  }
+  return result;
+}
+
+function readInlineStringArray(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  return trimmed
+    .slice(1, -1)
+    .split(",")
+    .map((item) => unquoteYamlScalar(item))
+    .filter(Boolean);
+}
+
+function readListSection(raw: string, section: string): string[] {
+  const lines = raw.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trimEnd() === `${section}:`);
+  if (start < 0) {
+    return [];
+  }
+  const items: string[] = [];
+  let current: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() && line.search(/\S/) === 0) {
+      break;
+    }
+    if (line.startsWith("  - ")) {
+      if (current.length) {
+        items.push(current.join("\n"));
+      }
+      current = [`  ${line.slice(4)}`];
+      continue;
+    }
+    if (current.length) {
+      current.push(line);
+    }
+  }
+  if (current.length) {
+    items.push(current.join("\n"));
+  }
+  return items;
+}
+
+function readDashboardYaml(filePath: string): DashboardYamlSpec | undefined {
   try {
-    const lines = fs.readFileSync(filePath, "utf8");
-    const idMatch = /^id:\s*(.+)$/m.exec(lines);
-    const titleMatch = /^title:\s*(.+)$/m.exec(lines);
-    const pipelineMatch = /^pipeline:\s*(.+)$/m.exec(lines);
-    const publishedMatch = /^published:\s*(true|false)/m.exec(lines);
-    if (!idMatch || !titleMatch || !pipelineMatch) {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const id = readTopLevelScalar(raw, "id");
+    const title = readTopLevelScalar(raw, "title");
+    const pipeline = readTopLevelScalar(raw, "pipeline");
+    if (!id || !title || !pipeline) {
       return undefined;
     }
+    const filters = readListSection(raw, "filters").map((block) => {
+      const defaultPreset = readIndentedScalar(block, 6, "preset");
+      return {
+        id: readIndentedScalar(block, 2, "id") ?? "",
+        label: readIndentedScalar(block, 4, "label") ?? readIndentedScalar(block, 2, "label") ?? "",
+        type: readIndentedScalar(block, 4, "type") ?? readIndentedScalar(block, 2, "type") ?? "text",
+        ...(defaultPreset ? { default: { preset: defaultPreset } } : {})
+      };
+    }).filter((filter) => filter.id);
+    const widgets = readListSection(raw, "widgets").map((block) => {
+      const inlineRef = readIndentedScalar(block, 6, "ref");
+      const chartY = readInlineStringArray(readIndentedScalar(block, 6, "y"));
+      return {
+        id: readIndentedScalar(block, 2, "id") ?? "",
+        title: readIndentedScalar(block, 4, "title") ?? readIndentedScalar(block, 2, "title") ?? "",
+        layout: readInlineNumberMap(block, 4, "layout"),
+        dataset: {
+          kind: readIndentedScalar(block, 6, "kind") ?? "sql",
+          ref: readIndentedBlockScalar(block, 6, "ref") ?? inlineRef ?? ""
+        },
+        chart: {
+          type: readIndentedScalar(block, 6, "type") ?? "bar",
+          x: readIndentedScalar(block, 6, "x") ?? "",
+          y: chartY
+        }
+      };
+    }).filter((widget) => widget.id);
     return {
-      api_version: DASHBOARD_API_VERSION,
-      id: idMatch[1].trim(),
-      title: titleMatch[1].trim(),
-      pipeline: pipelineMatch[1].trim(),
-      published: publishedMatch ? publishedMatch[1] === "true" : false,
-      filters: [],
-      widgets: []
+      api_version: readTopLevelScalar(raw, "api_version") ?? readTopLevelScalar(raw, "apiVersion") ?? DASHBOARD_API_VERSION,
+      id,
+      title,
+      pipeline,
+      published: readTopLevelScalar(raw, "published") === "true",
+      filters,
+      widgets
     };
   } catch {
     return undefined;
   }
 }
 
+function readDashboardYamlMeta(filePath: string): DashboardYamlSpec | undefined {
+  return readDashboardYaml(filePath);
+}
+
 function writeDashboardYaml(filePath: string, spec: DashboardYamlSpec): void {
   const lines = [
-    `apiVersion: ${spec.api_version}`,
+    `api_version: ${spec.api_version}`,
     `id: ${spec.id}`,
     `title: ${spec.title}`,
     `pipeline: ${spec.pipeline}`,
@@ -97,6 +225,14 @@ function writeDashboardYaml(filePath: string, spec: DashboardYamlSpec): void {
   ];
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+}
+
+function setDashboardPublished(filePath: string, published: boolean): void {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const next = /^published:\s*(true|false)\s*$/m.test(raw)
+    ? raw.replace(/^published:\s*(true|false)\s*$/m, `published: ${published}`)
+    : raw.replace(/^(pipeline:\s*.+)$/m, `$1\npublished: ${published}`);
+  fs.writeFileSync(filePath, next, "utf8");
 }
 
 export async function listDashboardsFromDisk(workspaceRoot: string, publishedOnly: boolean): Promise<DashboardListEntry[]> {
@@ -127,20 +263,6 @@ export async function listDashboardsFromDisk(workspaceRoot: string, publishedOnl
   }
   entries.sort((a, b) => a.title.localeCompare(b.title));
   return entries;
-}
-
-export async function runDashboardCli<T>(
-  cliPath: string,
-  configPath: string,
-  cwd: string,
-  output: vscode.LogOutputChannel,
-  args: string[]
-): Promise<T | undefined> {
-  const result = await runSkipprJson<T>(cliPath, args, cwd, output, process.env, configPath);
-  if (result.code !== 0) {
-    return undefined;
-  }
-  return result.value;
 }
 
 class DashboardTreeItem extends vscode.TreeItem {
@@ -238,6 +360,7 @@ type DashboardRenderResponse = {
     id: string;
     title: string;
     error?: string;
+    sql?: string;
     data?: { header: string[]; rows: string[][] };
     chart?: { type: string; x: string; y: string[] };
   }>;
@@ -245,36 +368,36 @@ type DashboardRenderResponse = {
 
 async function renderDashboardInWebview(
   webview: vscode.Webview,
-  context: vscode.ExtensionContext,
-  cliPath: string,
-  configPath: string,
   cwd: string,
-  output: vscode.LogOutputChannel,
   dashboardId: string,
   filterValues: Record<string, unknown>
 ): Promise<void> {
-  const filtersJson = JSON.stringify(filterValues);
-  const render = await runDashboardCli<DashboardRenderResponse>(cliPath, configPath, cwd, output, [
-    "dashboard",
-    "render",
-    dashboardId,
-    "--filters",
-    filtersJson,
-    "--output",
-    "json"
-  ]);
-  if (!render) {
+  const spec = readDashboardYaml(dashboardFilePath(cwd, dashboardId));
+  if (!spec) {
     webview.postMessage({ type: "dashboardState", dashboard: null, render: null, filterValues });
     return;
   }
+  const render: DashboardRenderResponse = {
+    ok: true,
+    id: spec.id,
+    title: spec.title,
+    pipeline: spec.pipeline,
+    filters: spec.filters,
+    widgets: spec.widgets.map((widget) => ({
+      id: widget.id,
+      title: widget.title,
+      sql: widget.dataset.kind === "sql" || widget.dataset.kind === "table" ? widget.dataset.ref : undefined,
+      chart: widget.chart
+    }))
+  };
   webview.postMessage({
     type: "dashboardState",
     dashboard: {
-      id: render.id,
-      title: render.title,
-      pipeline: render.pipeline,
-      filters: render.filters ?? [],
-      widgets: []
+      id: spec.id,
+      title: spec.title,
+      pipeline: spec.pipeline,
+      filters: spec.filters,
+      widgets: spec.widgets
     },
     render,
     filterValues
@@ -282,10 +405,7 @@ async function renderDashboardInWebview(
 }
 
 export async function openBusinessDashboardPanel(
-  context: vscode.ExtensionContext,
-  output: vscode.LogOutputChannel,
-  resolveCli: () => Promise<string | undefined>,
-  resolveConfig: () => Promise<string | undefined>
+  context: vscode.ExtensionContext
 ): Promise<void> {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
@@ -313,21 +433,12 @@ export async function openBusinessDashboardPanel(
     panel.webview.postMessage({ type: "dashboardList", dashboards: published });
     const first = published[0];
     if (first) {
-      const cliPath = await resolveCli();
-      const configPath = await resolveConfig();
-      if (cliPath && configPath) {
-        const filters = loadPersistedFilters(context, first.id);
-        await renderDashboardInWebview(panel.webview, context, cliPath, configPath, workspaceRoot, output, first.id, filters);
-      }
+      const filters = loadPersistedFilters(context, first.id);
+      await renderDashboardInWebview(panel.webview, workspaceRoot, first.id, filters);
     }
   };
 
   panel.webview.onDidReceiveMessage(async (msg: { command?: string; id?: string; filters?: Record<string, unknown> }) => {
-    const cliPath = await resolveCli();
-    const configPath = await resolveConfig();
-    if (!cliPath || !configPath) {
-      return;
-    }
     if (msg.command === "ready" || msg.command === "refresh") {
       await refreshList();
       return;
@@ -338,7 +449,7 @@ export async function openBusinessDashboardPanel(
       }
       panel.webview.postMessage({ type: "dashboardLoading" });
       const filters = msg.filters ?? loadPersistedFilters(context, msg.id);
-      await renderDashboardInWebview(panel.webview, context, cliPath, configPath, workspaceRoot, output, msg.id, filters);
+      await renderDashboardInWebview(panel.webview, workspaceRoot, msg.id, filters);
       return;
     }
     if (msg.command === "askAbout" && msg.id) {
@@ -361,10 +472,7 @@ export async function openBusinessDashboardPanel(
 }
 
 export function registerDashboardContributions(
-  context: vscode.ExtensionContext,
-  output: vscode.LogOutputChannel,
-  resolveCli: () => Promise<string | undefined>,
-  resolveConfig: () => Promise<string | undefined>
+  context: vscode.ExtensionContext
 ): void {
   const getRoot = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const tree = new DashboardTreeProvider(getRoot);
@@ -398,9 +506,7 @@ export function registerDashboardContributions(
       });
       engineerDashboardPanel.webview.html = renderDashboardPanelHtml("engineer", false);
       engineerDashboardPanel.webview.onDidReceiveMessage(async (msg) => {
-        const cliPath = await resolveCli();
-        const configPath = await resolveConfig();
-        if (!cliPath || !configPath || !root || !msg.command) {
+        if (!root || !msg.command) {
           return;
         }
         if (msg.command === "ready" || msg.command === "refresh") {
@@ -410,28 +516,10 @@ export function registerDashboardContributions(
             const dashId = String(msg.id || id);
             await renderDashboardInWebview(
               engineerDashboardPanel!.webview,
-              context,
-              cliPath,
-              configPath,
               root,
-              output,
               dashId,
               loadPersistedFilters(context, dashId)
             );
-          }
-          return;
-        }
-        if (msg.command === "suggestFilters" && msg.id) {
-          const suggested = await runDashboardCli<{ suggested_filters?: unknown[] }>(cliPath, configPath, root, output, [
-            "dashboard",
-            "suggest-filters",
-            String(msg.id),
-            "--output",
-            "json"
-          ]);
-          const count = suggested?.suggested_filters?.length ?? 0;
-          if (count > 0) {
-            vscode.window.showInformationMessage(`Suggested ${count} filter(s). Review and merge into the dashboard YAML.`);
           }
           return;
         }
@@ -439,8 +527,7 @@ export function registerDashboardContributions(
           const fp = dashboardFilePath(root, String(msg.id));
           const spec = readDashboardYamlMeta(fp);
           if (spec) {
-            spec.published = !spec.published;
-            writeDashboardYaml(fp, spec);
+            setDashboardPublished(fp, !spec.published);
             tree.refresh();
           }
           return;
@@ -455,11 +542,7 @@ export function registerDashboardContributions(
         if (msg.command === "render" && msg.id) {
           await renderDashboardInWebview(
             engineerDashboardPanel!.webview,
-            context,
-            cliPath,
-            configPath,
             root,
-            output,
             String(msg.id),
             msg.filters ?? {}
           );
@@ -478,7 +561,7 @@ export function registerDashboardContributions(
       openEditorPanel(String(dashId));
     }),
     vscode.commands.registerCommand("skippr.dashboard.openBusinessView", async () => {
-      await openBusinessDashboardPanel(context, output, resolveCli, resolveConfig);
+      await openBusinessDashboardPanel(context);
     }),
     vscode.commands.registerCommand("skippr.dashboard.create", async () => {
       const root = getRoot();
@@ -519,7 +602,8 @@ export function registerDashboardContributions(
       if (!table?.trim() || !dashId?.trim()) {
         return;
       }
-      appendWidgetYaml(root, dashId.trim(), table.trim(), "table", table.trim());
+      const sql = `SELECT *\nFROM ${table.trim()}\nLIMIT 100`;
+      appendWidgetYaml(root, dashId.trim(), table.trim(), "sql", sql);
       tree.refresh();
       openEditorPanel(dashId.trim());
     }),
@@ -531,8 +615,6 @@ export function registerDashboardContributions(
         return;
       }
       const rel = path.relative(root, editor.document.uri.fsPath).replace(/\\/g, "/");
-      const isDbt = rel.includes("/dbt/") || rel.startsWith("models/");
-      const kind = isDbt ? "dbt" : "sql";
       const targetDash =
         typeof dashId === "string" && dashId.trim()
           ? dashId.trim()
@@ -540,7 +622,12 @@ export function registerDashboardContributions(
       if (!targetDash) {
         return;
       }
-      appendWidgetYaml(root, targetDash, path.basename(rel), kind, rel);
+      const sql = editor.selection.isEmpty ? editor.document.getText().trim() : editor.document.getText(editor.selection).trim();
+      if (!sql) {
+        vscode.window.showWarningMessage("No SQL found in the active editor.");
+        return;
+      }
+      appendWidgetYaml(root, targetDash, path.basename(rel), "sql", sql);
       tree.refresh();
       openEditorPanel(targetDash);
     }),
@@ -573,13 +660,18 @@ function appendWidgetYaml(root: string, dashId: string, title: string, kind: str
   }
   let raw = fs.readFileSync(filePath, "utf8");
   const widgetId = title.replace(/\W+/g, "_").toLowerCase();
+  const sql = ref
+    .split(/\r?\n/)
+    .map((line) => `        ${line}`)
+    .join("\n");
   const block = [
     `  - id: ${widgetId}`,
     `    title: ${title}`,
     `    layout: { x: 0, y: 0, w: 6, h: 4 }`,
     `    dataset:`,
     `      kind: ${kind}`,
-    `      ref: ${ref}`,
+    `      ref: |`,
+    sql || "        SELECT 1",
     ""
   ].join("\n");
   if (raw.includes("widgets: []")) {
