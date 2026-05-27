@@ -23,7 +23,7 @@ export interface SkipprLineagePanelPayload {
     diagnostics?: Array<{ severity?: string; message?: string; source?: string }>;
   };
   error?: string;
-  loadingField?: { asset?: string; field?: string };
+  loadingField?: { fieldNodeId: string };
 }
 
 export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; brandLogoUris?: Record<string, string> }): string {
@@ -76,12 +76,6 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
     .node .brand { pointer-events: none; }
     .node .brand-fallback { fill: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
     .node .brand-fallback.brand-skippr { fill: #fff; font-size: 17px; font-weight: 800; }
-    .field-row { cursor: pointer; }
-    .field-row text { font-size: 10px; fill: var(--vscode-descriptionForeground); pointer-events: auto; }
-    .field-row.highlighted text { fill: var(--vscode-textLink-foreground); font-weight: 600; }
-    .field-row.highlighted { animation: lineagePulse 1.35s ease-in-out infinite; }
-    .field-row.faded { opacity: .45; }
-    .field-loading { display: inline-block; width: 10px; height: 10px; margin-left: 5px; border: 1.5px solid color-mix(in srgb, var(--vscode-descriptionForeground) 35%, transparent); border-top-color: var(--vscode-textLink-foreground); border-radius: 50%; animation: lineageSpin .8s linear infinite; }
     .edge { stroke: var(--vscode-descriptionForeground); stroke-width: 1.3; fill: none; opacity: .75; }
     .edge.highlighted { stroke-width: 2; opacity: .95; }
     .edge.faded { opacity: .15; }
@@ -94,12 +88,16 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
     .key { color: var(--vscode-descriptionForeground); }
     .value { overflow-wrap: anywhere; }
     .schema-list { padding: 4px 0; border-bottom: 1px solid var(--vscode-panel-border); }
+    .schema-loading { display: flex; align-items: center; gap: 8px; padding: 10px; color: var(--vscode-descriptionForeground); font-size: 11px; }
     .schema-row { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 0 10px; cursor: pointer; color: var(--vscode-foreground); }
     .schema-row:hover { background: var(--vscode-list-hoverBackground); }
     .schema-row.highlighted { color: var(--vscode-textLink-foreground); font-weight: 600; animation: lineagePulse 1.35s ease-in-out infinite; }
     .schema-row.faded { opacity: .45; }
     .schema-leaf { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .schema-path { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .schema-type { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 10px; white-space: nowrap; }
+    .actions-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+    .actions-row select { flex: 1; min-width: 0; padding: 3px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; color: var(--vscode-foreground); background: var(--vscode-input-background); }
     .diag { padding: 7px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
     .diag.warning { color: var(--vscode-editorWarning-foreground); }
     .diag.error { color: var(--vscode-errorForeground); }
@@ -135,13 +133,6 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
       function lineageState(item) {
         return String((item && item.metadata && item.metadata._lineage_state) || "normal");
       }
-      function loadingField() {
-        return payload.loadingField || {};
-      }
-      function isLoadingField(datasetId, fieldPath) {
-        const loading = loadingField();
-        return payload.status === "running" && loading.asset === datasetId && loading.field === fieldPath;
-      }
       function providerBrand(node) {
         return String((node && node.metadata && node.metadata.provider_brand) || "").toLowerCase();
       }
@@ -151,34 +142,76 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
       function isFieldNode(node) {
         return String(node && node.kind || "") === "field";
       }
-      function isSchemaOnlyField(node) {
-        return isFieldNode(node) && String(node && node.metadata && node.metadata._lineage_schema_only || "") === "true";
+      function parseLineageResources(metadata) {
+        const raw = metadata && metadata.lineage_resources ? String(metadata.lineage_resources).trim() : "";
+        if (!raw) { return []; }
+        try {
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+      function schemaFieldsForNode(node, graph) {
+        if (!node) { return []; }
+        const edges = Array.isArray(graph && graph.edges) ? graph.edges : [];
+        const nodes = Array.isArray(graph && graph.nodes) ? graph.nodes : [];
+        const fieldNodeIds = edges
+          .filter(edge => edge.kind === "contains_field" && edge.from_node_id === node.id)
+          .map(edge => edge.to_node_id);
+        return fieldNodeIds
+          .map(fieldNodeId => nodes.find(item => item.id === fieldNodeId))
+          .filter(item => item && isFieldNode(item))
+          .map(item => ({
+            fieldPath: String(item.field && item.field.field_path || item.label || item.id),
+            fieldNodeId: item.id,
+            fieldType: String((item.metadata && item.metadata.type) || "").trim(),
+            nullable: item.metadata && item.metadata.nullable === "true" ? true : item.metadata && item.metadata.nullable === "false" ? false : undefined,
+            state: lineageState(item)
+          }))
+          .filter(field => field.fieldPath)
+          .sort((a, b) => a.fieldPath.localeCompare(b.fieldPath));
+      }
+      const RESOURCE_ACTION_BY_KIND = {
+        metadata: "openMetadata",
+        config: "openConfig",
+        source_file: "openFile",
+        storage_location: "openMetadata",
+        dataset_id: "copyDatasetId",
+        node_id: "copyNodeId"
+      };
+      function lineageActionsForNode(node) {
+        if (!node) { return []; }
+        const resources = parseLineageResources(node.metadata);
+        const actions = resources
+          .map(resource => RESOURCE_ACTION_BY_KIND[String(resource.kind || "").toLowerCase()])
+          .filter(Boolean);
+        return [...new Set(actions)];
+      }
+      function lineageActionLabel(action) {
+        switch (action) {
+          case "openFile": return "Open file";
+          case "openMetadata": return "Open metadata";
+          case "openConfig": return "Open skippr.yml";
+          case "copyNodeId": return "Copy node id";
+          case "copyDatasetId": return "Copy dataset id";
+          default: return action;
+        }
       }
       function displayedGraphNodes(nodes) {
         return nodes.filter(node => !isFieldNode(node));
       }
-      function displayedFieldNodes(nodes) {
-        return nodes.filter(node => isFieldNode(node) && !isSchemaOnlyField(node) && node.field && node.field.dataset_id);
+      function nodeFields(node, graph) {
+        if (!node) { return []; }
+        const edges = Array.isArray(graph && graph.edges) ? graph.edges : [];
+        const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+        return edges
+          .filter(edge => edge.kind === "contains_field" && edge.from_node_id === node.id)
+          .map(edge => nodes.find(item => item.id === edge.to_node_id))
+          .filter(item => item && isFieldNode(item))
+          .sort((a, b) => String(a.field && a.field.field_path || "").localeCompare(String(b.field && b.field.field_path || "")));
       }
-      function fieldsByDataset(nodes) {
-        const groups = new Map();
-        for (const field of displayedFieldNodes(nodes)) {
-          const datasetId = String(field.field.dataset_id || "");
-          if (!groups.has(datasetId)) { groups.set(datasetId, []); }
-          groups.get(datasetId).push(field);
-        }
-        for (const fields of groups.values()) {
-          fields.sort((a, b) => String(a.field.field_path || "").localeCompare(String(b.field.field_path || "")));
-        }
-        return groups;
-      }
-      function nodeFields(node, groupedFields) {
-        const datasetId = String(node && node.dataset_id || "");
-        return datasetId ? groupedFields.get(datasetId) || [] : [];
-      }
-      function nodeHeight(fields) {
-        return 48 + fields.length * 18;
-      }
+      const ENTITY_NODE_HEIGHT = 48;
       function nodeState(node, fields) {
         if (fields.some(field => lineageState(field) === "highlighted")) { return "highlighted"; }
         return lineageState(node);
@@ -202,7 +235,7 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
         }
         return Array.from(groups.keys()).sort((a, b) => a - b).map(rank => [rank, groups.get(rank)]);
       }
-      function layout(nodes, groupedFields) {
+      function layout(nodes, graph) {
         const cols = nodeColumns(nodes);
         const positions = new Map();
         const width = Math.max(900, cols.length * 210 + 80);
@@ -211,9 +244,8 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
           items.sort((a, b) => String(a.label).localeCompare(String(b.label)));
           let y = 42;
           items.forEach(node => {
-            const fields = nodeFields(node, groupedFields);
-            const boxHeight = nodeHeight(fields);
-            positions.set(node.id, { x: 64 + colIdx * 210, y, node, fields, height: boxHeight });
+            const fields = nodeFields(node, graph);
+            positions.set(node.id, { x: 64 + colIdx * 210, y, node, fields, height: ENTITY_NODE_HEIGHT });
             y += boxHeight + 30;
           });
           height = Math.max(height, y + 40);
@@ -224,18 +256,6 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
         const x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y;
         const mid = Math.max(35, Math.abs(x2 - x1) / 2);
         return "M" + x1 + "," + y1 + " C" + (x1 + mid) + "," + y1 + " " + (x2 - mid) + "," + y2 + " " + x2 + "," + y2;
-      }
-      function fieldRowHtml(field, idx) {
-        const fieldPath = String(field.field && field.field.field_path || field.label || field.id);
-        const parts = fieldPath.split(".").filter(Boolean);
-        const leaf = parts[parts.length - 1] || fieldPath;
-        const depth = Math.max(0, parts.length - 1);
-        const y = 54 + idx * 18;
-        return '<g class="field-row ' + esc(lineageState(field)) + '" data-action="selectField" data-asset="' + esc(field.field.dataset_id || "") + '" data-field="' + esc(fieldPath) + '" transform="translate(0,' + y + ')">' +
-          '<text x="' + (10 + depth * 10) + '" y="0">' + esc(leaf.slice(0, 24)) + '</text>' +
-          (isLoadingField(String(field.field.dataset_id || ""), fieldPath) ? '<foreignObject x="136" y="-10" width="16" height="16"><span xmlns="http://www.w3.org/1999/xhtml" class="field-loading"></span></foreignObject>' : '') +
-          (depth > 0 ? '<text x="118" y="0">' + esc(parts.slice(0, -1).join(".").slice(0, 8)) + '</text>' : '') +
-        '</g>';
       }
       function anchorFor(id, laid, fieldPositions, side) {
         const field = fieldPositions.get(id);
@@ -250,11 +270,11 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
         const nodes = Array.isArray(graph && graph.nodes) ? graph.nodes : [];
         const edges = Array.isArray(graph && graph.edges) ? graph.edges : [];
         if (!nodes.length) { return '<div class="empty">No lineage graph has been built yet. Run Refresh to build it.</div>'; }
-        const groupedFields = fieldsByDataset(nodes);
-        const laid = layout(displayedGraphNodes(nodes), groupedFields);
+        const laid = layout(displayedGraphNodes(nodes), graph);
         const fieldPositions = new Map();
         for (const pos of laid.positions.values()) {
-          pos.fields.forEach((field, idx) => fieldPositions.set(field.id, { x: pos.x, y: pos.y + 54 + idx * 18 }));
+          const anchorY = pos.y + 24;
+          pos.fields.forEach((field) => fieldPositions.set(field.id, { x: pos.x, y: anchorY }));
         }
         const edgeHtml = edges.map(edge => {
           if (edge.kind === "contains_field") { return ""; }
@@ -267,12 +287,10 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
           const node = pos.node;
           const active = node.id === selectedId ? " active" : "";
           const state = nodeState(node, pos.fields);
-          const fieldRows = pos.fields.map(fieldRowHtml).join("");
           return '<g class="node ' + esc(state) + active + '" data-node-id="' + esc(node.id) + '" transform="translate(' + pos.x + ',' + pos.y + ')">' +
             '<rect width="160" height="' + pos.height + '" rx="6"></rect>' +
             '<text x="8" y="18">' + esc(String(node.label || node.id).slice(0, 24)) + '</text>' +
             '<text class="kind" x="8" y="36">' + esc(labelKind(node.kind)) + '</text>' +
-            fieldRows +
             brandHtml(node) +
           '</g>';
         }).join("");
@@ -296,15 +314,18 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
           vscode.postMessage({ command: "clearField" });
           return;
         }
-        render();
         postSelectedSchema();
+        render();
       }
       function detailHtml(graph) {
         const node = selectedNode(graph);
         if (!node) { return '<div class="detail muted">Select a node to inspect details.</div>'; }
         selectedId = selectedId || node.id;
         const metadata = node.metadata || {};
-        const metaRows = Object.keys(metadata).map(key => '<div class="key">' + esc(key) + '</div><div class="value">' + esc(metadata[key]) + '</div>').join("");
+        const metaRows = Object.keys(metadata).filter(key => key !== "lineage_resources").map(key => '<div class="key">' + esc(key) + '</div><div class="value">' + esc(metadata[key]) + '</div>').join("");
+        const actions = lineageActionsForNode(node);
+        const actionOptions = actions.map(action => '<option value="' + esc(action) + '">' + esc(lineageActionLabel(action)) + '</option>').join("");
+        const actionsRow = actions.length ? '<div class="section-title">Actions</div><div class="actions-row"><select data-action="lineageActionSelect"><option value="">Choose action...</option>' + actionOptions + '</select></div>' : "";
         return '<div class="section-title">Selected</div><div class="detail"><div class="kv">' +
           '<div class="key">Label</div><div class="value">' + esc(node.label) + '</div>' +
           '<div class="key">Kind</div><div class="value">' + esc(labelKind(node.kind)) + '</div>' +
@@ -312,43 +333,39 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
           (node.dataset_id ? '<div class="key">Dataset</div><div class="value">' + esc(node.dataset_id) + '</div>' : '') +
           (node.path ? '<div class="key">Path</div><div class="value">' + esc(node.path) + '</div>' : '') +
           metaRows +
-        '</div></div>';
+        '</div></div>' + actionsRow;
+      }
+      function schemaRowHtml(field, node) {
+        const fieldPath = String(field.fieldPath || "");
+        const parts = fieldPath.split(".").filter(Boolean);
+        const depth = Math.max(0, parts.length - 1);
+        const leaf = parts[parts.length - 1] || fieldPath;
+        const typeLabel = field.fieldType ? field.fieldType + (field.nullable === false ? " · required" : field.nullable ? " · nullable" : "") : "";
+        const state = field.state || "normal";
+        return '<button class="schema-row ' + esc(state) + '" data-action="selectField" data-field-node-id="' + esc(field.fieldNodeId || "") + '" style="padding-left:' + (10 + depth * 14) + 'px">' +
+          '<span class="schema-leaf">' + esc(leaf) + '</span>' +
+          (typeLabel ? '<span class="schema-type">' + esc(typeLabel) + '</span>' : (depth > 0 ? '<span class="schema-path">' + esc(parts.slice(0, -1).join(".")) + '</span>' : '')) +
+        '</button>';
       }
       function schemaHtml(graph) {
         const node = selectedNode(graph);
-        const datasetId = node && node.dataset_id;
-        if (!datasetId) { return '<div class="section-title">Schema</div><div class="detail muted">No schema for this node.</div>'; }
-        const nodes = Array.isArray(graph && graph.nodes) ? graph.nodes : [];
-        const fields = nodes
-          .filter(item => isFieldNode(item) && item.field && item.field.dataset_id === datasetId)
-          .sort((a, b) => String(a.field.field_path).localeCompare(String(b.field.field_path)));
-        if (!fields.length) { return '<div class="section-title">Schema</div><div class="detail muted">No fields found for this node.</div>'; }
-        const rows = fields.map(fieldNode => {
-          const fieldPath = String(fieldNode.field.field_path || "");
-          const parts = fieldPath.split(".").filter(Boolean);
-          const depth = Math.max(0, parts.length - 1);
-          const leaf = parts[parts.length - 1] || fieldPath;
-          const state = lineageState(fieldNode);
-          return '<button class="schema-row ' + esc(state) + '" data-action="selectField" data-asset="' + esc(datasetId) + '" data-field="' + esc(fieldPath) + '" style="padding-left:' + (10 + depth * 14) + 'px">' +
-            '<span class="schema-leaf">' + esc(leaf) + '</span>' +
-            (isLoadingField(datasetId, fieldPath) ? '<span class="field-loading"></span>' : '') +
-            (depth > 0 ? '<span class="schema-path">' + esc(parts.slice(0, -1).join(".")) + '</span>' : '') +
-          '</button>';
-        }).join("");
+        if (!node) { return '<div class="section-title">Schema</div><div class="detail muted">Select a node to inspect schema.</div>'; }
+        const fields = schemaFieldsForNode(node, graph);
+        if (!fields.length) {
+          return '<div class="section-title">Schema</div><div class="detail muted">No fields in persisted lineage graph. Run Refresh to rebuild skipprd metadata lineage.</div>';
+        }
+        const rows = fields.map(field => schemaRowHtml(field, node)).join("");
         return '<div class="section-title">Schema</div><div class="schema-list">' + rows + '</div>';
       }
-      function selectedSchemaPayload(graph) {
-        const node = selectedNode(graph);
-        const datasetId = node && node.dataset_id;
-        const nodes = Array.isArray(graph && graph.nodes) ? graph.nodes : [];
-        const fields = datasetId ? nodes
-          .filter(item => isFieldNode(item) && item.field && item.field.dataset_id === datasetId)
-          .map(item => ({ fieldPath: String(item.field.field_path || ""), state: lineageState(item), loading: isLoadingField(datasetId, String(item.field.field_path || "")) }))
-          .sort((a, b) => a.fieldPath.localeCompare(b.fieldPath)) : [];
-        return { node: node ? { id: node.id, label: node.label, datasetId } : undefined, fields };
-      }
       function postSelectedSchema() {
-        vscode.postMessage({ command: "selectedNode", schema: selectedSchemaPayload(currentGraph()) });
+        const graph = currentGraph();
+        const node = selectedNode(graph);
+        const fields = node ? schemaFieldsForNode(node, graph) : [];
+        const schema = {
+          node: node ? { id: node.id, label: node.label, datasetId: node.dataset_id, kind: node.kind } : undefined,
+          fields
+        };
+        vscode.postMessage({ command: "selectedNode", schema, node: schema.node });
       }
       function diagnosticsHtml(graph) {
         const diagnostics = Array.isArray(graph && graph.diagnostics) ? graph.diagnostics : [];
@@ -382,6 +399,17 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
           }
         }
       }
+      root.addEventListener("change", event => {
+        const target = event.target instanceof Element ? event.target : null;
+        const select = target && target.closest("[data-action='lineageActionSelect']");
+        if (!select) { return; }
+        const action = select.value;
+        select.value = "";
+        if (!action) { return; }
+        const node = selectedNode(currentGraph());
+        if (!node) { return; }
+        vscode.postMessage({ command: "lineageAction", action, nodeId: node.id });
+      });
       root.addEventListener("click", event => {
         if (suppressNextClick) {
           suppressNextClick = false;
@@ -395,17 +423,12 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
           const action = actionButton.getAttribute("data-action");
           if (action === "selectField") {
             fieldFocusActive = true;
-            payload.loadingField = {
-              asset: actionButton.getAttribute("data-asset") || "",
-              field: actionButton.getAttribute("data-field") || ""
-            };
+            const fieldNodeId = actionButton.getAttribute("data-field-node-id") || "";
+            if (!fieldNodeId) { return; }
+            payload.loadingField = { fieldNodeId };
             payload.status = "running";
             render();
-            vscode.postMessage({
-              command: "selectField",
-              asset: actionButton.getAttribute("data-asset") || "",
-              field: actionButton.getAttribute("data-field") || ""
-            });
+            vscode.postMessage({ command: "selectField", fieldNodeId });
           } else {
             vscode.postMessage({ command: action });
           }
@@ -463,7 +486,6 @@ export function renderSkipprLineagePanelHtml(options?: { cspSource?: string; bra
         if (event.data && event.data.type === "lineage") {
           payload = event.data;
           render();
-          postSelectedSchema();
         }
       });
       render();
