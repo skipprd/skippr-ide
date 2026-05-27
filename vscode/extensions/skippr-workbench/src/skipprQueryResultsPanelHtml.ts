@@ -9,6 +9,8 @@ export interface SkipprQueryChart {
   y: string[];
 }
 
+import { CHART_PANEL_STYLES } from "./skipprChartRender";
+
 export interface SkipprQueryResultsPanelPayload {
   type: "queryResults";
   status: "idle" | "running" | "success" | "error";
@@ -55,15 +57,7 @@ export function renderSkipprQueryResultsPanelHtml(): string {
     th, td { border-bottom: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; vertical-align: top; white-space: nowrap; }
     th { position: sticky; top: 0; z-index: 1; color: var(--vscode-descriptionForeground); font-weight: 600; background: var(--vscode-editor-background); }
     td { font-family: var(--vscode-editor-font-family); }
-    .chart { padding: 14px 12px; }
-    .chart-title { margin-bottom: 10px; color: var(--vscode-descriptionForeground); }
-    .bars { display: flex; align-items: flex-end; gap: 8px; height: 180px; border-left: 1px solid var(--vscode-panel-border); border-bottom: 1px solid var(--vscode-panel-border); padding: 8px; }
-    .bar-group { flex: 1; min-width: 22px; display: flex; align-items: flex-end; justify-content: center; gap: 3px; height: 100%; }
-    .bar { min-width: 8px; max-width: 18px; flex: 1; background: var(--vscode-charts-blue); }
-    .bar:nth-child(2) { background: var(--vscode-charts-green); }
-    .bar:nth-child(3) { background: var(--vscode-charts-purple); }
-    .line-chart { width: 100%; height: 210px; }
-    .legend { margin-top: 8px; display: flex; gap: 14px; flex-wrap: wrap; color: var(--vscode-descriptionForeground); }
+    ${CHART_PANEL_STYLES}
   </style>
 </head>
 <body>

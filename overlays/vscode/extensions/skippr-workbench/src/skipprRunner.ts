@@ -58,6 +58,10 @@ export type SkipprRunOptions =
       discoverOutput?: string;
       /** When true, pass `skippr model --no-resume`. */
       modelNoResume?: boolean;
+      modelGoal?: string;
+      modelScope?: string;
+      modelTargetModels?: string;
+      modelArtifacts?: string;
     })
   | (BaseSkipprRunOptions & {
       kind: "sync-all-once";
@@ -527,6 +531,18 @@ export function buildRunArgs(options: SkipprRunOptions): string[] {
     args.push("--dbt-output-path", modelDbtOutputPath(options));
     if (options.modelNoResume) {
       args.push("--no-resume");
+    }
+    if (options.modelGoal?.trim()) {
+      args.push("--goal", options.modelGoal.trim());
+    }
+    if (options.modelScope?.trim()) {
+      args.push("--scope", options.modelScope.trim());
+    }
+    if (options.modelTargetModels?.trim()) {
+      args.push("--target-models", options.modelTargetModels.trim());
+    }
+    if (options.modelArtifacts?.trim()) {
+      args.push("--artifacts", options.modelArtifacts.trim());
     }
     args.push("--output", "jsonl");
   } else if (options.kind === "sync-all-once") {

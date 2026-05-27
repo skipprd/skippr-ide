@@ -25,6 +25,16 @@ import { Lazy } from '../../../../base/common/lazy.js';
 import { IViewsService } from '../common/viewsService.js';
 import { windowLogGroup } from '../../log/common/logConstants.js';
 import { IWorkbenchEnvironmentService } from '../../environment/common/environmentService.js';
+import {
+	forEachSkipprPinnedContainerStorageId,
+	getSkipprViewContainerByManifestId,
+	isSkipprPinnedActivityBarContainer,
+	isSkipprPinnedActivityView,
+	isSkipprPinnedRunPanelContainer,
+	SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS,
+	SKIPPR_PINNED_ACTIVITY_VIEW_IDS,
+	SKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS,
+} from '../../../common/skippr/skipprPinnedWorkbenchLayout.js';
 
 interface IViewsCustomizations {
 	viewContainerLocations: IStringDictionary<ViewContainerLocation>;
@@ -33,16 +43,6 @@ interface IViewsCustomizations {
 }
 
 function getViewContainerStorageId(viewContainerId: string): string { return `${viewContainerId}.state`; }
-
-const SKIPPR_PINNED_RUN_PANEL_CONTAINERS = new Set([
-	'skippr.run.timeline.panel',
-	'skippr.query.results.panel',
-	'skippr.run.deadletters.panel',
-]);
-
-function isSkipprPinnedRunPanelContainer(viewContainerId: string): boolean {
-	return SKIPPR_PINNED_RUN_PANEL_CONTAINERS.has(viewContainerId);
-}
 
 export class ViewDescriptorService extends Disposable implements IViewDescriptorService {
 
@@ -108,6 +108,8 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		this.viewContainersCustomLocations = new Map<string, ViewContainerLocation>(Object.entries(this.viewCustomizations.viewContainerLocations));
 		this.viewDescriptorsCustomLocations = new Map<string, string>(Object.entries(this.viewCustomizations.viewLocations));
 		this.viewContainerBadgeEnablementStates = new Map<string, boolean>(Object.entries(this.viewCustomizations.viewContainerBadgeEnablementStates));
+		this.sanitizeSkipprViewCustomizations();
+		this.saveViewCustomizations();
 
 		// Register all containers that were registered before this ctor
 		this.viewContainers.forEach(viewContainer => this.onDidRegisterViewContainer(viewContainer));
@@ -222,6 +224,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		// May be the extension contributing this view container is no longer installed
 		// Or the parent view container is generated and no longer available.
 		this.moveOrphanViewsToDefaultLocation();
+		this.resetSkipprPinnedViewsAndContainers();
 
 		// Clean up empty generated view containers
 		for (const viewContainerId of [...this.viewContainersCustomLocations.keys()]) {
@@ -271,7 +274,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		const viewsByContainer = new Map<string, IViewDescriptor[]>();
 
 		for (const viewDescriptor of views) {
-			const correctContainerId = this.viewDescriptorsCustomLocations.get(viewDescriptor.id) ?? containerId;
+			const correctContainerId = isSkipprPinnedActivityView(viewDescriptor.id)
+				? containerId
+				: (this.viewDescriptorsCustomLocations.get(viewDescriptor.id) ?? containerId);
 			let containerViews = viewsByContainer.get(correctContainerId);
 			if (!containerViews) {
 				viewsByContainer.set(correctContainerId, containerViews = []);
@@ -316,6 +321,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 	getViewContainerLocation(viewContainer: ViewContainer): ViewContainerLocation {
 		if (isSkipprPinnedRunPanelContainer(viewContainer.id)) {
 			return ViewContainerLocation.Panel;
+		}
+		if (isSkipprPinnedActivityBarContainer(viewContainer.id)) {
+			return ViewContainerLocation.Sidebar;
 		}
 		const location = this.viewContainersCustomLocations.get(viewContainer.id) ?? this.getDefaultViewContainerLocation(viewContainer);
 		return this.getEffectiveViewContainerLocation(location);
@@ -381,6 +389,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		if (isSkipprPinnedRunPanelContainer(viewContainer.id) && reason !== 'skippr.forceRunPanels') {
 			location = ViewContainerLocation.Panel;
 		}
+		if (isSkipprPinnedActivityBarContainer(viewContainer.id) && reason !== 'skippr.forceActivityBar') {
+			location = ViewContainerLocation.Sidebar;
+		}
 		this.logger.value.trace(`moveViewContainerToLocation: viewContainer:${viewContainer.id} location:${location} reason:${reason}`);
 		this.moveViewContainerToLocationWithoutSaving(viewContainer, location, requestedIndex);
 		this.saveViewCustomizations();
@@ -399,6 +410,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		if (!this.canMoveViews()) {
 			return;
 		}
+		if (isSkipprPinnedActivityView(view.id)) {
+			return;
+		}
 		this.logger.value.trace(`moveViewToLocation: view:${view.id} location:${location} reason:${reason}`);
 		const container = this.registerGeneratedViewContainer(location);
 		this.moveViewsToContainer([view], container);
@@ -410,6 +424,10 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		}
 
 		if (!this.canMoveViews()) {
+			return;
+		}
+
+		if (views.some(view => isSkipprPinnedActivityView(view.id))) {
 			return;
 		}
 
@@ -609,10 +627,17 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 
 		const newViewContainerCustomizations = new Map<string, ViewContainerLocation>(Object.entries(this.viewCustomizations.viewContainerLocations));
 		const newViewDescriptorCustomizations = new Map<string, string>(Object.entries(this.viewCustomizations.viewLocations));
+		forEachSkipprPinnedContainerStorageId(containerId => newViewContainerCustomizations.delete(containerId));
+		for (const viewId of SKIPPR_PINNED_ACTIVITY_VIEW_IDS) {
+			newViewDescriptorCustomizations.delete(viewId);
+		}
 		const viewContainersToMove: [ViewContainer, ViewContainerLocation][] = [];
 		const viewsToMove: { views: IViewDescriptor[]; from: ViewContainer; to: ViewContainer }[] = [];
 
 		for (const [containerId, location] of newViewContainerCustomizations.entries()) {
+			if (isSkipprPinnedActivityBarContainer(containerId) || isSkipprPinnedRunPanelContainer(containerId)) {
+				continue;
+			}
 			const container = this.getViewContainerById(containerId);
 			if (container) {
 				if (location !== this.getViewContainerLocation(container)) {
@@ -636,6 +661,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		}
 
 		for (const [viewId, viewContainerId] of newViewDescriptorCustomizations.entries()) {
+			if (isSkipprPinnedActivityView(viewId)) {
+				continue;
+			}
 			const viewDescriptor = this.getViewDescriptorById(viewId);
 			if (viewDescriptor) {
 				const prevViewContainer = this.getViewContainerByViewId(viewId);
@@ -681,10 +709,52 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		return `${ViewDescriptorService.COMMON_CONTAINER_ID_PREFIX}.${ViewContainerLocationToString(location)}.${generateUuid()}`;
 	}
 
+	private sanitizeSkipprViewCustomizations(): void {
+		forEachSkipprPinnedContainerStorageId(containerId => this.viewContainersCustomLocations.delete(containerId));
+		for (const viewId of SKIPPR_PINNED_ACTIVITY_VIEW_IDS) {
+			this.viewDescriptorsCustomLocations.delete(viewId);
+		}
+	}
+
+	private resetSkipprPinnedViewsAndContainers(): void {
+		this.sanitizeSkipprViewCustomizations();
+
+		for (const manifestId of SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS) {
+			const container = getSkipprViewContainerByManifestId(id => this.getViewContainerById(id), manifestId);
+			if (container) {
+				this.moveViewContainerToLocationWithoutSaving(container, ViewContainerLocation.Sidebar);
+			}
+		}
+
+		for (const manifestId of SKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS) {
+			const container = getSkipprViewContainerByManifestId(id => this.getViewContainerById(id), manifestId);
+			if (container) {
+				this.moveViewContainerToLocationWithoutSaving(container, ViewContainerLocation.Panel);
+			}
+		}
+
+		for (const viewId of SKIPPR_PINNED_ACTIVITY_VIEW_IDS) {
+			const viewDescriptor = this.getViewDescriptorById(viewId);
+			const defaultContainer = this.getDefaultContainerById(viewId);
+			if (!viewDescriptor || !defaultContainer) {
+				continue;
+			}
+			for (const container of this.viewContainers) {
+				const model = this.getViewContainerModel(container);
+				if (model.allViewDescriptors.some(v => v.id === viewId) && container.id !== defaultContainer.id) {
+					this.moveViewsWithoutSaving([viewDescriptor], container, defaultContainer);
+				}
+			}
+		}
+	}
+
 	private saveViewCustomizations(): void {
 		const viewCustomizations: IViewsCustomizations = { viewContainerLocations: {}, viewLocations: {}, viewContainerBadgeEnablementStates: {} };
 
 		for (const [containerId, location] of this.viewContainersCustomLocations) {
+			if (isSkipprPinnedActivityBarContainer(containerId) || isSkipprPinnedRunPanelContainer(containerId)) {
+				continue;
+			}
 			const container = this.getViewContainerById(containerId);
 			// Skip if the view container is not a generated container and in default location
 			if (container && !this.isGeneratedContainerId(containerId) && location === this.getDefaultViewContainerLocation(container)) {
@@ -694,6 +764,9 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		}
 
 		for (const [viewId, viewContainerId] of this.viewDescriptorsCustomLocations) {
+			if (isSkipprPinnedActivityView(viewId)) {
+				continue;
+			}
 			const viewContainer = this.getViewContainerById(viewContainerId);
 			if (viewContainer) {
 				const defaultContainer = this.getDefaultContainerById(viewId);

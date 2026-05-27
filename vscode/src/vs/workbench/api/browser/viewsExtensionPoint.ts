@@ -30,6 +30,7 @@ import { WebviewViewPane } from '../../contrib/webviewView/browser/webviewViewPa
 import { Extensions as ExtensionFeaturesRegistryExtensions, IExtensionFeatureTableRenderer, IExtensionFeaturesRegistry, IRenderedData, IRowData, ITableData } from '../../services/extensionManagement/common/extensionFeatures.js';
 import { isProposedApiEnabled } from '../../services/extensions/common/extensions.js';
 import { ExtensionMessageCollector, ExtensionsRegistry, IExtensionPoint, IExtensionPointUser } from '../../services/extensions/common/extensionsRegistry.js';
+import { isSkipprPinnedActivityView, isSkipprProductOwnedContainer } from '../../common/skippr/skipprPinnedWorkbenchLayout.js';
 
 export interface IUserFriendlyViewsContainerDescriptor {
 	id: string;
@@ -413,7 +414,7 @@ class ViewsExtensionHandler implements IWorkbenchContribution {
 					ViewPaneContainer,
 					[id, { mergeViewWithContainerWhenSingleView: true }]
 				),
-				hideIfEmpty: true,
+				hideIfEmpty: !isSkipprProductOwnedContainer(id),
 				order,
 				icon,
 			}, location);
@@ -521,8 +522,8 @@ class ViewsExtensionHandler implements IWorkbenchContribution {
 						when: ContextKeyExpr.deserialize(item.when),
 						containerIcon: icon || viewContainer?.icon,
 						containerTitle: item.contextualTitle || (viewContainer && (typeof viewContainer.title === 'string' ? viewContainer.title : viewContainer.title.value)),
-						canToggleVisibility: true,
-						canMoveView: viewContainer?.id !== REMOTE,
+						canToggleVisibility: !isSkipprPinnedActivityView(item.id),
+						canMoveView: viewContainer?.id !== REMOTE && !isSkipprPinnedActivityView(item.id),
 						treeView: type === ViewType.Tree ? this.instantiationService.createInstance(CustomTreeView, item.id, item.name, extension.description.identifier.value) : undefined,
 						collapsed: this.showCollapsed(container) || initialVisibility === InitialVisibility.Collapsed,
 						order: order,

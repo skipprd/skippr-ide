@@ -447,6 +447,146 @@ registerAction2(class extends Action2 {
   }
   layoutActionsSource = layoutActionsSource.replace(forceSchemaSidebarBlock, firstSyncConfettiBlock);
 }
+if (!layoutActionsSource.includes("skippr.workbench.forceActivityBar")) {
+  const forceActivityBarBlock = `registerAction2(class extends Action2 {
+\tconstructor() {
+\t\tsuper({
+\t\t\tid: 'skippr.workbench.forceActivityBar',
+\t\t\ttitle: localize2('skipprForceActivityBar', "Force Skippr Activity Bar Views"),
+\t\t});
+\t}
+
+\trun(accessor: ServicesAccessor): void {
+\t\tconst viewDescriptorService = accessor.get(IViewDescriptorService);
+\t\tconst activityContainerIds = [
+\t\t\t'skipprConnectionsActivity',
+\t\t\t'skipprLineageActivity',
+\t\t\t'skippr.dashboards.activity',
+\t\t];
+\t\tfor (const id of activityContainerIds) {
+\t\t\tconst container = viewDescriptorService.getViewContainerById(id);
+\t\t\tif (container) {
+\t\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Sidebar, undefined, 'skippr.forceActivityBar');
+\t\t\t}
+\t\t}
+\t\tconst pinnedViews = ['skippr.connections', 'skippr.lineageLaunch', 'skippr.dashboards'];
+\t\tfor (const viewId of pinnedViews) {
+\t\t\tconst viewDescriptor = viewDescriptorService.getViewDescriptorById(viewId);
+\t\t\tconst defaultContainer = viewDescriptorService.getDefaultContainerById(viewId);
+\t\t\tif (!viewDescriptor || !defaultContainer) {
+\t\t\t\tcontinue;
+\t\t\t}
+\t\t\tfor (const container of viewDescriptorService.viewContainers) {
+\t\t\t\tconst model = viewDescriptorService.getViewContainerModel(container);
+\t\t\t\tif (model.allViewDescriptors.some(v => v.id === viewId) && container.id !== defaultContainer.id) {
+\t\t\t\t\tviewDescriptorService.moveViewsToContainer([viewDescriptor], defaultContainer, undefined, 'skippr.forceActivityBar');
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t}
+});
+
+`;
+  layoutActionsSource = layoutActionsSource.replace(
+    "registerAction2(class extends Action2 {\n\tconstructor() {\n\t\tsuper({\n\t\t\tid: 'skippr.workbench.forceSchemaSidebar',",
+    `${forceActivityBarBlock}registerAction2(class extends Action2 {\n\tconstructor() {\n\t\tsuper({\n\t\t\tid: 'skippr.workbench.forceSchemaSidebar',`
+  );
+}
+const skipprLayoutImport =
+  "import {\n\tgetSkipprViewContainerByManifestId,\n\tSKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS,\n\tSKIPPR_PINNED_ACTIVITY_VIEW_IDS,\n\tSKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS,\n} from '../../common/skippr/skipprPinnedWorkbenchLayout.js';";
+if (!layoutActionsSource.includes("skipprPinnedWorkbenchLayout")) {
+  layoutActionsSource = layoutActionsSource.replace(
+    firstSyncConfettiImport,
+    `${firstSyncConfettiImport}\n${skipprLayoutImport}`
+  );
+}
+if (layoutActionsSource.includes("'skipprConnectionsActivity'")) {
+  layoutActionsSource = layoutActionsSource.replace(
+    /\t\tconst activityContainerIds = \[[\s\S]*?\];\n\t\tfor \(const id of activityContainerIds\) \{[\s\S]*?\t\t\}\n\t\tconst pinnedViews = \[[\s\S]*?\];\n\t\tfor \(const viewId of pinnedViews\) \{/,
+    `\t\tfor (const manifestId of SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS) {
+\t\t\tconst container = getSkipprViewContainerByManifestId(id => viewDescriptorService.getViewContainerById(id), manifestId);
+\t\t\tif (container) {
+\t\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Sidebar, undefined, 'skippr.forceActivityBar');
+\t\t\t}
+\t\t}
+\t\tfor (const viewId of SKIPPR_PINNED_ACTIVITY_VIEW_IDS) {`
+  );
+}
+if (layoutActionsSource.includes("'skippr.run.timeline.panel'") && layoutActionsSource.includes("const runContainerIds")) {
+  layoutActionsSource = layoutActionsSource.replace(
+    /\t\tconst runContainerIds = \[[\s\S]*?\];\n\n\t\tfor \(const \[index, id\] of runContainerIds\.entries\(\)\) \{[\s\S]*?\t\t\}/,
+    `\t\tfor (const [index, manifestId] of SKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS.entries()) {
+\t\t\tconst container = getSkipprViewContainerByManifestId(id => viewDescriptorService.getViewContainerById(id), manifestId);
+\t\t\tif (container) {
+\t\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Panel, index, 'skippr.forceRunPanels');
+\t\t\t}
+\t\t}`
+  );
+}
 writeFileSync(layoutActionsPath, layoutActionsSource, "utf8");
+
+const skipprLayoutModulePath = path.join(
+  vscodeDir,
+  "src",
+  "vs",
+  "workbench",
+  "common",
+  "skippr",
+  "skipprPinnedWorkbenchLayout.ts"
+);
+mkdirSync(path.dirname(skipprLayoutModulePath), { recursive: true });
+writeFileSync(
+  skipprLayoutModulePath,
+  readFileSync(
+    path.join(rootDir, "vscode", "src", "vs", "workbench", "common", "skippr", "skipprPinnedWorkbenchLayout.ts"),
+    "utf8"
+  ),
+  "utf8"
+);
+
+const viewsExtensionPointPath = path.join(
+  vscodeDir,
+  "src",
+  "vs",
+  "workbench",
+  "api",
+  "browser",
+  "viewsExtensionPoint.ts"
+);
+let viewsExtensionPointSource = readFileSync(viewsExtensionPointPath, "utf8");
+const skipprPinnedViewNeedle = "canMoveView: viewContainer?.id !== REMOTE,";
+const skipprPinnedViewReplacement =
+  "canMoveView: viewContainer?.id !== REMOTE && !isSkipprPinnedActivityView(item.id),";
+if (!viewsExtensionPointSource.includes("skipprPinnedWorkbenchLayout")) {
+  viewsExtensionPointSource = viewsExtensionPointSource.replace(
+    "import { ExtensionMessageCollector, ExtensionsRegistry, IExtensionPoint, IExtensionPointUser } from '../../services/extensions/common/extensionsRegistry.js';",
+    "import { ExtensionMessageCollector, ExtensionsRegistry, IExtensionPoint, IExtensionPointUser } from '../../services/extensions/common/extensionsRegistry.js';\nimport { isSkipprPinnedActivityView, isSkipprProductOwnedContainer } from '../../common/skippr/skipprPinnedWorkbenchLayout.js';"
+  );
+}
+if (viewsExtensionPointSource.includes("const SKIPPR_PINNED_ACTIVITY_VIEW_IDS = new Set")) {
+  viewsExtensionPointSource = viewsExtensionPointSource.replace(
+    /const SKIPPR_PINNED_ACTIVITY_VIEW_IDS = new Set\([\s\S]*?\}\n\nexport interface IUserFriendlyViewsContainerDescriptor \{/,
+    "export interface IUserFriendlyViewsContainerDescriptor {"
+  );
+  viewsExtensionPointSource = viewsExtensionPointSource.replace(
+    /function isSkipprWorkbenchPinnedView\(viewId: string\): boolean \{\n\treturn SKIPPR_PINNED_ACTIVITY_VIEW_IDS\.has\(viewId\);\n\}\n\n/,
+    ""
+  );
+}
+if (viewsExtensionPointSource.includes(skipprPinnedViewNeedle)) {
+  viewsExtensionPointSource = viewsExtensionPointSource.replace(
+    skipprPinnedViewNeedle,
+    skipprPinnedViewReplacement
+  );
+}
+viewsExtensionPointSource = viewsExtensionPointSource.replace(
+  "canToggleVisibility: true,\n\t\t\t\t\t\tcanMoveView: viewContainer?.id !== REMOTE && !isSkipprPinnedActivityView(item.id),",
+  "canToggleVisibility: !isSkipprPinnedActivityView(item.id),\n\t\t\t\t\t\tcanMoveView: viewContainer?.id !== REMOTE && !isSkipprPinnedActivityView(item.id),"
+);
+viewsExtensionPointSource = viewsExtensionPointSource.replace(
+  "hideIfEmpty: true,\n\t\t\t\torder,\n\t\t\t\ticon,\n\t\t\t}, location);",
+  "hideIfEmpty: !isSkipprProductOwnedContainer(id),\n\t\t\t\torder,\n\t\t\t\ticon,\n\t\t\t}, location);"
+);
+writeFileSync(viewsExtensionPointPath, viewsExtensionPointSource, "utf8");
 
 console.log("Skippr overlay applied successfully.");

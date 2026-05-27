@@ -12,6 +12,16 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "configuration": {
+      "title": "Skippr",
+      "properties": {
+        "skippr.businessUser.forceLightTheme": {
+          "type": "boolean",
+          "default": true,
+          "description": "When entering Business User mode, switch to a light workbench theme."
+        }
+      }
+    },
     "configurationDefaults": {
       "workbench.startupEditor": "none",
       "workbench.welcomePage.experimentalOnboarding": false,
@@ -226,6 +236,30 @@
       {
         "command": "skippr.sql.askDataQuestion",
         "title": "Skippr: Ask Data Question"
+      },
+      {
+        "command": "skippr.dashboard.open",
+        "title": "Skippr: Open Dashboard"
+      },
+      {
+        "command": "skippr.dashboard.create",
+        "title": "Skippr: New Dashboard"
+      },
+      {
+        "command": "skippr.dashboard.openBusinessView",
+        "title": "Skippr: Open Insights"
+      },
+      {
+        "command": "skippr.dashboard.addFromTable",
+        "title": "Skippr: Add Dashboard Chart from Table"
+      },
+      {
+        "command": "skippr.dashboard.addFromEditor",
+        "title": "Skippr: Add Dashboard Chart from Editor"
+      },
+      {
+        "command": "skippr.dashboard.modelForDashboard",
+        "title": "Skippr: Model for Dashboard"
       }
       ],
     "submenus": [
@@ -245,6 +279,11 @@
           "id": "skipprLineageActivity",
           "title": "Lineage",
           "icon": "media/lineage-graph.svg"
+        },
+        {
+          "id": "skippr.dashboards.activity",
+          "title": "Dashboards",
+          "icon": "media/skippr.svg"
         }
       ],
       "panel": [
@@ -279,6 +318,13 @@
           "id": "skippr.lineageLaunch",
           "name": "Lineage",
           "type": "webview",
+          "order": 1
+        }
+      ],
+      "skippr.dashboards.activity": [
+        {
+          "id": "skippr.dashboards",
+          "name": "Dashboards",
           "order": 1
         }
       ],

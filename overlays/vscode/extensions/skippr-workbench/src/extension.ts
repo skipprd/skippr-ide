@@ -141,6 +141,15 @@ import {
   isSyncRun,
   syncMetricSparkline
 } from "./skipprRunState";
+import {
+  applyBusinessLightTheme,
+  getExperienceMode,
+  openBusinessDashboardPanel,
+  registerDashboardContributions,
+  restoreSavedColorTheme,
+  setExperienceMode,
+  BUSINESS_LIGHT_THEME_KEY
+} from "./skipprDashboard";
 
 type ObservabilityWebviewPayload = SkipprRunStateSnapshot & {
   localProcessActive: boolean;
@@ -2208,6 +2217,10 @@ async function runSkipprDoctor(
 type RunSkipprCliFlags = {
   discoverOutput?: string;
   modelNoResume?: boolean;
+  modelGoal?: string;
+  modelScope?: string;
+  modelTargetModels?: string;
+  modelArtifacts?: string;
 };
 
 type RunSkipprObserver = {
@@ -2222,6 +2235,10 @@ type AgentModelRunRequest = {
   pipeline?: string;
   configPath?: string;
   noResume?: boolean;
+  goal?: string;
+  scope?: string;
+  targetModels?: string;
+  artifacts?: string;
   workspaceRoot?: string;
   sourceChatSessionId?: string;
   sourceTurnId?: string;
@@ -2360,7 +2377,11 @@ async function runSkipprCommand(
           kind,
           pipeline: scopedPipeline!,
           discoverOutput: kind === "discover" ? cliFlags?.discoverOutput : undefined,
-          modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined
+          modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined,
+          modelGoal: kind === "model" ? cliFlags?.modelGoal : undefined,
+          modelScope: kind === "model" ? cliFlags?.modelScope : undefined,
+          modelTargetModels: kind === "model" ? cliFlags?.modelTargetModels : undefined,
+          modelArtifacts: kind === "model" ? cliFlags?.modelArtifacts : undefined
         };
   const run = startSkipprRun(
     runOptions,
@@ -2713,7 +2734,13 @@ async function runAgentModelBridgeRequest(
     configPath,
     getLogLevel(),
     [],
-    { modelNoResume: request.noResume === true },
+    {
+      modelNoResume: request.noResume === true,
+      modelGoal: request.goal,
+      modelScope: request.scope,
+      modelTargetModels: request.targetModels,
+      modelArtifacts: request.artifacts
+    },
     {
       onEvent: (event) => {
         appendAgentBridgeMessage(bridgeDir, requestId, { type: "event", event });
@@ -4712,7 +4739,11 @@ async function hideWorkbenchForSplash(): Promise<void> {
   await runWorkbenchCommand("skippr.workbench.hideForSplash");
 }
 
-async function restoreFullIdeLayout(): Promise<void> {
+async function restoreFullIdeLayout(context?: vscode.ExtensionContext): Promise<void> {
+  if (context) {
+    await setExperienceMode(context, "engineer");
+    await restoreSavedColorTheme(context);
+  }
   await runWorkbenchCommand("skippr.workbench.restoreFromSplash");
   await runWorkbenchCommand("workbench.action.activityBarLocation.default");
   await runWorkbenchCommand("workbench.action.restoreAuxiliaryBar");
@@ -4721,11 +4752,27 @@ async function restoreFullIdeLayout(): Promise<void> {
   await runWorkbenchCommand("workbench.action.focusActiveEditorGroup");
 }
 
-async function enterAgentsOnlyLayout(): Promise<void> {
-  await runWorkbenchCommand("workbench.action.activityBarLocation.hide");
+async function enterBusinessUserLayout(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): Promise<void> {
+  await setExperienceMode(context, "business");
+  const forceLight = vscode.workspace.getConfiguration().get<boolean>(BUSINESS_LIGHT_THEME_KEY, true);
+  if (workbenchExtensionContext) {
+    await applyBusinessLightTheme(workbenchExtensionContext, forceLight);
+  }
+  await runWorkbenchCommand("workbench.action.activityBarLocation.default");
+  await runWorkbenchCommand("skippr.workbench.forceActivityBar");
   await runWorkbenchCommand("workbench.action.closeSidebar");
   await runWorkbenchCommand("workbench.action.closePanel");
+  await openBusinessDashboardPanel(
+    context,
+    output,
+    () => resolveCliOrOfferInstall(output),
+    async () => resolveSkipprConfigAtCwd()
+  );
   await runWorkbenchCommand("workbench.action.restoreAuxiliaryBar");
+  const pipeline = vscode.workspace.getConfiguration().get<string>(defaultPipelineKey, "").trim();
+  await vscode.commands.executeCommand(`workbench.action.chat.openNewSessionSidebar.${SKIPPR_AGENT_HOST_SESSION_TYPE}`, {
+    initialSessionOptions: { mode: "ask", pipeline: pipeline || undefined }
+  });
   await runWorkbenchCommand("workbench.action.chat.open");
   await runWorkbenchCommand("workbench.action.toggleMaximizedAuxiliaryBar");
 }
@@ -5135,11 +5182,11 @@ async function showSplash(
       switch (message.command) {
         case "engineer":
         case "continue":
-          await restoreFullIdeLayout();
+          await restoreFullIdeLayout(context);
           await closeSplash(false);
           return;
         case "business":
-          await enterAgentsOnlyLayout();
+          await enterBusinessUserLayout(context, output);
           await closeSplash(false);
           return;
         case "openRecent":
@@ -5156,7 +5203,7 @@ async function showSplash(
           return;
         }
         case "discover":
-          await restoreFullIdeLayout();
+          await restoreFullIdeLayout(context);
           await closeSplash(false);
           await vscode.commands.executeCommand("skippr.open.discover");
           return;
@@ -5315,6 +5362,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
   registerAgentModelBridge(context, output, runStatusItem);
+  registerDashboardContributions(context, output, () => resolveCliOrOfferInstall(output), async () => resolveSkipprConfigAtCwd());
+  if (getExperienceMode(context) === "business" && vscode.workspace.workspaceFolders?.length) {
+    void enterBusinessUserLayout(context, output);
+  }
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot) {
     runHistory = new SkipprRunHistory(workspaceRoot, output);
@@ -5324,6 +5375,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   observabilityStore.onDidChange(() => schedulePostObservability(), undefined, context.subscriptions);
   void runWorkbenchCommand("skippr.workbench.forceRunPanels");
+  void runWorkbenchCommand("skippr.workbench.forceActivityBar");
   await vscode.commands.executeCommand("setContext", SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true);
   await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
   context.subscriptions.push(

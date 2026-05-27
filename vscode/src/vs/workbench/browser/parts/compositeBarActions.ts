@@ -27,6 +27,7 @@ import { URI } from '../../../base/common/uri.js';
 import { badgeBackground, badgeForeground, contrastBorder } from '../../../platform/theme/common/colorRegistry.js';
 import { Action2, IAction2Options } from '../../../platform/actions/common/actions.js';
 import { ViewContainerLocation } from '../../common/views.js';
+import { isSkipprProductOwnedContainer } from '../../common/skippr/skipprPinnedWorkbenchLayout.js';
 import { IPaneCompositePartService } from '../../services/panecomposite/browser/panecomposite.js';
 import { createConfigureKeybindingAction } from '../../../platform/actions/common/menuService.js';
 import { HoverStyle } from '../../../base/browser/ui/hover/hover.js';
@@ -554,8 +555,12 @@ export class CompositeActionViewItem extends CompositeBarActionViewItem {
 			this.showContextMenu(container);
 		}));
 
-		// Allow to drag
+		// Allow to drag (Skippr product-owned containers stay fixed in the bar)
 		let insertDropBefore: Before2D | undefined = undefined;
+		if (isSkipprProductOwnedContainer(this.compositeBarActionItem.id)) {
+			this.updateStyles();
+			return;
+		}
 		this._register(CompositeDragAndDropObserver.INSTANCE.registerDraggable(this.container, () => { return { type: 'composite', id: this.compositeBarActionItem.id }; }, {
 			onDragOver: e => {
 				const isValidMove = e.dragAndDropData.getData().id !== this.compositeBarActionItem.id && this.dndHandler.onDragOver(e.dragAndDropData, this.compositeBarActionItem.id, e.eventData);
@@ -641,28 +646,34 @@ export class CompositeActionViewItem extends CompositeBarActionViewItem {
 			actions.push(createConfigureKeybindingAction(this.commandService, this.keybindingService, this.compositeBarActionItem.keybindingId));
 		}
 
-		actions.push(this.toggleCompositePinnedAction, this.toggleCompositeBadgeAction);
+		if (!isSkipprProductOwnedContainer(this.compositeBarActionItem.id)) {
+			actions.push(this.toggleCompositePinnedAction, this.toggleCompositeBadgeAction);
+		}
 
 		const compositeContextMenuActions = this.compositeContextMenuActionsProvider(this.compositeBarActionItem.id);
 		if (compositeContextMenuActions.length) {
 			actions.push(...compositeContextMenuActions);
 		}
 
-		const isPinned = this.compositeBar.isPinned(this.compositeBarActionItem.id);
-		if (isPinned) {
-			this.toggleCompositePinnedAction.label = localize('hide', "Hide '{0}'", this.compositeBarActionItem.name);
-			this.toggleCompositePinnedAction.checked = false;
-			this.toggleCompositePinnedAction.enabled = this.compositeBar.getPinnedCompositeIds().length > 1;
-		} else {
-			this.toggleCompositePinnedAction.label = localize('keep', "Keep '{0}'", this.compositeBarActionItem.name);
-			this.toggleCompositePinnedAction.enabled = true;
+		if (!isSkipprProductOwnedContainer(this.compositeBarActionItem.id)) {
+			const isPinned = this.compositeBar.isPinned(this.compositeBarActionItem.id);
+			if (isPinned) {
+				this.toggleCompositePinnedAction.label = localize('hide', "Hide '{0}'", this.compositeBarActionItem.name);
+				this.toggleCompositePinnedAction.checked = false;
+				this.toggleCompositePinnedAction.enabled = this.compositeBar.getPinnedCompositeIds().length > 1;
+			} else {
+				this.toggleCompositePinnedAction.label = localize('keep', "Keep '{0}'", this.compositeBarActionItem.name);
+				this.toggleCompositePinnedAction.enabled = true;
+			}
 		}
 
-		const isBadgeEnabled = this.compositeBar.areBadgesEnabled(this.compositeBarActionItem.id);
-		if (isBadgeEnabled) {
-			this.toggleCompositeBadgeAction.label = localize('hideBadge', "Hide Badge");
-		} else {
-			this.toggleCompositeBadgeAction.label = localize('showBadge', "Show Badge");
+		if (!isSkipprProductOwnedContainer(this.compositeBarActionItem.id)) {
+			const isBadgeEnabled = this.compositeBar.areBadgesEnabled(this.compositeBarActionItem.id);
+			if (isBadgeEnabled) {
+				this.toggleCompositeBadgeAction.label = localize('hideBadge', "Hide Badge");
+			} else {
+				this.toggleCompositeBadgeAction.label = localize('showBadge', "Show Badge");
+			}
 		}
 
 		const otherActions = this.contextMenuActionsProvider();

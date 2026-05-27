@@ -18,6 +18,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../platform/
 import { IExtensionService } from '../../services/extensions/common/extensions.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { ToggleCompositePinnedAction, ICompositeBarColors, IActivityHoverOptions, ToggleCompositeBadgeAction, CompositeBarAction, ICompositeBar, ICompositeBarActionItem } from './compositeBarActions.js';
+import { isSkipprProductOwnedContainer } from '../../common/skippr/skipprPinnedWorkbenchLayout.js';
 import { IViewDescriptorService, ViewContainer, IViewContainerModel, ViewContainerLocation } from '../../common/views.js';
 import { IContextKeyService, ContextKeyExpr } from '../../../platform/contextkey/common/contextkey.js';
 import { isString } from '../../../base/common/types.js';
@@ -165,6 +166,10 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private getContextMenuActionsForComposite(compositeId: string): IAction[] {
+		if (isSkipprProductOwnedContainer(compositeId)) {
+			return [];
+		}
+
 		const actions: IAction[] = [new Separator()];
 
 		const viewContainer = this.viewDescriptorService.getViewContainerById(compositeId)!;
@@ -453,6 +458,10 @@ export class PaneCompositeBar extends Disposable {
 			return true;
 		}
 
+		if (isSkipprProductOwnedContainer(viewContainerId)) {
+			return false;
+		}
+
 		if (viewContainer) {
 			if (viewContainer.hideIfEmpty) {
 				if (this.viewService.isViewContainerActive(viewContainerId)) {
@@ -494,6 +503,9 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private hideComposite(compositeId: string): void {
+		if (isSkipprProductOwnedContainer(compositeId)) {
+			return;
+		}
 		this.compositeBar.hideComposite(compositeId);
 
 		const compositeActions = this.compositeActions.get(compositeId);
@@ -610,6 +622,13 @@ export class PaneCompositeBar extends Disposable {
 				if (!newCompositeItem) {
 					newCompositeItems.push(compositeItem);
 				}
+			}
+		}
+
+		for (const item of newCompositeItems) {
+			if (isSkipprProductOwnedContainer(item.id)) {
+				item.pinned = true;
+				item.visible = true;
 			}
 		}
 

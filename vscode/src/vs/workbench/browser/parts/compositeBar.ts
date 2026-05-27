@@ -17,6 +17,7 @@ import { isUndefinedOrNull } from '../../../base/common/types.js';
 import { IColorTheme } from '../../../platform/theme/common/themeService.js';
 import { Emitter } from '../../../base/common/event.js';
 import { ViewContainerLocation, IViewDescriptorService } from '../../common/views.js';
+import { isSkipprProductOwnedContainer } from '../../common/skippr/skipprPinnedWorkbenchLayout.js';
 import { IPaneComposite } from '../../common/panecomposite.js';
 import { IComposite } from '../../common/composite.js';
 import { CompositeDragAndDropData, CompositeDragAndDropObserver, IDraggedCompositeData, ICompositeDragAndDrop, Before2D, toggleDropEffect, ICompositeDragAndDropObserverCallbacks } from '../dnd.js';
@@ -110,6 +111,9 @@ export class CompositeDragAndDrop implements ICompositeDragAndDrop {
 		const dragData = data.getData();
 
 		if (dragData.type === 'composite') {
+			if (isSkipprProductOwnedContainer(dragData.id)) {
+				return false;
+			}
 
 			// Dragging a composite
 			const currentContainer = this.viewDescriptorService.getViewContainerById(dragData.id)!;
@@ -369,6 +373,9 @@ export class CompositeBar extends Widget implements ICompositeBar {
 	}
 
 	hideComposite(id: string): void {
+		if (isSkipprProductOwnedContainer(id)) {
+			return;
+		}
 		if (this.model.hide(id)) {
 			this.resetActiveComposite(id);
 			this.updateCompositeSwitcher();
@@ -407,6 +414,9 @@ export class CompositeBar extends Widget implements ICompositeBar {
 	}
 
 	unpin(compositeId: string): void {
+		if (isSkipprProductOwnedContainer(compositeId)) {
+			return;
+		}
 		if (this.model.setPinned(compositeId, false)) {
 
 			this.updateCompositeSwitcher();
@@ -464,6 +474,9 @@ export class CompositeBar extends Widget implements ICompositeBar {
 	}
 
 	move(compositeId: string, toCompositeId: string, before?: boolean): void {
+		if (isSkipprProductOwnedContainer(compositeId) || isSkipprProductOwnedContainer(toCompositeId)) {
+			return;
+		}
 		if (before !== undefined) {
 			const fromIndex = this.model.items.findIndex(c => c.id === compositeId);
 			let toIndex = this.model.items.findIndex(c => c.id === toCompositeId);
@@ -665,11 +678,12 @@ export class CompositeBar extends Widget implements ICompositeBar {
 		const actions: IAction[] = this.model.visibleItems
 			.map(({ id, name, activityAction }) => {
 				const isPinned = this.isPinned(id);
+				const productOwned = isSkipprProductOwnedContainer(id);
 				return toAction({
 					id,
 					label: this.getAction(id).label || name || id,
 					checked: isPinned,
-					enabled: activityAction.enabled && (!isPinned || this.getPinnedCompositeIds().length > 1),
+					enabled: !productOwned && activityAction.enabled && (!isPinned || this.getPinnedCompositeIds().length > 1),
 					run: () => {
 						if (this.isPinned(id)) {
 							this.unpin(id);

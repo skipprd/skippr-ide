@@ -510,16 +510,22 @@ export class ViewContainerModel extends Disposable implements IViewContainerMode
 				} else {
 					const isVisible = state.visibleGlobal;
 					state.visibleGlobal = isUndefinedOrNull(addedViewDescriptorState.visible) ? (isUndefinedOrNull(state.visibleGlobal) ? !viewDescriptor.hideByDefault : state.visibleGlobal) : addedViewDescriptorState.visible;
+					if (!viewDescriptor.canToggleVisibility) {
+						state.visibleGlobal = true;
+					}
 					if (state.visibleGlobal && !isVisible) {
 						this.logger.value.trace(`Added view ${viewDescriptor.id} in the container ${this.viewContainer.id} and showing it.`, `${isVisible}`, `${viewDescriptor.hideByDefault}`, `${addedViewDescriptorState.visible}`);
 					}
 				}
 				state.collapsed = isUndefinedOrNull(addedViewDescriptorState.collapsed) ? (isUndefinedOrNull(state.collapsed) ? !!viewDescriptor.collapsed : state.collapsed) : addedViewDescriptorState.collapsed;
 			} else {
+				const defaultVisible = !viewDescriptor.hideByDefault;
 				state = {
 					active: false,
-					visibleGlobal: isUndefinedOrNull(addedViewDescriptorState.visible) ? !viewDescriptor.hideByDefault : addedViewDescriptorState.visible,
-					visibleWorkspace: isUndefinedOrNull(addedViewDescriptorState.visible) ? !viewDescriptor.hideByDefault : addedViewDescriptorState.visible,
+					visibleGlobal: viewDescriptor.canToggleVisibility
+						? (isUndefinedOrNull(addedViewDescriptorState.visible) ? defaultVisible : addedViewDescriptorState.visible)
+						: true,
+					visibleWorkspace: isUndefinedOrNull(addedViewDescriptorState.visible) ? defaultVisible : addedViewDescriptorState.visible,
 					collapsed: isUndefinedOrNull(addedViewDescriptorState.collapsed) ? !!viewDescriptor.collapsed : addedViewDescriptorState.collapsed,
 				};
 			}

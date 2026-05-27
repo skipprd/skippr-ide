@@ -36,6 +36,12 @@ import { IPreferencesService } from '../../services/preferences/common/preferenc
 import { QuickInputAlignmentContextKey } from '../../../platform/quickinput/browser/quickInput.js';
 import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 import { playSkipprFirstSyncConfetti } from '../skippr/firstSyncConfetti.js';
+import {
+	getSkipprViewContainerByManifestId,
+	SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS,
+	SKIPPR_PINNED_ACTIVITY_VIEW_IDS,
+	SKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS,
+} from '../../common/skippr/skipprPinnedWorkbenchLayout.js';
 
 // Register Icons
 const menubarIcon = registerIcon('menuBar', Codicon.layoutMenubar, localize('menuBarIcon', "Represents the menu bar"));
@@ -489,16 +495,42 @@ registerAction2(class extends Action2 {
 
 	run(accessor: ServicesAccessor): void {
 		const viewDescriptorService = accessor.get(IViewDescriptorService);
-		const runContainerIds = [
-			'skippr.run.timeline.panel',
-			'skippr.query.results.panel',
-			'skippr.run.deadletters.panel'
-		];
-
-		for (const [index, id] of runContainerIds.entries()) {
-			const container = viewDescriptorService.getViewContainerById(id);
+		for (const [index, manifestId] of SKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS.entries()) {
+			const container = getSkipprViewContainerByManifestId(id => viewDescriptorService.getViewContainerById(id), manifestId);
 			if (container) {
 				viewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Panel, index, 'skippr.forceRunPanels');
+			}
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.forceActivityBar',
+			title: localize2('skipprForceActivityBar', "Force Skippr Activity Bar Views"),
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const viewDescriptorService = accessor.get(IViewDescriptorService);
+		for (const manifestId of SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS) {
+			const container = getSkipprViewContainerByManifestId(id => viewDescriptorService.getViewContainerById(id), manifestId);
+			if (container) {
+				viewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Sidebar, undefined, 'skippr.forceActivityBar');
+			}
+		}
+		for (const viewId of SKIPPR_PINNED_ACTIVITY_VIEW_IDS) {
+			const viewDescriptor = viewDescriptorService.getViewDescriptorById(viewId);
+			const defaultContainer = viewDescriptorService.getDefaultContainerById(viewId);
+			if (!viewDescriptor || !defaultContainer) {
+				continue;
+			}
+			for (const container of viewDescriptorService.viewContainers) {
+				const model = viewDescriptorService.getViewContainerModel(container);
+				if (model.allViewDescriptors.some(v => v.id === viewId) && container.id !== defaultContainer.id) {
+					viewDescriptorService.moveViewsToContainer([viewDescriptor], defaultContainer, undefined, 'skippr.forceActivityBar');
+				}
 			}
 		}
 	}
