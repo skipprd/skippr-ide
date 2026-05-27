@@ -92,19 +92,6 @@ import {
   type LineageSchemaPayload
 } from "./skipprLineageSchema";
 import { renderSkipprConnectionsPanelHtml } from "./skipprConnectionsPanelHtml";
-import { renderSkipprDiscoverWorkflowHtml } from "./skipprDiscoverWorkflowHtml";
-import { renderSkipprSyncWorkflowHtml } from "./skipprSyncWorkflowHtml";
-import { renderSkipprCatalogWorkflowHtml } from "./skipprCatalogWorkflowHtml";
-import { renderSkipprModelWorkflowHtml } from "./skipprModelWorkflowHtml";
-import {
-  buildCatalogPayload,
-  buildDiscoverPayload,
-  buildModelPayload,
-  buildSyncPayload,
-  latestRunForPipeline,
-  resolveDefaultPipeline,
-  type SkipprWorkflowKind
-} from "./skipprWorkflowData";
 import {
   compileDbtSqlForQuery,
   detectDbtSqlFile,
@@ -126,8 +113,11 @@ import { workspaceSlugFromConfigPath } from "./skipprCloudWorkspace";
 import {
   SkipprObservedRun,
   SkipprObservedRunStatus,
+  SkipprRunHistorySummary,
   SkipprRunStateSnapshot,
-  SkipprRunStateStore
+  SkipprRunStateStore,
+  isSyncRun,
+  syncMetricSparkline
 } from "./skipprRunState";
 
 const SKIPPR_RUN_STATUS_VIEW_ID = "skippr.runStatus";
@@ -140,19 +130,14 @@ const SKIPPR_QUERY_RESULTS_VIEW_ID = "skippr.queryResults";
 const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
 const SKIPPR_CONNECTIONS_VIEW_ID = "skippr.connections";
 const SKIPPR_LINEAGE_LAUNCH_VIEW_ID = "skippr.lineageLaunch";
-const SKIPPR_WORKFLOW_ACTIVITY_ID = "skipprWorkflowActivity";
-const SKIPPR_WORKFLOW_DISCOVER_VIEW_ID = "skippr.workflow.discover";
-const SKIPPR_WORKFLOW_SYNC_VIEW_ID = "skippr.workflow.sync";
-const SKIPPR_WORKFLOW_CATALOG_VIEW_ID = "skippr.workflow.catalog";
-const SKIPPR_WORKFLOW_MODEL_VIEW_ID = "skippr.workflow.model";
 const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
 const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
 
-const panelSpecs: Array<{ command: string; workflowViewId?: string; lineage?: boolean; model?: boolean }> = [
-  { command: "skippr.open.discover", workflowViewId: SKIPPR_WORKFLOW_DISCOVER_VIEW_ID },
-  { command: "skippr.open.sync", workflowViewId: SKIPPR_WORKFLOW_SYNC_VIEW_ID },
-  { command: "skippr.open.model", workflowViewId: SKIPPR_WORKFLOW_MODEL_VIEW_ID, model: true },
-  { command: "skippr.open.catalog", workflowViewId: SKIPPR_WORKFLOW_CATALOG_VIEW_ID },
+const panelSpecs: Array<{ command: string; lineage?: boolean; model?: boolean; run?: boolean }> = [
+  { command: "skippr.open.discover", run: true },
+  { command: "skippr.open.sync", run: true },
+  { command: "skippr.open.model", model: true },
+  { command: "skippr.open.catalog", lineage: true },
   { command: "skippr.open.lineage", lineage: true }
 ];
 
@@ -1045,16 +1030,6 @@ function postObservability(): void {
   for (const webviewView of runDetailsWebviewViews.values()) {
     void webviewView.webview.postMessage(snapshot);
   }
-  broadcastWorkflowObservability(snapshot);
-}
-
-function broadcastWorkflowObservability(snapshot: SkipprRunStateSnapshot): void {
-  if (!skipprLogOutput) {
-    return;
-  }
-  void refreshDiscoverWorkflowPanel(skipprLogOutput, snapshot);
-  void refreshSyncWorkflowPanel(skipprLogOutput, snapshot);
-  void refreshModelWorkflowPanel(skipprLogOutput, snapshot);
 }
 
 function schedulePostObservability(): void {
@@ -1394,12 +1369,38 @@ async function refreshRunHistoryCloudContext(): Promise<void> {
   }
 }
 
+async function enrichRunHistoryMetricSparklines(
+  history: SkipprRunHistorySummary[]
+): Promise<SkipprRunHistorySummary[]> {
+  if (!runHistory) {
+    return history;
+  }
+  return Promise.all(
+    history.map(async (row) => {
+      if (row.metricPoints?.length || !isSyncRun(row)) {
+        return row;
+      }
+      try {
+        const full = await runHistory!.loadRun(row.id);
+        if (!full) {
+          return row;
+        }
+        const metricPoints = syncMetricSparkline(full);
+        return metricPoints ? { ...row, metricPoints } : row;
+      } catch {
+        return row;
+      }
+    })
+  );
+}
+
 async function refreshRunHistory(): Promise<void> {
   if (!runHistory || !observabilityStore) {
     return;
   }
   try {
-    observabilityStore.setHistory(await runHistory.recentRuns());
+    const history = await enrichRunHistoryMetricSparklines(await runHistory.recentRuns());
+    observabilityStore.setHistory(history);
   } catch {
     // History is optional; runs must still work if sqlite is unavailable.
   }
@@ -1456,11 +1457,6 @@ async function focusRunObservability(runId: string | undefined, options?: { sche
   }
   await openHistoricalRun(runId);
   await showRunDetailsPanel(options?.schema ? SKIPPR_RUN_SCHEMA_VIEW_ID : SKIPPR_RUN_TIMELINE_VIEW_ID);
-}
-
-async function revealWorkflowView(viewId: string): Promise<void> {
-  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_WORKFLOW_ACTIVITY_ID}`);
-  await runWorkbenchCommand(`${viewId}.focus`);
 }
 
 function finishRunStatusPanel(outcome: {
@@ -1845,401 +1841,6 @@ async function openConfigAtConnection(configPath: string | undefined, connection
   const position = doc.positionAt(index);
   editor.selection = new vscode.Selection(position, position);
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-}
-
-async function workflowConfigContext(
-  output: vscode.LogOutputChannel
-): Promise<{ configPath?: string; show?: SkipprConfigShowResult; defaultPipeline: string }> {
-  const configPath = activeConfigPath || (await chooseActiveConfig(output));
-  if (!configPath) {
-    return { defaultPipeline: "" };
-  }
-  const show = await getCachedConfigShow(output, configPath, "offerInstall");
-  const folderUri = workspaceFolderForConfigPath(configPath);
-  const configuredDefault = vscode.workspace.getConfiguration(undefined, folderUri).get<string>(defaultPipelineKey, "").trim();
-  return { configPath, show, defaultPipeline: resolveDefaultPipeline(show, configuredDefault) };
-}
-
-async function loadWorkflowRun(runId: string | undefined): Promise<SkipprObservedRun | undefined> {
-  if (!runId || !runHistory) {
-    return undefined;
-  }
-  try {
-    return await runHistory.loadRun(runId);
-  } catch {
-    return undefined;
-  }
-}
-
-function postWorkflowPayload(viewId: string, payload: unknown): void {
-  const view = workflowWebviewViews.get(viewId);
-  if (view) {
-    void view.webview.postMessage(payload);
-  }
-}
-
-async function selectedWorkflowPipeline(
-  kind: SkipprWorkflowKind | "catalog",
-  output: vscode.LogOutputChannel,
-  requested?: string
-): Promise<string> {
-  if (requested?.trim()) {
-    workflowSelectedPipeline.set(kind, requested.trim());
-    return requested.trim();
-  }
-  const cached = workflowSelectedPipeline.get(kind);
-  if (cached) {
-    return cached;
-  }
-  const ctx = await workflowConfigContext(output);
-  const pipeline = ctx.defaultPipeline;
-  if (pipeline) {
-    workflowSelectedPipeline.set(kind, pipeline);
-  }
-  return pipeline;
-}
-
-async function refreshDiscoverWorkflowPanel(
-  output: vscode.LogOutputChannel,
-  snapshot?: SkipprRunStateSnapshot
-): Promise<void> {
-  const obs = snapshot ?? observabilityStore?.snapshot();
-  if (!obs) {
-    return;
-  }
-  const ctx = await workflowConfigContext(output);
-  const pipeline = await selectedWorkflowPipeline("discover", output);
-  if (!ctx.configPath || !ctx.show) {
-    postWorkflowPayload(
-      SKIPPR_WORKFLOW_DISCOVER_VIEW_ID,
-      buildDiscoverPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
-    );
-    return;
-  }
-  const latest = pipeline ? latestRunForPipeline("discover", pipeline, obs) : undefined;
-  const run =
-    latest && "schemas" in latest
-      ? (latest as SkipprObservedRun)
-      : latest
-        ? await loadWorkflowRun(latest.id)
-        : undefined;
-  postWorkflowPayload(
-    SKIPPR_WORKFLOW_DISCOVER_VIEW_ID,
-    buildDiscoverPayload({
-      status: "ready",
-      show: ctx.show,
-      selectedPipeline: pipeline,
-      snapshot: obs,
-      run
-    })
-  );
-}
-
-async function refreshSyncWorkflowPanel(
-  output: vscode.LogOutputChannel,
-  snapshot?: SkipprRunStateSnapshot
-): Promise<void> {
-  const obs = snapshot ?? observabilityStore?.snapshot();
-  if (!obs) {
-    return;
-  }
-  const ctx = await workflowConfigContext(output);
-  const pipeline = await selectedWorkflowPipeline("sync", output);
-  if (!ctx.configPath || !ctx.show) {
-    postWorkflowPayload(
-      SKIPPR_WORKFLOW_SYNC_VIEW_ID,
-      buildSyncPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
-    );
-    return;
-  }
-  const latest = pipeline ? latestRunForPipeline("sync", pipeline, obs) : undefined;
-  const run =
-    latest && "metricPoints" in latest
-      ? (latest as SkipprObservedRun)
-      : latest
-        ? await loadWorkflowRun(latest.id)
-        : undefined;
-  postWorkflowPayload(
-    SKIPPR_WORKFLOW_SYNC_VIEW_ID,
-    buildSyncPayload({
-      status: "ready",
-      show: ctx.show,
-      selectedPipeline: pipeline,
-      snapshot: obs,
-      run
-    })
-  );
-}
-
-async function refreshModelWorkflowPanel(
-  output: vscode.LogOutputChannel,
-  snapshot?: SkipprRunStateSnapshot
-): Promise<void> {
-  const obs = snapshot ?? observabilityStore?.snapshot();
-  if (!obs) {
-    return;
-  }
-  const ctx = await workflowConfigContext(output);
-  const pipeline = await selectedWorkflowPipeline("model", output);
-  if (!ctx.configPath || !ctx.show) {
-    postWorkflowPayload(
-      SKIPPR_WORKFLOW_MODEL_VIEW_ID,
-      buildModelPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
-    );
-    return;
-  }
-  const latest = pipeline ? latestRunForPipeline("model", pipeline, obs) : undefined;
-  const run =
-    latest && "modelChangedFiles" in latest
-      ? (latest as SkipprObservedRun)
-      : latest
-        ? await loadWorkflowRun(latest.id)
-        : undefined;
-  postWorkflowPayload(
-    SKIPPR_WORKFLOW_MODEL_VIEW_ID,
-    buildModelPayload({
-      status: "ready",
-      show: ctx.show,
-      selectedPipeline: pipeline,
-      snapshot: obs,
-      run
-    })
-  );
-}
-
-async function refreshCatalogWorkflowPanel(
-  output: vscode.LogOutputChannel,
-  options?: { loadGraph?: boolean; selectedNodeId?: string }
-): Promise<void> {
-  const obs = observabilityStore?.snapshot() ?? { type: "observability" as const, history: [] };
-  const ctx = await workflowConfigContext(output);
-  const pipeline = await selectedWorkflowPipeline("catalog", output);
-  if (options?.selectedNodeId) {
-    catalogSelectedNodeId = options.selectedNodeId;
-  }
-  if (!ctx.configPath || !ctx.show) {
-    postWorkflowPayload(
-      SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
-      buildCatalogPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
-    );
-    return;
-  }
-  if (options?.loadGraph) {
-    postWorkflowPayload(
-      SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
-      buildCatalogPayload({
-        status: "ready",
-        show: ctx.show,
-        selectedPipeline: pipeline,
-        snapshot: obs,
-        lineageStatus: "loading",
-        selectedNodeId: catalogSelectedNodeId
-      })
-    );
-    const lineageCtx = await resolveLineageContext(output, { configPath: ctx.configPath, pipeline });
-    if (!lineageCtx) {
-      postWorkflowPayload(
-        SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
-        buildCatalogPayload({
-          status: "ready",
-          show: ctx.show,
-          selectedPipeline: pipeline,
-          snapshot: obs,
-          lineageStatus: "error",
-          lineageError: "Unable to resolve lineage context.",
-          selectedNodeId: catalogSelectedNodeId
-        })
-      );
-      return;
-    }
-    const graphPayload = await runLineageCommand(lineageCtx, output, "graph");
-    if (graphPayload.status === "success" && graphPayload.graph) {
-      catalogLineageGraph = graphPayload.graph;
-    } else {
-      catalogLineageGraph = undefined;
-    }
-    postWorkflowPayload(
-      SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
-      buildCatalogPayload({
-        status: "ready",
-        show: ctx.show,
-        selectedPipeline: pipeline,
-        snapshot: obs,
-        lineageStatus: graphPayload.status === "success" ? "ready" : "error",
-        lineageError: graphPayload.error,
-        graph: catalogLineageGraph,
-        selectedNodeId: catalogSelectedNodeId
-      })
-    );
-    return;
-  }
-  postWorkflowPayload(
-    SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
-    buildCatalogPayload({
-      status: "ready",
-      show: ctx.show,
-      selectedPipeline: pipeline,
-      snapshot: obs,
-      lineageStatus: catalogLineageGraph ? "ready" : "idle",
-      graph: catalogLineageGraph,
-      selectedNodeId: catalogSelectedNodeId
-    })
-  );
-}
-
-function registerSkipprWorkflowViews(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
-  const register = (
-    viewId: string,
-    html: string,
-    kind: SkipprWorkflowKind | "catalog",
-    onMessage: (message: {
-      command?: string;
-      pipeline?: string;
-      runId?: string;
-      nodeId?: string;
-      path?: string;
-    }) => Promise<void>
-  ): void => {
-    context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider(
-        viewId,
-        {
-          resolveWebviewView(webviewView: vscode.WebviewView): void {
-            webviewView.webview.options = { enableScripts: true };
-            webviewView.webview.html = html;
-            workflowWebviewViews.set(viewId, webviewView);
-            webviewView.webview.onDidReceiveMessage((message) => {
-              void onMessage(message);
-            });
-            webviewView.onDidDispose(() => {
-              if (workflowWebviewViews.get(viewId) === webviewView) {
-                workflowWebviewViews.delete(viewId);
-              }
-            });
-            if (kind === "catalog") {
-              void refreshCatalogWorkflowPanel(output, { loadGraph: !catalogLineageGraph });
-            } else if (kind === "discover") {
-              void refreshDiscoverWorkflowPanel(output);
-            } else if (kind === "sync") {
-              void refreshSyncWorkflowPanel(output);
-            } else {
-              void refreshModelWorkflowPanel(output);
-            }
-          }
-        },
-        { webviewOptions: { retainContextWhenHidden: true } }
-      )
-    );
-  };
-
-  register(SKIPPR_WORKFLOW_DISCOVER_VIEW_ID, renderSkipprDiscoverWorkflowHtml(), "discover", async (message) => {
-    if (message.command === "ready" || message.command === "refresh") {
-      await refreshDiscoverWorkflowPanel(output);
-      return;
-    }
-    if (message.command === "selectPipeline" && message.pipeline) {
-      workflowSelectedPipeline.set("discover", message.pipeline);
-      await refreshDiscoverWorkflowPanel(output);
-      return;
-    }
-    const pipeline = await selectedWorkflowPipeline("discover", output, message.pipeline);
-    if (message.command === "runDiscover" && pipeline) {
-      await vscode.commands.executeCommand("skippr.run.discoverPipeline", pipeline);
-      return;
-    }
-    if (message.command === "openRun" || message.command === "viewSchema") {
-      await focusRunObservability(message.runId, { schema: message.command === "viewSchema" });
-      return;
-    }
-    if (message.command === "openLineage" && pipeline) {
-      const configPath = activeConfigPath || (await chooseActiveConfig(output));
-      await vscode.commands.executeCommand("skippr.open.lineage", { configPath, pipeline });
-    }
-  });
-
-  register(SKIPPR_WORKFLOW_SYNC_VIEW_ID, renderSkipprSyncWorkflowHtml(), "sync", async (message) => {
-    if (message.command === "ready" || message.command === "refresh") {
-      await refreshSyncWorkflowPanel(output);
-      return;
-    }
-    if (message.command === "selectPipeline" && message.pipeline) {
-      workflowSelectedPipeline.set("sync", message.pipeline);
-      await refreshSyncWorkflowPanel(output);
-      return;
-    }
-    const pipeline = await selectedWorkflowPipeline("sync", output, message.pipeline);
-    if (message.command === "runSyncOnce" && pipeline) {
-      await vscode.commands.executeCommand("skippr.run.syncPipelineOnce", pipeline);
-      return;
-    }
-    if (message.command === "startSync" && pipeline) {
-      await vscode.commands.executeCommand("skippr.run.startSyncPipeline", pipeline);
-      return;
-    }
-    if (message.command === "openRun") {
-      await focusRunObservability(message.runId);
-      return;
-    }
-    if (message.command === "openDeadletters") {
-      await showRunDetailsPanel(SKIPPR_RUN_DEADLETTERS_VIEW_ID);
-    }
-  });
-
-  register(SKIPPR_WORKFLOW_CATALOG_VIEW_ID, renderSkipprCatalogWorkflowHtml(), "catalog", async (message) => {
-    if (message.command === "ready" || message.command === "refresh") {
-      await refreshCatalogWorkflowPanel(output);
-      return;
-    }
-    if (message.command === "refreshLineage") {
-      catalogLineageGraph = undefined;
-      await refreshCatalogWorkflowPanel(output, { loadGraph: true });
-      return;
-    }
-    if (message.command === "selectPipeline" && message.pipeline) {
-      workflowSelectedPipeline.set("catalog", message.pipeline);
-      catalogLineageGraph = undefined;
-      await refreshCatalogWorkflowPanel(output, { loadGraph: true });
-      return;
-    }
-    if (message.command === "selectNode" && message.nodeId) {
-      await refreshCatalogWorkflowPanel(output, { selectedNodeId: message.nodeId });
-      return;
-    }
-    const pipeline = await selectedWorkflowPipeline("catalog", output, message.pipeline);
-    if (message.command === "openLineage" && pipeline) {
-      const configPath = activeConfigPath || (await chooseActiveConfig(output));
-      await vscode.commands.executeCommand("skippr.open.lineage", { configPath, pipeline });
-      return;
-    }
-    if (message.command === "openFile" && message.path) {
-      const uri = vscode.Uri.file(message.path);
-      await vscode.commands.executeCommand("vscode.open", uri);
-    }
-  });
-
-  register(SKIPPR_WORKFLOW_MODEL_VIEW_ID, renderSkipprModelWorkflowHtml(), "model", async (message) => {
-    if (message.command === "ready" || message.command === "refresh") {
-      await refreshModelWorkflowPanel(output);
-      return;
-    }
-    if (message.command === "selectPipeline" && message.pipeline) {
-      workflowSelectedPipeline.set("model", message.pipeline);
-      await refreshModelWorkflowPanel(output);
-      return;
-    }
-    const pipeline = await selectedWorkflowPipeline("model", output, message.pipeline);
-    if (message.command === "runModel" && pipeline) {
-      await vscode.commands.executeCommand("skippr.run.modelPipeline", pipeline);
-      return;
-    }
-    if (message.command === "openRun") {
-      await focusRunObservability(message.runId);
-      return;
-    }
-    if (message.command === "resumeChat") {
-      await vscode.commands.executeCommand("skippr.open.model");
-    }
-  });
 }
 
 function registerSkipprConnectionsView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
@@ -3228,10 +2829,6 @@ interface SkipprLineageCliResult {
 let activeLineagePanel: vscode.WebviewPanel | undefined;
 let lineageLaunchWebviewView: vscode.WebviewView | undefined;
 let connectionsWebviewView: vscode.WebviewView | undefined;
-const workflowWebviewViews = new Map<string, vscode.WebviewView>();
-const workflowSelectedPipeline = new Map<SkipprWorkflowKind | "catalog", string>();
-let catalogLineageGraph: SkipprLineagePanelPayload["graph"] | undefined;
-let catalogSelectedNodeId: string | undefined;
 let activeLineageContext: SkipprLineageContext | undefined;
 let activeLineageFieldFocus: SkipprLineageFieldFocus | undefined;
 let activeLineageSelectedNode: LineageNodeLike | undefined;
@@ -5291,7 +4888,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   registerSkipprConnectionsView(context, output);
   registerSkipprLineageLaunchView(context, output);
-  registerSkipprWorkflowViews(context, output);
   context.subscriptions.push(
     vscode.commands.registerCommand("skippr.internal.runModelForAgentChat", async (request: AgentModelRunRequest, bridgeDir?: string) => {
       const workspaceRoot = request?.workspaceRoot?.trim() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -5719,9 +5315,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.commands.registerCommand(panel.command, async (args?: unknown) => {
         if (panel.model) {
           await openModelWorkflowInAgentChat(output, runStatusItem);
-          if (panel.workflowViewId) {
-            await revealWorkflowView(panel.workflowViewId);
-          }
           return;
         }
         if (panel.lineage) {
@@ -5732,8 +5325,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           });
           return;
         }
-        if (panel.workflowViewId) {
-          await revealWorkflowView(panel.workflowViewId);
+        if (panel.run) {
+          revealRunAndDebugView();
         }
       })
     );

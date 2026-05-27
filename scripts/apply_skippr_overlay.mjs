@@ -38,7 +38,7 @@ const extensionsContributionPath = path.join(
   "browser",
   "extensions.contribution.ts"
 );
-const extensionsContributionSource = readFileSync(extensionsContributionPath, "utf8");
+let extensionsContributionSource = readFileSync(extensionsContributionPath, "utf8");
 const extensionMenuNeedle = "when: IsSessionsWindowContext.negate()";
 if (extensionsContributionSource.includes(extensionMenuNeedle)) {
   writeFileSync(
@@ -55,6 +55,20 @@ if (readFileSync(extensionsContributionPath, "utf8").includes(globalActivityNeed
     readFileSync(extensionsContributionPath, "utf8").replace(globalActivityNeedle, "order: 3,\n\t\t\twhen: ContextKeyExpr.false()\n\t\t}));"),
     "utf8"
   );
+}
+
+const extensionsViewContainerNeedle = "\t\talwaysUseContainerInfo: true,\n\t}, ViewContainerLocation.Sidebar);";
+const extensionsViewContainerReplacement = "\t\talwaysUseContainerInfo: true,\n\t}, ViewContainerLocation.Sidebar, { doNotRegisterOpenCommand: true });";
+extensionsContributionSource = readFileSync(extensionsContributionPath, "utf8");
+if (
+  extensionsContributionSource.includes(extensionsViewContainerNeedle) &&
+  !extensionsContributionSource.includes("ViewContainerLocation.Sidebar, { doNotRegisterOpenCommand: true }")
+) {
+  extensionsContributionSource = extensionsContributionSource.replace(
+    extensionsViewContainerNeedle,
+    extensionsViewContainerReplacement
+  );
+  writeFileSync(extensionsContributionPath, extensionsContributionSource, "utf8");
 }
 
 const debugContributionPath = path.join(vscodeDir, "src", "vs", "workbench", "contrib", "debug", "browser", "debug.contribution.ts");

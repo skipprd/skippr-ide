@@ -67,6 +67,14 @@ interface ICachedViewContainer {
 	views?: { when?: string }[];
 }
 
+const SKIPPR_HIDDEN_ACTIVITY_VIEW_CONTAINERS = new Set<string>([
+	'workbench.view.extensions',
+]);
+
+function isSkipprHiddenActivityViewContainer(id: string): boolean {
+	return SKIPPR_HIDDEN_ACTIVITY_VIEW_CONTAINERS.has(id);
+}
+
 export interface IPaneCompositeBarOptions {
 	readonly partContainerClass: string;
 	readonly pinnedViewContainersKey: string;
@@ -118,6 +126,7 @@ export class PaneCompositeBar extends Disposable {
 		);
 
 		const cachedItems = this.cachedViewContainers
+			.filter(container => !isSkipprHiddenActivityViewContainer(container.id))
 			.map(container => ({
 				id: container.id,
 				name: container.name,
@@ -126,6 +135,7 @@ export class PaneCompositeBar extends Disposable {
 				pinned: container.pinned,
 			}));
 		this.compositeBar = this.createCompositeBar(cachedItems);
+		this.removeSkipprHiddenActivityViewContainers();
 		this.onDidRegisterViewContainers(this.getViewContainers());
 		this.registerListeners();
 	}
@@ -266,6 +276,7 @@ export class PaneCompositeBar extends Disposable {
 
 	private onDidRegisterExtensions(): void {
 		this.hasExtensionsRegistered = true;
+		this.removeSkipprHiddenActivityViewContainers();
 
 		// show/hide/remove composites
 		for (const { id } of this.cachedViewContainers) {
@@ -334,6 +345,9 @@ export class PaneCompositeBar extends Disposable {
 
 	private onDidRegisterViewContainers(viewContainers: readonly ViewContainer[]): void {
 		for (const viewContainer of viewContainers) {
+			if (isSkipprHiddenActivityViewContainer(viewContainer.id)) {
+				continue;
+			}
 			this.addComposite(viewContainer);
 
 			// Pin it by default if it is new
@@ -414,6 +428,10 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private showOrHideViewContainer(viewContainer: ViewContainer): void {
+		if (isSkipprHiddenActivityViewContainer(viewContainer.id)) {
+			this.removeComposite(viewContainer.id);
+			return;
+		}
 		if (this.shouldBeHidden(viewContainer)) {
 			this.hideComposite(viewContainer.id);
 		} else {
@@ -430,6 +448,10 @@ export class PaneCompositeBar extends Disposable {
 	private shouldBeHidden(viewContainerOrId: string | ViewContainer, cachedViewContainer?: ICachedViewContainer): boolean {
 		const viewContainer = isString(viewContainerOrId) ? this.getViewContainer(viewContainerOrId) : viewContainerOrId;
 		const viewContainerId = isString(viewContainerOrId) ? viewContainerOrId : viewContainerOrId.id;
+
+		if (viewContainerId === 'workbench.view.extensions') {
+			return true;
+		}
 
 		if (viewContainer) {
 			if (viewContainer.hideIfEmpty) {
@@ -459,7 +481,16 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private addComposite(viewContainer: ViewContainer): void {
+		if (isSkipprHiddenActivityViewContainer(viewContainer.id)) {
+			return;
+		}
 		this.compositeBar.addComposite({ id: viewContainer.id, name: typeof viewContainer.title === 'string' ? viewContainer.title : viewContainer.title.value, order: viewContainer.order, requestedIndex: viewContainer.requestedIndex });
+	}
+
+	private removeSkipprHiddenActivityViewContainers(): void {
+		for (const id of SKIPPR_HIDDEN_ACTIVITY_VIEW_CONTAINERS) {
+			this.removeComposite(id);
+		}
 	}
 
 	private hideComposite(compositeId: string): void {
@@ -521,7 +552,9 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private getViewContainers(): readonly ViewContainer[] {
-		return this.viewDescriptorService.getViewContainersByLocation(this.location);
+		return this.viewDescriptorService
+			.getViewContainersByLocation(this.location)
+			.filter(viewContainer => !isSkipprHiddenActivityViewContainer(viewContainer.id));
 	}
 
 	private updateCompositeBarItemsFromStorage(retainExisting: boolean): void {
@@ -639,7 +672,7 @@ export class PaneCompositeBar extends Disposable {
 			}
 		}
 
-		return this._cachedViewContainers;
+		return this._cachedViewContainers.filter(cached => !isSkipprHiddenActivityViewContainer(cached.id));
 	}
 
 	private storeCachedViewContainersState(cachedViewContainers: ICachedViewContainer[]): void {

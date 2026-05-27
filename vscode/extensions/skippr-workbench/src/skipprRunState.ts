@@ -66,6 +66,11 @@ export interface SkipprObservedRun {
   events: SkipprRunEvent[];
 }
 
+export interface SkipprRunHistoryMetricPoint {
+  timestamp: string;
+  rows_written?: number;
+}
+
 export interface SkipprRunHistorySummary {
   id: string;
   command: string;
@@ -79,6 +84,26 @@ export interface SkipprRunHistorySummary {
   totalRows?: number;
   freshnessIso?: string;
   deadlettersTotal?: number;
+  /** Last metric samples for sync run sparklines in run history. */
+  metricPoints?: SkipprRunHistoryMetricPoint[];
+}
+
+const SYNC_RUN_KINDS = new Set(["sync", "sync-once", "sync-all-once"]);
+
+export function isSyncRun(run: { runKind: string; command: string }): boolean {
+  const runKind = (run.runKind || "").trim();
+  const command = (run.command || "").trim();
+  return SYNC_RUN_KINDS.has(runKind) || SYNC_RUN_KINDS.has(command);
+}
+
+export function syncMetricSparkline(run: Pick<SkipprObservedRun, "metricPoints">): SkipprRunHistoryMetricPoint[] | undefined {
+  if (!run.metricPoints.length) {
+    return undefined;
+  }
+  return run.metricPoints.slice(-24).map((point) => ({
+    timestamp: point.timestamp,
+    rows_written: point.rows_written
+  }));
 }
 
 export interface SkipprRunStateSnapshot {
@@ -256,7 +281,7 @@ export class SkipprRunStateStore {
 }
 
 export function summarizeRun(run: SkipprObservedRun): SkipprRunHistorySummary {
-  return {
+  const summary: SkipprRunHistorySummary = {
     id: run.id,
     command: run.command,
     runKind: run.runKind,
@@ -270,6 +295,13 @@ export function summarizeRun(run: SkipprObservedRun): SkipprRunHistorySummary {
     freshnessIso: run.freshness?.latest_iso ?? undefined,
     deadlettersTotal: run.deadletters?.total
   };
+  if (isSyncRun(run)) {
+    const metricPoints = syncMetricSparkline(run);
+    if (metricPoints) {
+      summary.metricPoints = metricPoints;
+    }
+  }
+  return summary;
 }
 
 function mergeModelFileSummary(

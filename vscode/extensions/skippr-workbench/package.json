@@ -73,11 +73,11 @@
       },
       {
         "command": "skippr.open.discover",
-        "title": "Skippr: Open Discover Panel"
+        "title": "Skippr: Show Run Activity"
       },
       {
         "command": "skippr.open.sync",
-        "title": "Skippr: Open Sync Panel"
+        "title": "Skippr: Show Run Activity"
       },
       {
         "command": "skippr.open.model",
@@ -245,11 +245,6 @@
           "id": "skipprLineageActivity",
           "title": "Lineage",
           "icon": "media/lineage-graph.svg"
-        },
-        {
-          "id": "skipprWorkflowActivity",
-          "title": "Workflows",
-          "icon": "media/skippr.svg"
         }
       ],
       "panel": [
@@ -285,32 +280,6 @@
           "name": "Lineage",
           "type": "webview",
           "order": 1
-        }
-      ],
-      "skipprWorkflowActivity": [
-        {
-          "id": "skippr.workflow.discover",
-          "name": "Discover",
-          "type": "webview",
-          "order": 1
-        },
-        {
-          "id": "skippr.workflow.sync",
-          "name": "Sync",
-          "type": "webview",
-          "order": 2
-        },
-        {
-          "id": "skippr.workflow.catalog",
-          "name": "Catalog",
-          "type": "webview",
-          "order": 3
-        },
-        {
-          "id": "skippr.workflow.model",
-          "name": "Model",
-          "type": "webview",
-          "order": 4
         }
       ],
       "debug": [

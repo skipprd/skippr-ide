@@ -28,6 +28,8 @@ export function renderSkipprRunStatusPanelHtml(): string {
     .status-bad { color: var(--vscode-errorForeground); }
     button.run { all: unset; box-sizing: border-box; width: 100%; min-height: 30px; padding: 4px 8px; border-bottom: 1px solid var(--vscode-panel-border); cursor: pointer; }
     button.run:hover { background: var(--vscode-list-hoverBackground); }
+    .spark { display: flex; align-items: flex-end; gap: 2px; height: 36px; margin-top: 6px; }
+    .spark .bar { flex: 1; min-width: 3px; background: var(--vscode-charts-blue); min-height: 3px; }
     .empty { padding: 8px; color: var(--vscode-descriptionForeground); }
   </style>
 </head>
@@ -64,6 +66,26 @@ export function renderSkipprRunStatusPanelHtml(): string {
       function isModelRun(run) {
         const kind = String((run && (run.runKind || run.command)) || "");
         return kind === "model" || kind.startsWith("model");
+      }
+      function isSyncRun(run) {
+        const kinds = { sync: 1, "sync-once": 1, "sync-all-once": 1 };
+        const runKind = String((run && run.runKind) || "").trim();
+        const command = String((run && run.command) || "").trim();
+        return Boolean(kinds[runKind] || kinds[command]);
+      }
+      function renderSparkline(run) {
+        if (!isSyncRun(run)) {
+          return "";
+        }
+        const points = Array.isArray(run.metricPoints) ? run.metricPoints : [];
+        if (!points.length) {
+          return "";
+        }
+        const max = Math.max(1, ...points.map(p => Number(p.rows_written || 0)));
+        return '<div class="spark">' + points.map(p => {
+          const h = Math.max(3, Math.round((Number(p.rows_written || 0) / max) * 32));
+          return '<div class="bar" style="height:' + h + 'px" title="' + esc(p.timestamp) + '"></div>';
+        }).join("") + "</div>";
       }
       function statusLabel(status) {
         switch (status) {
@@ -135,7 +157,7 @@ export function renderSkipprRunStatusPanelHtml(): string {
       function renderHistory(history) {
         const rows = (history || []).map(run =>
           '<button class="run" data-run-id="' + esc(run.id) + '"><div class="line"><span class="name">' + esc(runName(run)) + '</span>' + statusBadge(run.status) + '</div>' +
-          '<div class="meta">' + runMeta(run) + '</div></button>'
+          '<div class="meta">' + runMeta(run) + '</div>' + renderSparkline(run) + '</button>'
         ).join("");
         return '<div class="section-title">Previous Runs</div>' + (rows || '<div class="empty">No saved runs yet.</div>');
       }
