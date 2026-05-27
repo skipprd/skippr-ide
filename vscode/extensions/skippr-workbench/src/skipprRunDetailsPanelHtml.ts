@@ -58,12 +58,21 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
     th { color: var(--vscode-descriptionForeground); font-weight: 500; background: var(--vscode-editor-background); }
     pre { white-space: pre-wrap; margin: 0; font-family: var(--vscode-editor-font-family); }
     .empty { padding: 10px; color: var(--vscode-descriptionForeground); }
+    .schema-review { padding: 6px 10px 0; }
+    .schema-review-link { color: var(--vscode-textLink-foreground); text-decoration: none; }
+    .schema-review-link:hover { text-decoration: underline; }
+    .schema-namespace { border-bottom: 1px solid var(--vscode-panel-border); }
+    .schema-namespace h3 { margin: 0; padding: 6px 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; background: var(--vscode-sideBarSectionHeader-background); border-top: 1px solid var(--vscode-panel-border); }
+    .schema-field { display: grid; grid-template-columns: minmax(96px, 1fr) 96px 64px; gap: 6px; min-height: 22px; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+    .schema-field.pulse { animation: schemaPulse 1.4s ease-out 1; }
+    @keyframes schemaPulse { from { background: color-mix(in srgb, var(--vscode-textLink-foreground) 14%, transparent); } to { background: transparent; } }
   </style>
 </head>
 <body>
   <main id="root"></main>
   <script>
     (function () {
+      const vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null;
       let state = {};
       let metricMode = "rows";
       const viewKind = "${viewKind}";
@@ -358,10 +367,42 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         const more = files.length > 20 ? '<div class="empty">+' + esc(files.length - 20) + ' more files</div>' : "";
         return '<div class="model-section-title">Changed files</div><section class="file-list">' + rows + more + '</section>';
       }
+      function schemaNamespaceGrid(run) {
+        const schemas = run.schemas || {};
+        const keys = Object.keys(schemas).sort();
+        if (!keys.length) { return ""; }
+        const changed = new Set((run.schemaChanges || []).flatMap(change => [
+          ...((change.diff && change.diff.added) || []),
+          ...((change.diff && change.diff.removed) || []),
+          ...((change.diff && change.diff.changed) || []).map(item => item.name)
+        ].filter(Boolean)));
+        return keys.map(namespace => {
+          const schema = schemas[namespace] || {};
+          const fields = Array.isArray(schema.fields) ? schema.fields : [];
+          const rows = fields.map(field =>
+            '<div class="schema-field' + (changed.has(field.name) ? ' pulse' : '') + '"><strong>' + esc(field.name) + '</strong><span>' + esc(field.field_type || "unknown") + '</span><span class="muted">' + (field.nullable === false ? "required" : "nullable") + '</span></div>'
+          ).join("");
+          return '<section class="schema-namespace"><h3>' + esc(namespace) + '</h3>' + (rows || '<div class="empty">No fields captured.</div>') + '</section>';
+        }).join("");
+      }
+      function schemaChangeCount(run) {
+        return (run.schemaChanges || []).length;
+      }
+      function schemaReviewLink(run) {
+        const count = schemaChangeCount(run);
+        if (!count) {
+          return "";
+        }
+        return '<div class="schema-review"><a href="#" class="schema-review-link" data-action="openSchemaReview">Review schema changes (' + esc(count) + ')</a></div>';
+      }
       function schemaView(run) {
         if (!run) { return '<div class="empty">No run selected.</div>'; }
-        const rows = (run.schemaChanges || []).map(change => [change.timestamp, change.namespace, JSON.stringify(change.diff, null, 2)]);
-        return header(run) + (rows.length ? table(rows, ["Time", "Namespace", "Informational Diff"]) : '<div class="empty">No schema changes captured.</div>');
+        const review = schemaReviewLink(run);
+        const grid = schemaNamespaceGrid(run);
+        if (!grid && !schemaChangeCount(run)) {
+          return header(run) + review + '<div class="empty">No schema captured for this run yet.</div>';
+        }
+        return header(run) + review + (grid || '<div class="empty">No namespace schemas captured.</div>');
       }
       function deadletterView(run) {
         if (!run) { return '<div class="empty">No run selected.</div>'; }
@@ -419,6 +460,12 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         }
       });
       root.addEventListener("click", event => {
+        const review = event.target.closest("a[data-action='openSchemaReview']");
+        if (review && vscode) {
+          event.preventDefault();
+          vscode.postMessage({ command: "openSchemaReview" });
+          return;
+        }
         const tab = event.target.closest("button[data-metric]");
         if (!tab) { return; }
         metricMode = tab.dataset.metric || "rows";

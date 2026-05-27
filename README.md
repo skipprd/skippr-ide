@@ -98,6 +98,18 @@ For iterative development:
 - restart/reload the running app window as needed after UI or contribution changes
 - this mode now watches only the core client + `skippr-workbench` extension for a tighter inner loop
 
+### Local skipprd engine loop
+
+When changing Skippr CLI / lineage behavior, use the compiled local engine instead of the install.skippr.io binary:
+
+1. Build skipprd: `cd ../skipprd && cargo build -p skippr-cli`
+2. Open a multi-root workspace with `skippr-ide`, `skipprd`, and a sample project containing `skippr.yml`
+3. In IDE settings, set `skippr.dev.useLocalSkipprd`: **true** and point `skippr.dev.skipprdRoot` at your local `skipprd` checkout
+4. Run **Skippr: Doctor** (or check the Skippr output channel) and confirm `skippr --version` reflects the freshly built commit
+5. After skipprd or overlay changes: `npm run apply:overlay`, restart `npm run dev`, and reload the Extension Development Host window
+
+Lineage commands should log a `cargo run` invocation in the Skippr output channel when local skipprd is active.
+
 ## Re-apply Overlay After Upstream Sync
 
 ```bash

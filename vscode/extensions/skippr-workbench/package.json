@@ -40,6 +40,26 @@
         "title": "Skippr: Open Welcome"
       },
       {
+        "command": "skippr.cloud.open",
+        "title": "Skippr: Open Cloud Workspace"
+      },
+      {
+        "command": "skippr.cloud.create",
+        "title": "Skippr: Create Cloud Workspace"
+      },
+      {
+        "command": "skippr.file.newCloudWorkspace",
+        "title": "New Cloud Workspace..."
+      },
+      {
+        "command": "skippr.file.openCloudWorkspace",
+        "title": "Open Cloud Workspace..."
+      },
+      {
+        "command": "skippr.cloud.save",
+        "title": "Save Cloud Workspace"
+      },
+      {
         "command": "skippr.auth.signIn",
         "title": "Skippr: Sign In"
       },
@@ -70,6 +90,10 @@
       {
         "command": "skippr.open.lineage",
         "title": "Skippr: Lineage"
+      },
+      {
+        "command": "skippr.schemaDiff.openReview",
+        "title": "Skippr: Open schema diff review"
       },
       {
         "command": "skippr.run.discoverPipeline",
@@ -221,6 +245,11 @@
           "id": "skipprLineageActivity",
           "title": "Lineage",
           "icon": "media/lineage-graph.svg"
+        },
+        {
+          "id": "skipprWorkflowActivity",
+          "title": "Workflows",
+          "icon": "media/skippr.svg"
         }
       ],
       "panel": [
@@ -258,6 +287,32 @@
           "order": 1
         }
       ],
+      "skipprWorkflowActivity": [
+        {
+          "id": "skippr.workflow.discover",
+          "name": "Discover",
+          "type": "webview",
+          "order": 1
+        },
+        {
+          "id": "skippr.workflow.sync",
+          "name": "Sync",
+          "type": "webview",
+          "order": 2
+        },
+        {
+          "id": "skippr.workflow.catalog",
+          "name": "Catalog",
+          "type": "webview",
+          "order": 3
+        },
+        {
+          "id": "skippr.workflow.model",
+          "name": "Model",
+          "type": "webview",
+          "order": 4
+        }
+      ],
       "debug": [
         {
           "id": "skippr.runStatus",
@@ -272,6 +327,18 @@
           "name": "Run",
           "type": "webview",
           "order": 1
+        },
+        {
+          "id": "skippr.runSchema",
+          "name": "Schema",
+          "type": "webview",
+          "order": 2
+        },
+        {
+          "id": "skippr.schemaDiffReview",
+          "name": "Schema review",
+          "type": "webview",
+          "order": 3
         }
       ],
       "skippr.run.deadletters.panel": [
@@ -302,6 +369,25 @@
       }
     ],
     "menus": {
+      "menubar/file/newGroup": [
+        {
+          "command": "skippr.file.newCloudWorkspace",
+          "group": "skippr_cloud@1"
+        }
+      ],
+      "menubar/file/openGroup": [
+        {
+          "command": "skippr.file.openCloudWorkspace",
+          "group": "skippr_cloud@1"
+        }
+      ],
+      "menubar/file/saveGroup": [
+        {
+          "command": "skippr.cloud.save",
+          "group": "skippr_cloud@2",
+          "when": "skippr.cloudWorkspaceActive"
+        }
+      ],
       "debug/toolBar": [
         {
           "submenu": "skippr.debug.toolbar",
@@ -744,7 +830,8 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -w -p ./"
+    "watch": "tsc -w -p ./",
+    "test": "tsc -p ./ && node --test out/skipprLineageSchema.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.2",

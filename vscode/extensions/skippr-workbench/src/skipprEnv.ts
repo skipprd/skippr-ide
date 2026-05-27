@@ -1,6 +1,12 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import {
+  getActiveCloudContext,
+  getCloudWorkbenchContext,
+  getLastAuthToken,
+  parseJwtTenantId
+} from "./skipprCloudWorkspace";
 
 /** Workspace-folder keys merged into every Skippr CLI spawn (after `process.env`). */
 export const SKIPPR_ENV_SETTING = "env";
@@ -58,7 +64,26 @@ export function mergeSkipprSpawnEnv(
   const pipeMap = asPipelineEnvMap(conf.get(SKIPPR_PIPELINE_ENV_SETTING));
   const trimmed = pipeline?.trim();
   const pipeExtra = trimmed ? pipeMap[trimmed] : undefined;
-  return withDbtVirtualEnv({ ...base, ...globalExtra, ...(pipeExtra ?? {}) }, conf, workspaceFolder, configPath);
+  const tenantEnv = tenantEnvForSpawn(configPath);
+  return withDbtVirtualEnv(
+    { ...base, ...globalExtra, ...(pipeExtra ?? {}), ...tenantEnv },
+    conf,
+    workspaceFolder,
+    configPath
+  );
+}
+
+function tenantEnvForSpawn(configPath: string | undefined): Record<string, string> {
+  const context = getCloudWorkbenchContext();
+  const cloud = context ? getActiveCloudContext(context) : undefined;
+  if (cloud?.tenantId?.trim() && configPath && path.resolve(configPath) === path.resolve(cloud.configPath)) {
+    return { TENANT: cloud.tenantId };
+  }
+  const fromJwt = parseJwtTenantId(getLastAuthToken() ?? process.env.SKIPPR_AUTH_TOKEN);
+  if (fromJwt) {
+    return { TENANT: fromJwt };
+  }
+  return {};
 }
 
 /** Use locally built skipprd runtime plugin binaries instead of install.skippr.io. */

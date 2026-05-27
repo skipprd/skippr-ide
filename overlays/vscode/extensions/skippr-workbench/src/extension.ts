@@ -3,7 +3,6 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
-import { loadPanelPayloadFromRust } from "./rustBridge";
 import {
   installSkipprCli,
   isSkipprRunKind,
@@ -30,20 +29,51 @@ import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestContr
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
 import { parseShellArgs } from "./skipprCliArgs";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
+import {
+  cloudWorkspacePreferred,
+  collectWorkspacePrefsFromLocal,
+  getActiveCloudContext,
+  getCloudProjectRootForConfig,
+  isCloudCachedConfigPath,
+  isCloudWorkspaceCacheFile,
+  createCloudWorkspace,
+  listCloudWorkspaces,
+  loadCloudContextFromActiveFile,
+  openCloudWorkspace,
+  promptAndCreateCloudWorkspace,
+  promptAndOpenCloudWorkspace,
+  saveActiveCloudWorkspace,
+  setActiveCloudWorkspace,
+  setCloudWorkbenchContext,
+  setLastAuthToken,
+  type CloudWorkspaceContext
+} from "./skipprCloudWorkspace";
 import { mergeSkipprSpawnEnvWithLocalRuntimePlugins } from "./skipprLocalRuntimePlugins";
 import { registerSkipprConfigDiagnostics } from "./skipprConfigDiagnostics";
 import {
-  ConnectionSettings,
   SkipprConfigConnection,
   SkipprConfigShowResult,
   SkipprConnectionsPanelPayload,
   SkipprDoctorResult,
+  SkipprMetadataApplyResult,
   SkipprModelChangedFile,
-  SkipprPanelId,
-  SkipprPanelName,
-  SkipprPanelPayload,
   SkipprRunEvent
 } from "./types";
+import {
+  applyRowDecisions,
+  buildDiffRows,
+  buildReviewState,
+  dirtyNamespaces,
+  reviewStateFromRows,
+  setAllRowDecisions,
+  type SchemaDiffReviewNamespace,
+  type SchemaDiffRow,
+  type SchemaDiffRowDecision
+} from "./skipprSchemaDiffReview";
+import {
+  renderSkipprSchemaDiffReviewHtml,
+  type SchemaDiffReviewPanelPayload
+} from "./skipprSchemaDiffReviewHtml";
 import { clearSkipprCliCredentialsFile, writeSkipprCliCredentialsFile } from "./skipprCliCredentials";
 import { runEmailOtpAuthQuickInput } from "./skipprOverlayUi";
 import { renderSkipprRunStatusPanelHtml } from "./skipprRunStatusPanelHtml";
@@ -54,8 +84,27 @@ import {
   SkipprQueryData,
   SkipprQueryResultsPanelPayload
 } from "./skipprQueryResultsPanelHtml";
-import { renderSkipprLineagePanelHtml, SkipprLineagePanelPayload } from "./skipprLineagePanelHtml";
+import { renderSkipprLineagePanelHtml, type SkipprLineagePanelPayload } from "./skipprLineagePanelHtml";
+import {
+  lineageResourceTarget,
+  type LineageNodeLike,
+  type LineageResourceAction,
+  type LineageSchemaPayload
+} from "./skipprLineageSchema";
 import { renderSkipprConnectionsPanelHtml } from "./skipprConnectionsPanelHtml";
+import { renderSkipprDiscoverWorkflowHtml } from "./skipprDiscoverWorkflowHtml";
+import { renderSkipprSyncWorkflowHtml } from "./skipprSyncWorkflowHtml";
+import { renderSkipprCatalogWorkflowHtml } from "./skipprCatalogWorkflowHtml";
+import { renderSkipprModelWorkflowHtml } from "./skipprModelWorkflowHtml";
+import {
+  buildCatalogPayload,
+  buildDiscoverPayload,
+  buildModelPayload,
+  buildSyncPayload,
+  latestRunForPipeline,
+  resolveDefaultPipeline,
+  type SkipprWorkflowKind
+} from "./skipprWorkflowData";
 import {
   compileDbtSqlForQuery,
   detectDbtSqlFile,
@@ -66,25 +115,45 @@ import {
   refreshDbtEditorContextKeys
 } from "./skipprDbtSql";
 import { SkipprRunHistory } from "./skipprRunHistory";
-import { SkipprObservedRun, SkipprObservedRunStatus, SkipprRunStateStore } from "./skipprRunState";
+import {
+  acquireWorkspaceRunLock,
+  cancelWorkspaceRun,
+  completeWorkspaceRunLock,
+  heavyCommandForKind,
+  isHeavyRunKind
+} from "./skipprRunApi";
+import { workspaceSlugFromConfigPath } from "./skipprCloudWorkspace";
+import {
+  SkipprObservedRun,
+  SkipprObservedRunStatus,
+  SkipprRunStateSnapshot,
+  SkipprRunStateStore
+} from "./skipprRunState";
 
 const SKIPPR_RUN_STATUS_VIEW_ID = "skippr.runStatus";
 const SKIPPR_RUN_TIMELINE_VIEW_ID = "skippr.runTimeline";
+const SKIPPR_RUN_SCHEMA_VIEW_ID = "skippr.runSchema";
+const SKIPPR_SCHEMA_DIFF_REVIEW_VIEW_ID = "skippr.schemaDiffReview";
 const SKIPPR_RUN_DEADLETTERS_VIEW_ID = "skippr.runDeadletters";
 const SKIPPR_RUN_TIMELINE_CONTAINER_ID = "skippr.run.timeline.panel";
 const SKIPPR_QUERY_RESULTS_VIEW_ID = "skippr.queryResults";
 const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
 const SKIPPR_CONNECTIONS_VIEW_ID = "skippr.connections";
 const SKIPPR_LINEAGE_LAUNCH_VIEW_ID = "skippr.lineageLaunch";
+const SKIPPR_WORKFLOW_ACTIVITY_ID = "skipprWorkflowActivity";
+const SKIPPR_WORKFLOW_DISCOVER_VIEW_ID = "skippr.workflow.discover";
+const SKIPPR_WORKFLOW_SYNC_VIEW_ID = "skippr.workflow.sync";
+const SKIPPR_WORKFLOW_CATALOG_VIEW_ID = "skippr.workflow.catalog";
+const SKIPPR_WORKFLOW_MODEL_VIEW_ID = "skippr.workflow.model";
 const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
 const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
 
-const panelSpecs: Array<{ id: SkipprPanelId; name: SkipprPanelName; command: string }> = [
-  { id: "skippr.discover", name: "Discover", command: "skippr.open.discover" },
-  { id: "skippr.sync", name: "Sync", command: "skippr.open.sync" },
-  { id: "skippr.model", name: "Model", command: "skippr.open.model" },
-  { id: "skippr.catalog", name: "Catalog", command: "skippr.open.catalog" },
-  { id: "skippr.lineage", name: "Lineage", command: "skippr.open.lineage" }
+const panelSpecs: Array<{ command: string; workflowViewId?: string; lineage?: boolean; model?: boolean }> = [
+  { command: "skippr.open.discover", workflowViewId: SKIPPR_WORKFLOW_DISCOVER_VIEW_ID },
+  { command: "skippr.open.sync", workflowViewId: SKIPPR_WORKFLOW_SYNC_VIEW_ID },
+  { command: "skippr.open.model", workflowViewId: SKIPPR_WORKFLOW_MODEL_VIEW_ID, model: true },
+  { command: "skippr.open.catalog", workflowViewId: SKIPPR_WORKFLOW_CATALOG_VIEW_ID },
+  { command: "skippr.open.lineage", lineage: true }
 ];
 
 const workspacePathKey = "skippr.workspacePath";
@@ -150,7 +219,11 @@ interface SkipprRunRequest {
 type SkipprRunnableKind = SkipprRunKind | "ask" | "plan";
 
 let activeRun: SkipprProcess | undefined;
+let activeWorkspaceRunLock:
+  | { workspace: string; runId: string; version: number }
+  | undefined;
 let workbenchExtensionContext: vscode.ExtensionContext | undefined;
+let skipprLogOutput: vscode.LogOutputChannel | undefined;
 let activeConfigPath: string | undefined;
 let activeConfigStatus: SkipprDoctorResult | undefined;
 const sqlDocumentContexts = new Map<string, SkipprSqlDocumentContext>();
@@ -267,13 +340,6 @@ function getAuthBaseUrl(): string {
   return configured || "https://auth.skippr.io";
 }
 
-function loadConnectionSettings(): ConnectionSettings {
-  const config = vscode.workspace.getConfiguration();
-  const workspacePath = config.get<string>(workspacePathKey, "").trim();
-  const apiTarget = config.get<string>(apiTargetKey, "").trim();
-  return { workspacePath, apiTarget: apiTarget || undefined };
-}
-
 function renderConnectionFormHtml(workspacePath: string, apiTarget: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -362,7 +428,10 @@ async function skipprSpawnEnv(
 const SKIPPR_RUN_TOOLBAR_CONTEXT_KEY = "skippr.runToolbarInTitle";
 
 function getConfigCwd(configPath?: string): string {
-  return skipprProjectRoot(configPath, getRunCwd());
+  const cloudRoot = workbenchExtensionContext
+    ? getCloudProjectRootForConfig(workbenchExtensionContext, configPath)
+    : undefined;
+  return skipprProjectRoot(configPath, getRunCwd(), cloudRoot);
 }
 
 async function detectSkipprConfigs(): Promise<string[]> {
@@ -413,7 +482,37 @@ function isWorkspaceRootConfigPath(configPath: string | undefined): boolean {
   return normalized === path.join(root, "skippr.yml") || normalized === path.join(root, "skippr.yaml");
 }
 
+function isUsableSkipprConfigPath(configPath: string | undefined): boolean {
+  if (!configPath) {
+    return false;
+  }
+  if (isCloudCachedConfigPath(configPath)) {
+    return (
+      workbenchExtensionContext !== undefined &&
+      getCloudProjectRootForConfig(workbenchExtensionContext, configPath) !== undefined
+    );
+  }
+  return isWorkspaceRootConfigPath(configPath);
+}
+
 async function chooseActiveConfig(output: vscode.LogOutputChannel): Promise<string | undefined> {
+  const ctx = workbenchExtensionContext;
+  if (ctx) {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (root) {
+      await loadCloudContextFromActiveFile(ctx, root);
+    }
+    const cloud = getActiveCloudContext(ctx);
+    if (
+      cloud?.configPath &&
+      fs.existsSync(cloud.configPath) &&
+      (cloudWorkspacePreferred(ctx) || !isWorkspaceRootConfigPath(path.join(root ?? "", "skippr.yml")))
+    ) {
+      activeConfigPath = cloud.configPath;
+      output.info(`Using cloud workspace config ${cloud.workspace} at ${cloud.configPath}`);
+      return activeConfigPath;
+    }
+  }
   const configs = await detectSkipprConfigs();
   if (configs.length === 0) {
     activeConfigPath = undefined;
@@ -470,13 +569,17 @@ async function refreshConfigStatus(output: vscode.LogOutputChannel, statusItem: 
     ]
   };
 
+  const cloud = workbenchExtensionContext ? getActiveCloudContext(workbenchExtensionContext) : undefined;
+  const cloudLabel =
+    cloud && path.resolve(cloud.configPath) === path.resolve(configPath) ? ` $(cloud) ${cloud.workspace}` : "";
+
   if (hasPipelines && hasConnections) {
     statusItem.command = "skippr.run.discoverPipeline";
-    statusItem.text = "$(pass) Skippr: ready";
+    statusItem.text = `$(pass) Skippr: ready${cloudLabel}`;
     statusItem.tooltip = `Using ${configPath}`;
   } else {
     statusItem.command = "skippr.setupWorkspace";
-    statusItem.text = "$(circle-outline) Skippr: initialized";
+    statusItem.text = `$(circle-outline) Skippr: initialized${cloudLabel}`;
     statusItem.tooltip = `Config is valid. Add a source and warehouse to make ${configPath} ready.`;
   }
 }
@@ -888,6 +991,15 @@ interface RunStatusPanelPayload {
 
 let runStatusWebviewView: vscode.WebviewView | undefined;
 const runDetailsWebviewViews = new Map<string, vscode.WebviewView>();
+let schemaDiffReviewWebviewView: vscode.WebviewView | undefined;
+let schemaDiffReviewNamespaces: SchemaDiffReviewNamespace[] = [];
+let schemaDiffReviewSourceKey = "";
+let schemaDiffReviewActiveNamespace = "";
+let schemaDiffAutoOpenTimer: ReturnType<typeof setTimeout> | undefined;
+let schemaDiffAutoOpenRunId = "";
+const SCHEMA_DIFF_AUTO_OPEN_DEBOUNCE_MS = 800;
+const SCHEMA_DIFF_SAVE_WARNING =
+  "Skippr discovers schemas using backwards-compatible evolution rules. If you edit and save metadata manually, older data may no longer match the published schema and queries can fail or return incomplete results. Only save if you intend to override automatic discovery.";
 let queryResultsWebviewView: vscode.WebviewView | undefined;
 let observabilityStore: SkipprRunStateStore | undefined;
 let runHistory: SkipprRunHistory | undefined;
@@ -933,6 +1045,16 @@ function postObservability(): void {
   for (const webviewView of runDetailsWebviewViews.values()) {
     void webviewView.webview.postMessage(snapshot);
   }
+  broadcastWorkflowObservability(snapshot);
+}
+
+function broadcastWorkflowObservability(snapshot: SkipprRunStateSnapshot): void {
+  if (!skipprLogOutput) {
+    return;
+  }
+  void refreshDiscoverWorkflowPanel(skipprLogOutput, snapshot);
+  void refreshSyncWorkflowPanel(skipprLogOutput, snapshot);
+  void refreshModelWorkflowPanel(skipprLogOutput, snapshot);
 }
 
 function schedulePostObservability(): void {
@@ -942,7 +1064,295 @@ function schedulePostObservability(): void {
   observabilityPostTimer = setTimeout(() => {
     observabilityPostTimer = undefined;
     postObservability();
+    refreshSchemaDiffReviewFromObservability();
   }, OBSERVABILITY_POST_DEBOUNCE_MS);
+}
+
+function selectedObservedRun(snapshot?: SkipprRunStateSnapshot): SkipprObservedRun | undefined {
+  const obs = snapshot ?? observabilityStore?.snapshot();
+  return obs?.selected ?? obs?.current;
+}
+
+function schemaDiffReviewPayload(
+  status: SchemaDiffReviewPanelPayload["status"],
+  overrides?: Partial<SchemaDiffReviewPanelPayload>
+): SchemaDiffReviewPanelPayload {
+  const run = selectedObservedRun();
+  const state = reviewStateFromRows(schemaDiffReviewNamespaces);
+  return {
+    type: "schemaDiffReview",
+    status,
+    pipeline: run?.pipeline,
+    configPath: run?.configPath ?? activeConfigPath,
+    state,
+    activeNamespace: schemaDiffReviewActiveNamespace || state.namespaces[0]?.namespace,
+    ...overrides
+  };
+}
+
+function postSchemaDiffReview(overrides?: Partial<SchemaDiffReviewPanelPayload>): void {
+  const payload = schemaDiffReviewPayload(
+    overrides?.status ?? (schemaDiffReviewNamespaces.length ? "ready" : "idle"),
+    overrides
+  );
+  void schemaDiffReviewWebviewView?.webview.postMessage(payload);
+}
+
+function syncSchemaDiffReviewFromRun(run: SkipprObservedRun | undefined, preserveEdits: boolean): void {
+  if (!run?.schemaChanges?.length) {
+    schemaDiffReviewNamespaces = [];
+    schemaDiffReviewSourceKey = "";
+    schemaDiffReviewActiveNamespace = "";
+    postSchemaDiffReview({ status: "idle" });
+    return;
+  }
+  const sourceKey = `${run.id}:${run.schemaChanges.length}`;
+  if (preserveEdits && sourceKey === schemaDiffReviewSourceKey && schemaDiffReviewNamespaces.length) {
+    const state = reviewStateFromRows(schemaDiffReviewNamespaces);
+    postSchemaDiffReview({ status: "ready", state });
+    return;
+  }
+  const built = buildReviewState(
+    run.schemaChanges.map((change) => ({
+      namespace: change.namespace,
+      diff: change.diff,
+      schema: change.schema
+    }))
+  );
+  schemaDiffReviewNamespaces = built.namespaces;
+  schemaDiffReviewSourceKey = sourceKey;
+  if (
+    !schemaDiffReviewActiveNamespace ||
+    !schemaDiffReviewNamespaces.some((ns) => ns.namespace === schemaDiffReviewActiveNamespace)
+  ) {
+    schemaDiffReviewActiveNamespace = schemaDiffReviewNamespaces[0]?.namespace ?? "";
+  }
+  postSchemaDiffReview({ status: "ready" });
+}
+
+function refreshSchemaDiffReviewFromObservability(): void {
+  syncSchemaDiffReviewFromRun(selectedObservedRun(), true);
+}
+
+async function showSchemaDiffReviewPanel(): Promise<void> {
+  await runWorkbenchCommand("skippr.workbench.forceRunPanels");
+  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_RUN_TIMELINE_CONTAINER_ID}`);
+  await runWorkbenchCommand(`${SKIPPR_SCHEMA_DIFF_REVIEW_VIEW_ID}.focus`);
+  refreshSchemaDiffReviewFromObservability();
+}
+
+function scheduleSchemaDiffAutoOpen(runId: string): void {
+  if (schemaDiffAutoOpenRunId === runId) {
+    return;
+  }
+  schemaDiffAutoOpenRunId = runId;
+  if (schemaDiffAutoOpenTimer) {
+    clearTimeout(schemaDiffAutoOpenTimer);
+  }
+  schemaDiffAutoOpenTimer = setTimeout(() => {
+    schemaDiffAutoOpenTimer = undefined;
+    void showSchemaDiffReviewPanel();
+  }, SCHEMA_DIFF_AUTO_OPEN_DEBOUNCE_MS);
+}
+
+function updateSchemaDiffRow(
+  namespace: string,
+  rowId: string,
+  update: (row: SchemaDiffRow) => SchemaDiffRow
+): void {
+  schemaDiffReviewNamespaces = schemaDiffReviewNamespaces.map((ns) => {
+    if (ns.namespace !== namespace) {
+      return ns;
+    }
+    return {
+      ...ns,
+      rows: ns.rows.map((row) => (row.id === rowId ? update(row) : row))
+    };
+  });
+  postSchemaDiffReview({ status: "ready" });
+}
+
+async function saveSchemaDiffReview(output: vscode.LogOutputChannel): Promise<void> {
+  const run = selectedObservedRun();
+  const configPath = run?.configPath ?? activeConfigPath;
+  const pipeline = run?.pipeline?.trim();
+  if (!configPath || !pipeline) {
+    vscode.window.showWarningMessage("Select a run with a pipeline and active skippr.yml before saving schema metadata.");
+    return;
+  }
+  const state = reviewStateFromRows(schemaDiffReviewNamespaces);
+  const toSave = dirtyNamespaces(state);
+  if (!toSave.length) {
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    SCHEMA_DIFF_SAVE_WARNING,
+    { modal: true },
+    "Save anyway",
+    "Cancel"
+  );
+  if (choice !== "Save anyway") {
+    return;
+  }
+  const cliPath = await resolveCliOrOfferInstall(output);
+  if (!cliPath) {
+    return;
+  }
+  postSchemaDiffReview({ status: "saving" });
+  const cwd = getConfigCwd(configPath);
+  const spawnEnv = await skipprSpawnEnv(configPath, pipeline, output);
+  const logLevel = getLogLevel();
+  let hadError = false;
+  for (const ns of toSave) {
+    const change = run?.schemaChanges.find((c) => c.namespace === ns.namespace);
+    const afterFields = Array.isArray(change?.schema?.fields) ? change.schema.fields : [];
+    const fields = applyRowDecisions(ns.rows, afterFields);
+    const schemaJson = JSON.stringify({ fields });
+    const args = [
+      "--config",
+      configPath,
+      "--log",
+      logLevel,
+      "metadata",
+      "apply",
+      "--pipeline",
+      pipeline,
+      "--namespace",
+      ns.namespace,
+      "--schema-json",
+      schemaJson,
+      "--evolved",
+      "--output",
+      "json"
+    ];
+    const result = await runSkipprJson<SkipprMetadataApplyResult>(
+      cliPath,
+      args,
+      cwd,
+      output,
+      spawnEnv,
+      configPath
+    );
+    if (!result.value?.ok || result.code !== 0) {
+      hadError = true;
+      const err = result.value?.error || result.stdout || "metadata apply failed";
+      output.error(`[schema review] ${ns.namespace}: ${err}`);
+    }
+  }
+  if (hadError) {
+    postSchemaDiffReview({
+      status: "error",
+      error: "One or more namespaces failed to save. See the Skippr output channel."
+    });
+    vscode.window.showErrorMessage("Schema metadata save failed. See the Skippr output channel for details.");
+    return;
+  }
+  syncSchemaDiffReviewFromRun(run, false);
+  postSchemaDiffReview({ status: "ready", message: "Schema metadata saved." });
+  vscode.window.showInformationMessage("Schema metadata saved.");
+}
+
+function registerSkipprSchemaDiffReviewView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SKIPPR_SCHEMA_DIFF_REVIEW_VIEW_ID,
+      {
+        resolveWebviewView(webviewView: vscode.WebviewView): void {
+          schemaDiffReviewWebviewView = webviewView;
+          webviewView.webview.options = { enableScripts: true };
+          webviewView.webview.html = renderSkipprSchemaDiffReviewHtml();
+          refreshSchemaDiffReviewFromObservability();
+          webviewView.webview.onDidReceiveMessage((message: {
+            command?: string;
+            namespace?: string;
+            rowId?: string;
+            decision?: string;
+            edit?: string;
+            value?: string | boolean;
+          }) => {
+            const namespace = message.namespace?.trim() || schemaDiffReviewActiveNamespace;
+            if (message.command === "save") {
+              void saveSchemaDiffReview(output);
+              return;
+            }
+            if (namespace) {
+              schemaDiffReviewActiveNamespace = namespace;
+            }
+            const ns = schemaDiffReviewNamespaces.find((n) => n.namespace === namespace);
+            if (!ns) {
+              return;
+            }
+            if (message.command === "approveAll") {
+              schemaDiffReviewNamespaces = schemaDiffReviewNamespaces.map((entry) =>
+                entry.namespace === namespace
+                  ? { ...entry, rows: setAllRowDecisions(entry.rows, "approved") }
+                  : entry
+              );
+              postSchemaDiffReview({ status: "ready" });
+              return;
+            }
+            if (message.command === "rejectAll") {
+              schemaDiffReviewNamespaces = schemaDiffReviewNamespaces.map((entry) =>
+                entry.namespace === namespace
+                  ? { ...entry, rows: setAllRowDecisions(entry.rows, "rejected") }
+                  : entry
+              );
+              postSchemaDiffReview({ status: "ready" });
+              return;
+            }
+            if (message.command === "reset") {
+              const run = selectedObservedRun();
+              const change = run?.schemaChanges.find((c) => c.namespace === namespace);
+              const afterFields = Array.isArray(change?.schema?.fields) ? change.schema.fields : [];
+              schemaDiffReviewNamespaces = schemaDiffReviewNamespaces.map((entry) =>
+                entry.namespace === namespace
+                  ? {
+                      ...entry,
+                      rows: buildDiffRows(change?.diff ?? {}, afterFields)
+                    }
+                  : entry
+              );
+              postSchemaDiffReview({ status: "ready" });
+              return;
+            }
+            if (message.command === "setDecision" && message.rowId && message.decision) {
+              const decision = message.decision as SchemaDiffRowDecision;
+              updateSchemaDiffRow(namespace, message.rowId, (row) => ({
+                ...row,
+                decision,
+                editedAfter: decision === "approved" ? row.editedAfter : undefined
+              }));
+              return;
+            }
+            if (message.command === "editField" && message.rowId && message.edit) {
+              updateSchemaDiffRow(namespace, message.rowId, (row) => {
+                if (row.kind !== "changed") {
+                  return row;
+                }
+                const base = row.editedAfter ?? row.after ?? { name: row.fieldName };
+                if (message.edit === "nullable") {
+                  return {
+                    ...row,
+                    editedAfter: { ...base, nullable: Boolean(message.value) }
+                  };
+                }
+                return {
+                  ...row,
+                  editedAfter: { ...base, field_type: String(message.value ?? base.field_type) }
+                };
+              });
+            }
+          });
+          webviewView.onDidDispose(() => {
+            if (schemaDiffReviewWebviewView === webviewView) {
+              schemaDiffReviewWebviewView = undefined;
+            }
+          });
+        }
+      },
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
 }
 
 function postQueryResults(payload: SkipprQueryResultsPanelPayload): void {
@@ -965,6 +1375,23 @@ function scheduleRefreshRunHistory(): void {
     historyRefreshTimer = undefined;
     void refreshRunHistory();
   }, HISTORY_REFRESH_DEBOUNCE_MS);
+}
+
+async function refreshRunHistoryCloudContext(): Promise<void> {
+  if (!runHistory || !workbenchExtensionContext) {
+    return;
+  }
+  const cloud = getActiveCloudContext(workbenchExtensionContext);
+  const session = await readAuthSession(workbenchExtensionContext);
+  if (cloud && session?.token) {
+    runHistory.setCloudContext({
+      apiRequest,
+      token: session.token,
+      workspace: cloud.workspace
+    });
+  } else {
+    runHistory.setCloudContext(undefined);
+  }
 }
 
 async function refreshRunHistory(): Promise<void> {
@@ -1016,11 +1443,24 @@ async function openHistoricalRun(runId: string | undefined): Promise<void> {
   }
 }
 
-async function showRunDetailsPanel(): Promise<void> {
+async function showRunDetailsPanel(focusViewId: string = SKIPPR_RUN_TIMELINE_VIEW_ID): Promise<void> {
   await runWorkbenchCommand("skippr.workbench.forceRunPanels");
   await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_RUN_TIMELINE_CONTAINER_ID}`);
-  await runWorkbenchCommand(`${SKIPPR_RUN_TIMELINE_VIEW_ID}.focus`);
+  await runWorkbenchCommand(`${focusViewId}.focus`);
   postObservability();
+}
+
+async function focusRunObservability(runId: string | undefined, options?: { schema?: boolean }): Promise<void> {
+  if (!runId) {
+    return;
+  }
+  await openHistoricalRun(runId);
+  await showRunDetailsPanel(options?.schema ? SKIPPR_RUN_SCHEMA_VIEW_ID : SKIPPR_RUN_TIMELINE_VIEW_ID);
+}
+
+async function revealWorkflowView(viewId: string): Promise<void> {
+  await runWorkbenchCommand(`workbench.view.extension.${SKIPPR_WORKFLOW_ACTIVITY_ID}`);
+  await runWorkbenchCommand(`${viewId}.focus`);
 }
 
 function finishRunStatusPanel(outcome: {
@@ -1102,6 +1542,13 @@ function registerSkipprRunDetailsView(
           webviewView.webview.html = renderSkipprRunDetailsPanelHtml(viewKind);
           runDetailsWebviewViews.set(viewId, webviewView);
           postObservability();
+          if (viewKind === "schema") {
+            webviewView.webview.onDidReceiveMessage((message: { command?: string }) => {
+              if (message.command === "openSchemaReview") {
+                void showSchemaDiffReviewPanel();
+              }
+            });
+          }
           webviewView.onDidDispose(() => {
             if (runDetailsWebviewViews.get(viewId) === webviewView) {
               runDetailsWebviewViews.delete(viewId);
@@ -1167,10 +1614,20 @@ function renderLineageLaunchHtml(payload: {
         if (!node) {
           return '<div class="schema-placeholder">Select a lineage node from the graph to view its schema.</div>';
         }
+        if (schema && schema.loading) {
+          return '<div class="schema-placeholder"><strong>' + esc(node.label || node.id) + '</strong><div class="schema-fields"><span class="field-loading"></span> Loading schema...</div></div>';
+        }
         if (!fields.length) {
           return '<div class="schema-placeholder">No schema fields found for ' + esc(node.label || node.id) + '.</div>';
         }
-        const rows = fields.map(field => '<button class="schema-field ' + esc(field.state || "") + '" data-action="selectField" data-asset="' + esc(node.datasetId || "") + '" data-field="' + esc(field.fieldPath || "") + '">' + esc(field.fieldPath) + (field.loading ? '<span class="field-loading"></span>' : '') + '</button>').join("");
+        const rows = fields.map(field => {
+          const typeLabel = field.fieldType ? field.fieldType + (field.nullable === false ? " · required" : field.nullable ? " · nullable" : "") : "";
+          return '<button class="schema-field ' + esc(field.state || "") + '" data-action="selectField" data-field-node-id="' + esc(field.fieldNodeId || "") + '">' +
+            esc(field.fieldPath) +
+            (typeLabel ? ' <span class="muted">' + esc(typeLabel) + '</span>' : '') +
+            (field.loading ? '<span class="field-loading"></span>' : '') +
+          '</button>';
+        }).join("");
         return '<div class="schema-placeholder"><strong>' + esc(node.label || node.id) + '</strong><div class="schema-fields">' + rows + '</div></div>';
       }
       if (error) {
@@ -1188,11 +1645,10 @@ function renderLineageLaunchHtml(payload: {
           if (!field.querySelector(".field-loading")) {
             field.insertAdjacentHTML("beforeend", '<span class="field-loading"></span>');
           }
-          vscode.postMessage({
-            command: "selectField",
-            asset: field.getAttribute("data-asset") || "",
-            field: field.getAttribute("data-field") || ""
-          });
+          const fieldNodeId = field.getAttribute("data-field-node-id") || "";
+          if (fieldNodeId) {
+            vscode.postMessage({ command: "selectField", fieldNodeId });
+          }
           return;
         }
         const pipeline = target && target.closest("button[data-pipeline]");
@@ -1208,9 +1664,10 @@ function renderLineageLaunchHtml(payload: {
         } else if (event.data && event.data.command === "loadingField") {
           document.querySelectorAll(".schema-field .field-loading").forEach(node => node.remove());
           document.querySelectorAll(".schema-field").forEach(node => node.classList.remove("highlighted"));
-          const asset = event.data.asset || "";
-          const fieldPath = event.data.field || "";
-          const match = document.querySelector(".schema-field[data-asset='" + CSS.escape(asset) + "'][data-field='" + CSS.escape(fieldPath) + "']");
+          const fieldNodeId = event.data.fieldNodeId || "";
+          const match = fieldNodeId
+            ? document.querySelector(".schema-field[data-field-node-id='" + CSS.escape(fieldNodeId) + "']")
+            : null;
           if (match) {
             match.classList.add("highlighted");
             match.insertAdjacentHTML("beforeend", '<span class="field-loading"></span>');
@@ -1244,17 +1701,16 @@ function registerSkipprLineageLaunchView(context: vscode.ExtensionContext, outpu
             }
           }
           webviewView.webview.html = renderLineageLaunchHtml({ configPath, pipelines, error });
-          webviewView.webview.onDidReceiveMessage((message: { command?: string; configPath?: string; pipeline?: string; asset?: string; field?: string }) => {
+          webviewView.webview.onDidReceiveMessage((message: { command?: string; configPath?: string; pipeline?: string; fieldNodeId?: string }) => {
             if (message.command === "openPipeline" && message.pipeline?.trim()) {
               void vscode.commands.executeCommand("skippr.open.lineage", {
                 configPath: message.configPath,
                 pipeline: message.pipeline
               });
             } else if (message.command === "selectField") {
-              const asset = typeof message.asset === "string" ? message.asset.trim() : "";
-              const field = typeof message.field === "string" ? message.field.trim() : "";
-              if (asset && field) {
-                void refreshLineagePanel(output, "graph", { asset, field });
+              const fieldNodeId = typeof message.fieldNodeId === "string" ? message.fieldNodeId.trim() : "";
+              if (fieldNodeId) {
+                void refreshLineagePanel(output, "graph", { fieldNodeId });
               }
             }
           });
@@ -1391,6 +1847,401 @@ async function openConfigAtConnection(configPath: string | undefined, connection
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
+async function workflowConfigContext(
+  output: vscode.LogOutputChannel
+): Promise<{ configPath?: string; show?: SkipprConfigShowResult; defaultPipeline: string }> {
+  const configPath = activeConfigPath || (await chooseActiveConfig(output));
+  if (!configPath) {
+    return { defaultPipeline: "" };
+  }
+  const show = await getCachedConfigShow(output, configPath, "offerInstall");
+  const folderUri = workspaceFolderForConfigPath(configPath);
+  const configuredDefault = vscode.workspace.getConfiguration(undefined, folderUri).get<string>(defaultPipelineKey, "").trim();
+  return { configPath, show, defaultPipeline: resolveDefaultPipeline(show, configuredDefault) };
+}
+
+async function loadWorkflowRun(runId: string | undefined): Promise<SkipprObservedRun | undefined> {
+  if (!runId || !runHistory) {
+    return undefined;
+  }
+  try {
+    return await runHistory.loadRun(runId);
+  } catch {
+    return undefined;
+  }
+}
+
+function postWorkflowPayload(viewId: string, payload: unknown): void {
+  const view = workflowWebviewViews.get(viewId);
+  if (view) {
+    void view.webview.postMessage(payload);
+  }
+}
+
+async function selectedWorkflowPipeline(
+  kind: SkipprWorkflowKind | "catalog",
+  output: vscode.LogOutputChannel,
+  requested?: string
+): Promise<string> {
+  if (requested?.trim()) {
+    workflowSelectedPipeline.set(kind, requested.trim());
+    return requested.trim();
+  }
+  const cached = workflowSelectedPipeline.get(kind);
+  if (cached) {
+    return cached;
+  }
+  const ctx = await workflowConfigContext(output);
+  const pipeline = ctx.defaultPipeline;
+  if (pipeline) {
+    workflowSelectedPipeline.set(kind, pipeline);
+  }
+  return pipeline;
+}
+
+async function refreshDiscoverWorkflowPanel(
+  output: vscode.LogOutputChannel,
+  snapshot?: SkipprRunStateSnapshot
+): Promise<void> {
+  const obs = snapshot ?? observabilityStore?.snapshot();
+  if (!obs) {
+    return;
+  }
+  const ctx = await workflowConfigContext(output);
+  const pipeline = await selectedWorkflowPipeline("discover", output);
+  if (!ctx.configPath || !ctx.show) {
+    postWorkflowPayload(
+      SKIPPR_WORKFLOW_DISCOVER_VIEW_ID,
+      buildDiscoverPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
+    );
+    return;
+  }
+  const latest = pipeline ? latestRunForPipeline("discover", pipeline, obs) : undefined;
+  const run =
+    latest && "schemas" in latest
+      ? (latest as SkipprObservedRun)
+      : latest
+        ? await loadWorkflowRun(latest.id)
+        : undefined;
+  postWorkflowPayload(
+    SKIPPR_WORKFLOW_DISCOVER_VIEW_ID,
+    buildDiscoverPayload({
+      status: "ready",
+      show: ctx.show,
+      selectedPipeline: pipeline,
+      snapshot: obs,
+      run
+    })
+  );
+}
+
+async function refreshSyncWorkflowPanel(
+  output: vscode.LogOutputChannel,
+  snapshot?: SkipprRunStateSnapshot
+): Promise<void> {
+  const obs = snapshot ?? observabilityStore?.snapshot();
+  if (!obs) {
+    return;
+  }
+  const ctx = await workflowConfigContext(output);
+  const pipeline = await selectedWorkflowPipeline("sync", output);
+  if (!ctx.configPath || !ctx.show) {
+    postWorkflowPayload(
+      SKIPPR_WORKFLOW_SYNC_VIEW_ID,
+      buildSyncPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
+    );
+    return;
+  }
+  const latest = pipeline ? latestRunForPipeline("sync", pipeline, obs) : undefined;
+  const run =
+    latest && "metricPoints" in latest
+      ? (latest as SkipprObservedRun)
+      : latest
+        ? await loadWorkflowRun(latest.id)
+        : undefined;
+  postWorkflowPayload(
+    SKIPPR_WORKFLOW_SYNC_VIEW_ID,
+    buildSyncPayload({
+      status: "ready",
+      show: ctx.show,
+      selectedPipeline: pipeline,
+      snapshot: obs,
+      run
+    })
+  );
+}
+
+async function refreshModelWorkflowPanel(
+  output: vscode.LogOutputChannel,
+  snapshot?: SkipprRunStateSnapshot
+): Promise<void> {
+  const obs = snapshot ?? observabilityStore?.snapshot();
+  if (!obs) {
+    return;
+  }
+  const ctx = await workflowConfigContext(output);
+  const pipeline = await selectedWorkflowPipeline("model", output);
+  if (!ctx.configPath || !ctx.show) {
+    postWorkflowPayload(
+      SKIPPR_WORKFLOW_MODEL_VIEW_ID,
+      buildModelPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
+    );
+    return;
+  }
+  const latest = pipeline ? latestRunForPipeline("model", pipeline, obs) : undefined;
+  const run =
+    latest && "modelChangedFiles" in latest
+      ? (latest as SkipprObservedRun)
+      : latest
+        ? await loadWorkflowRun(latest.id)
+        : undefined;
+  postWorkflowPayload(
+    SKIPPR_WORKFLOW_MODEL_VIEW_ID,
+    buildModelPayload({
+      status: "ready",
+      show: ctx.show,
+      selectedPipeline: pipeline,
+      snapshot: obs,
+      run
+    })
+  );
+}
+
+async function refreshCatalogWorkflowPanel(
+  output: vscode.LogOutputChannel,
+  options?: { loadGraph?: boolean; selectedNodeId?: string }
+): Promise<void> {
+  const obs = observabilityStore?.snapshot() ?? { type: "observability" as const, history: [] };
+  const ctx = await workflowConfigContext(output);
+  const pipeline = await selectedWorkflowPipeline("catalog", output);
+  if (options?.selectedNodeId) {
+    catalogSelectedNodeId = options.selectedNodeId;
+  }
+  if (!ctx.configPath || !ctx.show) {
+    postWorkflowPayload(
+      SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
+      buildCatalogPayload({ status: "ready", snapshot: obs, error: "No Skippr config in workspace." })
+    );
+    return;
+  }
+  if (options?.loadGraph) {
+    postWorkflowPayload(
+      SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
+      buildCatalogPayload({
+        status: "ready",
+        show: ctx.show,
+        selectedPipeline: pipeline,
+        snapshot: obs,
+        lineageStatus: "loading",
+        selectedNodeId: catalogSelectedNodeId
+      })
+    );
+    const lineageCtx = await resolveLineageContext(output, { configPath: ctx.configPath, pipeline });
+    if (!lineageCtx) {
+      postWorkflowPayload(
+        SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
+        buildCatalogPayload({
+          status: "ready",
+          show: ctx.show,
+          selectedPipeline: pipeline,
+          snapshot: obs,
+          lineageStatus: "error",
+          lineageError: "Unable to resolve lineage context.",
+          selectedNodeId: catalogSelectedNodeId
+        })
+      );
+      return;
+    }
+    const graphPayload = await runLineageCommand(lineageCtx, output, "graph");
+    if (graphPayload.status === "success" && graphPayload.graph) {
+      catalogLineageGraph = graphPayload.graph;
+    } else {
+      catalogLineageGraph = undefined;
+    }
+    postWorkflowPayload(
+      SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
+      buildCatalogPayload({
+        status: "ready",
+        show: ctx.show,
+        selectedPipeline: pipeline,
+        snapshot: obs,
+        lineageStatus: graphPayload.status === "success" ? "ready" : "error",
+        lineageError: graphPayload.error,
+        graph: catalogLineageGraph,
+        selectedNodeId: catalogSelectedNodeId
+      })
+    );
+    return;
+  }
+  postWorkflowPayload(
+    SKIPPR_WORKFLOW_CATALOG_VIEW_ID,
+    buildCatalogPayload({
+      status: "ready",
+      show: ctx.show,
+      selectedPipeline: pipeline,
+      snapshot: obs,
+      lineageStatus: catalogLineageGraph ? "ready" : "idle",
+      graph: catalogLineageGraph,
+      selectedNodeId: catalogSelectedNodeId
+    })
+  );
+}
+
+function registerSkipprWorkflowViews(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
+  const register = (
+    viewId: string,
+    html: string,
+    kind: SkipprWorkflowKind | "catalog",
+    onMessage: (message: {
+      command?: string;
+      pipeline?: string;
+      runId?: string;
+      nodeId?: string;
+      path?: string;
+    }) => Promise<void>
+  ): void => {
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(
+        viewId,
+        {
+          resolveWebviewView(webviewView: vscode.WebviewView): void {
+            webviewView.webview.options = { enableScripts: true };
+            webviewView.webview.html = html;
+            workflowWebviewViews.set(viewId, webviewView);
+            webviewView.webview.onDidReceiveMessage((message) => {
+              void onMessage(message);
+            });
+            webviewView.onDidDispose(() => {
+              if (workflowWebviewViews.get(viewId) === webviewView) {
+                workflowWebviewViews.delete(viewId);
+              }
+            });
+            if (kind === "catalog") {
+              void refreshCatalogWorkflowPanel(output, { loadGraph: !catalogLineageGraph });
+            } else if (kind === "discover") {
+              void refreshDiscoverWorkflowPanel(output);
+            } else if (kind === "sync") {
+              void refreshSyncWorkflowPanel(output);
+            } else {
+              void refreshModelWorkflowPanel(output);
+            }
+          }
+        },
+        { webviewOptions: { retainContextWhenHidden: true } }
+      )
+    );
+  };
+
+  register(SKIPPR_WORKFLOW_DISCOVER_VIEW_ID, renderSkipprDiscoverWorkflowHtml(), "discover", async (message) => {
+    if (message.command === "ready" || message.command === "refresh") {
+      await refreshDiscoverWorkflowPanel(output);
+      return;
+    }
+    if (message.command === "selectPipeline" && message.pipeline) {
+      workflowSelectedPipeline.set("discover", message.pipeline);
+      await refreshDiscoverWorkflowPanel(output);
+      return;
+    }
+    const pipeline = await selectedWorkflowPipeline("discover", output, message.pipeline);
+    if (message.command === "runDiscover" && pipeline) {
+      await vscode.commands.executeCommand("skippr.run.discoverPipeline", pipeline);
+      return;
+    }
+    if (message.command === "openRun" || message.command === "viewSchema") {
+      await focusRunObservability(message.runId, { schema: message.command === "viewSchema" });
+      return;
+    }
+    if (message.command === "openLineage" && pipeline) {
+      const configPath = activeConfigPath || (await chooseActiveConfig(output));
+      await vscode.commands.executeCommand("skippr.open.lineage", { configPath, pipeline });
+    }
+  });
+
+  register(SKIPPR_WORKFLOW_SYNC_VIEW_ID, renderSkipprSyncWorkflowHtml(), "sync", async (message) => {
+    if (message.command === "ready" || message.command === "refresh") {
+      await refreshSyncWorkflowPanel(output);
+      return;
+    }
+    if (message.command === "selectPipeline" && message.pipeline) {
+      workflowSelectedPipeline.set("sync", message.pipeline);
+      await refreshSyncWorkflowPanel(output);
+      return;
+    }
+    const pipeline = await selectedWorkflowPipeline("sync", output, message.pipeline);
+    if (message.command === "runSyncOnce" && pipeline) {
+      await vscode.commands.executeCommand("skippr.run.syncPipelineOnce", pipeline);
+      return;
+    }
+    if (message.command === "startSync" && pipeline) {
+      await vscode.commands.executeCommand("skippr.run.startSyncPipeline", pipeline);
+      return;
+    }
+    if (message.command === "openRun") {
+      await focusRunObservability(message.runId);
+      return;
+    }
+    if (message.command === "openDeadletters") {
+      await showRunDetailsPanel(SKIPPR_RUN_DEADLETTERS_VIEW_ID);
+    }
+  });
+
+  register(SKIPPR_WORKFLOW_CATALOG_VIEW_ID, renderSkipprCatalogWorkflowHtml(), "catalog", async (message) => {
+    if (message.command === "ready" || message.command === "refresh") {
+      await refreshCatalogWorkflowPanel(output);
+      return;
+    }
+    if (message.command === "refreshLineage") {
+      catalogLineageGraph = undefined;
+      await refreshCatalogWorkflowPanel(output, { loadGraph: true });
+      return;
+    }
+    if (message.command === "selectPipeline" && message.pipeline) {
+      workflowSelectedPipeline.set("catalog", message.pipeline);
+      catalogLineageGraph = undefined;
+      await refreshCatalogWorkflowPanel(output, { loadGraph: true });
+      return;
+    }
+    if (message.command === "selectNode" && message.nodeId) {
+      await refreshCatalogWorkflowPanel(output, { selectedNodeId: message.nodeId });
+      return;
+    }
+    const pipeline = await selectedWorkflowPipeline("catalog", output, message.pipeline);
+    if (message.command === "openLineage" && pipeline) {
+      const configPath = activeConfigPath || (await chooseActiveConfig(output));
+      await vscode.commands.executeCommand("skippr.open.lineage", { configPath, pipeline });
+      return;
+    }
+    if (message.command === "openFile" && message.path) {
+      const uri = vscode.Uri.file(message.path);
+      await vscode.commands.executeCommand("vscode.open", uri);
+    }
+  });
+
+  register(SKIPPR_WORKFLOW_MODEL_VIEW_ID, renderSkipprModelWorkflowHtml(), "model", async (message) => {
+    if (message.command === "ready" || message.command === "refresh") {
+      await refreshModelWorkflowPanel(output);
+      return;
+    }
+    if (message.command === "selectPipeline" && message.pipeline) {
+      workflowSelectedPipeline.set("model", message.pipeline);
+      await refreshModelWorkflowPanel(output);
+      return;
+    }
+    const pipeline = await selectedWorkflowPipeline("model", output, message.pipeline);
+    if (message.command === "runModel" && pipeline) {
+      await vscode.commands.executeCommand("skippr.run.modelPipeline", pipeline);
+      return;
+    }
+    if (message.command === "openRun") {
+      await focusRunObservability(message.runId);
+      return;
+    }
+    if (message.command === "resumeChat") {
+      await vscode.commands.executeCommand("skippr.open.model");
+    }
+  });
+}
+
 function registerSkipprConnectionsView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -1520,7 +2371,7 @@ async function runSkipprDoctor(
     await showSetupWebview(output, statusItem);
     return;
   }
-  if (!isWorkspaceRootConfigPath(configPath)) {
+  if (!isUsableSkipprConfigPath(configPath)) {
     vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
     return;
   }
@@ -1663,7 +2514,7 @@ async function runSkipprCommand(
     await showSetupWebview(output, statusItem);
     return undefined;
   }
-  if (!isWorkspaceRootConfigPath(configPath)) {
+  if (!isUsableSkipprConfigPath(configPath)) {
     vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
     return undefined;
   }
@@ -1673,14 +2524,51 @@ async function runSkipprCommand(
     return undefined;
   }
 
+  let runLockEnv: NodeJS.ProcessEnv | undefined;
+  if (isHeavyRunKind(kind) && workbenchExtensionContext) {
+    const session = await readAuthSession(workbenchExtensionContext);
+    const cloud = getActiveCloudContext(workbenchExtensionContext);
+    const workspace = await workspaceSlugFromConfigPath(configPath, cloud);
+    if (session?.token && workspace) {
+      try {
+        const acquired = await acquireWorkspaceRunLock(
+          apiRequest,
+          session.token,
+          workspace,
+          heavyCommandForKind(kind),
+          kind === "sync-all-once" ? undefined : scopedPipeline
+        );
+        activeWorkspaceRunLock = {
+          workspace,
+          runId: acquired.runId,
+          version: acquired.version
+        };
+        runLockEnv = {
+          SKIPPR_RUN_ID: acquired.runId,
+          SKIPPR_RUN_VERSION: String(acquired.version),
+          SKIPPR_CLOUD_WORKSPACE: workspace
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(message);
+        output.error(message);
+        return undefined;
+      }
+    }
+  }
+
   output.show(true);
+  const spawnEnv = {
+    ...(await skipprSpawnEnv(configPath, scopedPipeline, output)),
+    ...runLockEnv
+  };
   const baseRunOptions = {
     cliPath,
     cwd: getConfigCwd(configPath),
     configPath,
     logLevel: requestedLogLevel?.trim() || request?.logLevel?.trim() || getLogLevel(),
     extraArgs: extraCliArgs ?? [],
-    spawnEnv: await skipprSpawnEnv(configPath, scopedPipeline, output)
+    spawnEnv
   };
   const runOptions =
     kind === "sync-all-once"
@@ -1714,6 +2602,9 @@ async function runSkipprCommand(
           if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
             void showRunDetailsPanel();
           }
+          if (event.event === "schema_evolved" && observed.schemaChanges.length) {
+            scheduleSchemaDiffAutoOpen(observed.id);
+          }
         }
       },
       onLog: (line) => {
@@ -1737,6 +2628,31 @@ async function runSkipprCommand(
   const result = await run.done;
   if (activeRun === run) {
     activeRun = undefined;
+  }
+  const lock = activeWorkspaceRunLock;
+  activeWorkspaceRunLock = undefined;
+  if (lock && workbenchExtensionContext) {
+    const session = await readAuthSession(workbenchExtensionContext);
+    if (session?.token) {
+      const terminalStatus =
+        result.signal !== null && result.signal !== undefined
+          ? "cancelled"
+          : result.code === 0
+            ? "completed"
+            : "failed";
+      try {
+        await completeWorkspaceRunLock(
+          apiRequest,
+          session.token,
+          lock.workspace,
+          lock.runId,
+          lock.version,
+          terminalStatus
+        );
+      } catch (err) {
+        output.warn(`Complete run lock failed: ${String(err)}`);
+      }
+    }
   }
 
   finishRunStatusPanel({
@@ -1801,7 +2717,7 @@ async function openModelWorkflowInAgentChat(
     await showSetupWebview(output, statusItem);
     return;
   }
-  if (!isWorkspaceRootConfigPath(configPath)) {
+  if (!isUsableSkipprConfigPath(configPath)) {
     vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
     return;
   }
@@ -2149,8 +3065,7 @@ interface SkipprLineageContext {
 }
 
 interface SkipprLineageFieldFocus {
-  asset: string;
-  field: string;
+  fieldNodeId: string;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -2234,7 +3149,7 @@ async function resolveSqlQueryContext(
     vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
     return undefined;
   }
-  if (!isWorkspaceRootConfigPath(configPath)) {
+  if (!isUsableSkipprConfigPath(configPath)) {
     vscode.window.showWarningMessage("Skippr SQL commands require skippr.yml or skippr.yaml at the open workspace root.");
     return undefined;
   }
@@ -2283,7 +3198,7 @@ async function resolveSqlQueryContextForEditor(
 
 async function resolveSqlQueryContextQuiet(output: vscode.LogOutputChannel): Promise<SkipprQueryContext | undefined> {
   const configPath = activeConfigPath;
-  if (!configPath || !isWorkspaceRootConfigPath(configPath)) {
+  if (!configPath || !isUsableSkipprConfigPath(configPath)) {
     return undefined;
   }
   const config = vscode.workspace.getConfiguration();
@@ -2313,8 +3228,14 @@ interface SkipprLineageCliResult {
 let activeLineagePanel: vscode.WebviewPanel | undefined;
 let lineageLaunchWebviewView: vscode.WebviewView | undefined;
 let connectionsWebviewView: vscode.WebviewView | undefined;
+const workflowWebviewViews = new Map<string, vscode.WebviewView>();
+const workflowSelectedPipeline = new Map<SkipprWorkflowKind | "catalog", string>();
+let catalogLineageGraph: SkipprLineagePanelPayload["graph"] | undefined;
+let catalogSelectedNodeId: string | undefined;
 let activeLineageContext: SkipprLineageContext | undefined;
 let activeLineageFieldFocus: SkipprLineageFieldFocus | undefined;
+let activeLineageSelectedNode: LineageNodeLike | undefined;
+let activeLineageGraph: SkipprLineagePanelPayload["graph"] | undefined;
 
 function lineageBrandLogoUris(webview: vscode.Webview, extensionUri: vscode.Uri): Record<string, string> {
   const brandDir = vscode.Uri.joinPath(extensionUri, "media", "lineage-brands");
@@ -2355,8 +3276,8 @@ async function runLineageCommand(
 ): Promise<SkipprLineagePanelPayload> {
   const args = ["--config", ctx.configPath, "--log", getLogLevel(), "lineage", command];
   args.push("--pipeline", ctx.pipeline);
-  if (command === "graph" && focus?.asset.trim() && focus.field.trim()) {
-    args.push("--asset", focus.asset.trim(), "--field", focus.field.trim());
+  if (command === "graph" && focus?.fieldNodeId.trim()) {
+    args.push("--field-node-id", focus.fieldNodeId.trim());
   }
   args.push("--output", "json");
   const result = await runSkipprJson<SkipprLineageCliResult>(
@@ -2378,6 +3299,86 @@ async function runLineageCommand(
   return payloadFromLineageResult(result.value, { pipeline: ctx.pipeline });
 }
 
+function lineageNodeFromGraph(nodeId: string, graph?: SkipprLineagePanelPayload["graph"]): LineageNodeLike | undefined {
+  const nodes = graph?.nodes;
+  if (!Array.isArray(nodes)) {
+    return undefined;
+  }
+  const node = nodes.find((item) => item.id === nodeId);
+  return node as LineageNodeLike | undefined;
+}
+
+async function openLineageResource(
+  action: LineageResourceAction,
+  node: LineageNodeLike,
+  ctx: SkipprLineageContext,
+  output: vscode.LogOutputChannel
+): Promise<void> {
+  const configDir = path.dirname(ctx.configPath);
+  const metadata = node.metadata ?? {};
+  const openLocalFile = async (targetPath: string, label: string): Promise<void> => {
+    const uri = vscode.Uri.file(targetPath);
+    try {
+      await vscode.workspace.fs.stat(uri);
+    } catch {
+      vscode.window.showErrorMessage(`Unable to open ${label}: ${targetPath}`);
+      return;
+    }
+    await vscode.window.showTextDocument(uri, { preview: false });
+  };
+
+  switch (action) {
+    case "copyNodeId": {
+      const target = lineageResourceTarget(node, action) ?? node.id;
+      await vscode.env.clipboard.writeText(target);
+      vscode.window.showInformationMessage("Copied lineage node id.");
+      return;
+    }
+    case "copyDatasetId": {
+      const datasetId = lineageResourceTarget(node, action) ?? node.dataset_id?.trim();
+      if (!datasetId) {
+        vscode.window.showWarningMessage("This node has no dataset id.");
+        return;
+      }
+      await vscode.env.clipboard.writeText(datasetId);
+      vscode.window.showInformationMessage("Copied dataset id.");
+      return;
+    }
+    case "openConfig":
+      await openLocalFile(ctx.configPath, "Skippr config");
+      return;
+    case "openMetadata": {
+      const metadataPath =
+        lineageResourceTarget(node, action) ?? (node.path?.trim() || metadata.metadata_location?.trim());
+      if (!metadataPath) {
+        vscode.window.showWarningMessage("No metadata path is available for this node.");
+        return;
+      }
+      if (metadataPath.startsWith("s3://")) {
+        await vscode.env.clipboard.writeText(metadataPath);
+        vscode.window.showInformationMessage("Copied metadata storage location.");
+        return;
+      }
+      const resolved = path.isAbsolute(metadataPath) ? metadataPath : path.join(configDir, metadataPath);
+      await openLocalFile(resolved, "metadata file");
+      return;
+    }
+    case "openFile": {
+      const relPath = lineageResourceTarget(node, action) ?? node.path?.trim();
+      if (!relPath) {
+        vscode.window.showWarningMessage("No resource path is available for this node.");
+        return;
+      }
+      const dbtRoot = path.join(configDir, ctx.pipeline, "dbt");
+      const resolved = path.isAbsolute(relPath) ? relPath : path.join(dbtRoot, relPath);
+      await openLocalFile(resolved, "dbt resource file");
+      return;
+    }
+    default:
+      output.appendLine(`[skippr] Unsupported lineage action: ${action}`);
+  }
+}
+
 async function resolveLineageContext(
   output: vscode.LogOutputChannel,
   requested?: { configPath?: string; pipeline?: string }
@@ -2387,7 +3388,7 @@ async function resolveLineageContext(
     vscode.window.showWarningMessage("No Skippr config found. Use Skippr: Setup Workspace first.");
     return undefined;
   }
-  if (!isWorkspaceRootConfigPath(configPath)) {
+  if (!isUsableSkipprConfigPath(configPath)) {
     vscode.window.showWarningMessage("Skippr lineage requires skippr.yml or skippr.yaml at the open workspace root.");
     return undefined;
   }
@@ -2445,7 +3446,16 @@ async function openLineagePanel(
       cspSource: activeLineagePanel.webview.cspSource,
       brandLogoUris: lineageBrandLogoUris(activeLineagePanel.webview, context.extensionUri)
     });
-    activeLineagePanel.webview.onDidReceiveMessage((message: { command?: string; asset?: string; field?: string; schema?: unknown }) => {
+    activeLineagePanel.webview.onDidReceiveMessage((message: {
+      command?: string;
+      asset?: string;
+      field?: string;
+      fieldNodeId?: string;
+      schema?: unknown;
+      nodeId?: string;
+      action?: string;
+      node?: LineageNodeLike;
+    }) => {
       if (message.command === "refresh") {
         void refreshLineagePanel(output, "refresh");
       } else if (message.command === "importHistory") {
@@ -2453,19 +3463,33 @@ async function openLineagePanel(
       } else if (message.command === "clearField") {
         void refreshLineagePanel(output, "graph");
       } else if (message.command === "selectField") {
-        const asset = typeof message.asset === "string" ? message.asset.trim() : "";
-        const field = typeof message.field === "string" ? message.field.trim() : "";
-        if (asset && field) {
-          void refreshLineagePanel(output, "graph", { asset, field });
+        const fieldNodeId = typeof message.fieldNodeId === "string" ? message.fieldNodeId.trim() : "";
+        if (fieldNodeId) {
+          void refreshLineagePanel(output, "graph", { fieldNodeId });
         }
       } else if (message.command === "selectedNode") {
-        postLineageActivity({ command: "selectedNode", schema: message.schema });
+        const schema = message.schema as LineageSchemaPayload | undefined;
+        activeLineageSelectedNode =
+          message.node ??
+          (schema?.node?.id ? lineageNodeFromGraph(schema.node.id, activeLineageGraph) : undefined);
+        if (schema) {
+          postLineageActivity({ command: "selectedNode", schema });
+        }
+      } else if (message.command === "lineageAction") {
+        const action = typeof message.action === "string" ? (message.action.trim() as LineageResourceAction) : undefined;
+        const nodeId = typeof message.nodeId === "string" ? message.nodeId.trim() : "";
+        const node = nodeId ? lineageNodeFromGraph(nodeId, activeLineageGraph) ?? activeLineageSelectedNode : activeLineageSelectedNode;
+        if (action && node && activeLineageContext) {
+          void openLineageResource(action, node, activeLineageContext, output);
+        }
       }
     });
     activeLineagePanel.onDidDispose(() => {
       activeLineagePanel = undefined;
       activeLineageContext = undefined;
       activeLineageFieldFocus = undefined;
+      activeLineageSelectedNode = undefined;
+      activeLineageGraph = undefined;
     });
   }
   await refreshLineagePanel(output, "graph");
@@ -2495,14 +3519,19 @@ async function refreshLineagePanel(
   if (command === "graph" && activeLineageFieldFocus) {
     postLineageActivity({
       command: "loadingField",
-      asset: activeLineageFieldFocus.asset,
-      field: activeLineageFieldFocus.field
+      fieldNodeId: activeLineageFieldFocus.fieldNodeId
     });
   }
   const payload = await runLineageCommand(ctx, output, command, activeLineageFieldFocus);
+  if (payload.graph) {
+    activeLineageGraph = payload.graph;
+  }
   postLineagePanel(payload);
   if (command !== "graph" && payload.status === "success") {
     const graphPayload = await runLineageCommand(ctx, output, "graph");
+    if (graphPayload.graph) {
+      activeLineageGraph = graphPayload.graph;
+    }
     postLineagePanel(graphPayload);
   }
 }
@@ -3087,7 +4116,7 @@ async function runSkipprTestFromCliPanel(
   statusItem: vscode.StatusBarItem,
   opts: { configPath: string; pipeline: string; logLevel: string; testSelect: string; extraArgsText: string }
 ): Promise<void> {
-  if (!isWorkspaceRootConfigPath(opts.configPath)) {
+  if (!isUsableSkipprConfigPath(opts.configPath)) {
     vscode.window.showWarningMessage("Skippr commands require skippr.yml or skippr.yaml at the open workspace root.");
     return;
   }
@@ -3221,12 +4250,23 @@ async function runSkipprDebugConfiguration(
   await runSkipprCommand(kind, output, statusItem, pipeline, configPath, logLevelResolved, extraFromLaunch);
 }
 
-function stopActiveRun(statusItem: vscode.StatusBarItem, output: vscode.LogOutputChannel): void {
+async function stopActiveRun(statusItem: vscode.StatusBarItem, output: vscode.LogOutputChannel): Promise<void> {
   if (!activeRun) {
     vscode.window.showInformationMessage("No Skippr run is active.");
     return;
   }
   output.info(`Stopping ${activeRun.label}...`);
+  const lock = activeWorkspaceRunLock;
+  if (lock && workbenchExtensionContext) {
+    const session = await readAuthSession(workbenchExtensionContext);
+    if (session?.token) {
+      try {
+        await cancelWorkspaceRun(apiRequest, session.token, lock.workspace, lock.runId);
+      } catch (err) {
+        output.warn(`Cancel run API failed: ${String(err)}`);
+      }
+    }
+  }
   activeRun.stop();
   setRunStatusIdle(statusItem);
 }
@@ -3321,6 +4361,7 @@ async function showSetupWebview(output: vscode.LogOutputChannel, statusItem: vsc
 }
 
 async function saveAuthSession(context: vscode.ExtensionContext, session: AuthSession): Promise<void> {
+  setLastAuthToken(session.token);
   await context.secrets.store(authTokenKey, session.token);
   await context.secrets.store(authRefreshTokenKey, session.refreshToken);
   await context.secrets.store(authEmailKey, session.email);
@@ -3340,12 +4381,15 @@ async function readAuthSession(context: vscode.ExtensionContext): Promise<AuthSe
   const refreshToken = await context.secrets.get(authRefreshTokenKey);
   const email = await context.secrets.get(authEmailKey);
   if (!token || !refreshToken || !email) {
+    setLastAuthToken(undefined);
     return undefined;
   }
+  setLastAuthToken(token);
   return { token, refreshToken, email };
 }
 
 async function clearAuthSession(context: vscode.ExtensionContext): Promise<void> {
+  setLastAuthToken(undefined);
   await context.secrets.delete(authTokenKey);
   await context.secrets.delete(authRefreshTokenKey);
   await context.secrets.delete(authEmailKey);
@@ -3604,81 +4648,6 @@ async function ensureSession(
   return next;
 }
 
-function renderPanelHtml(payload: SkipprPanelPayload, session?: AuthSession): string {
-  const resources = payload.resources
-    .map((resource) => `<li><strong>${resource.label}</strong><br /><span>${resource.path}</span></li>`)
-    .join("");
-  const catalog = payload.catalog.map((entry) => `<li>${entry.name} (${entry.owner})</li>`).join("");
-  const diagnostics = payload.diagnostics.map((diagnostic) => `<li>${diagnostic}</li>`).join("");
-  const addedColumns = payload.diff.after.filter((column) => !payload.diff.before.includes(column)).join(", ");
-  const loginState = session ? `Signed in as ${session.email}` : "Not signed in";
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { margin: 0; color: var(--vscode-foreground); font-family: var(--vscode-font-family); }
-    .root { display: grid; grid-template-columns: 1fr 2fr 1fr; height: 100vh; }
-    .pane { padding: 10px; overflow: auto; border-right: 1px solid var(--vscode-panel-border); }
-    .pane:last-child { border-right: none; }
-    .title { font-weight: 600; margin-bottom: 8px; }
-    .section { margin-bottom: 16px; }
-    ul { margin: 0; padding-left: 16px; }
-    button { cursor: pointer; }
-  </style>
-</head>
-<body>
-  <div class="root">
-    <section class="pane">
-      <div class="title">${payload.panelName} Tree</div>
-      <ul>${resources}</ul>
-    </section>
-    <main class="pane">
-      <div class="section">
-        <div class="title">${payload.panelName} Detail</div>
-        <div>Model diff: ${payload.diff.model}</div>
-        <div>Added columns: ${addedColumns || "None"}</div>
-      </div>
-      <div class="section">
-        <div class="title">Skippr Data Agent</div>
-        <div>Runbook: Discover -> Sync -> Model</div>
-        <div>Login: ${loginState}</div>
-      </div>
-      <div class="section">
-        <div class="title">Connection</div>
-        <div>Workspace: ${payload.settings.workspacePath || "Not configured"}</div>
-        <div>API target: ${payload.settings.apiTarget || "Mock only"}</div>
-      </div>
-    </main>
-    <aside class="pane">
-      <div class="section"><div class="title">Catalog</div><ul>${catalog}</ul></div>
-      <div class="section"><div class="title">Agent Debug Logs</div><ul>${diagnostics}</ul></div>
-    </aside>
-  </div>
-</body>
-</html>`;
-}
-
-async function openPanel(
-  context: vscode.ExtensionContext,
-  panelId: SkipprPanelId,
-  panelName: SkipprPanelName,
-  statusItem: vscode.StatusBarItem,
-  authProvider: SkipprAuthenticationProvider
-): Promise<void> {
-  const session = await ensureSession(context, statusItem, authProvider);
-  const payload = await loadPanelPayloadFromRust(context.extensionPath, panelId, panelName, loadConnectionSettings());
-  const panel = vscode.window.createWebviewPanel(
-    `skippr.${panelId}`,
-    `Skippr ${panelName}`,
-    vscode.ViewColumn.Active,
-    { enableScripts: true }
-  );
-  panel.webview.html = renderPanelHtml(payload, session);
-}
-
 type SplashAction =
   | "engineer"
   | "business"
@@ -3686,7 +4655,13 @@ type SplashAction =
   | "openFolder"
   | "signin"
   | "discover"
-  | "continue";
+  | "continue"
+  | "openCloud"
+  | "createCloud"
+  | "listCloudWorkspaces"
+  | "pickWorkspace"
+  | "createCloudWorkspace"
+  | "splashBack";
 
 let activeSplashPanel: vscode.WebviewPanel | undefined;
 
@@ -3896,6 +4871,17 @@ function renderSplashHtml(): string {
       </button>
     </section>
 
+    <div class="divider"><span>Cloud workspace</span></div>
+
+    <section class="project-actions" aria-label="Cloud workspace">
+      <button data-action="openCloud" class="secondary">
+        <span class="label">Open Cloud Workspace</span>
+      </button>
+      <button data-action="createCloud" class="secondary">
+        <span class="label">Create Cloud Workspace</span>
+      </button>
+    </section>
+
     <nav class="links" aria-label="Skippr account">
       <button data-action="signin" class="ghost">Sign in</button>
       <button data-action="discover" class="ghost">Discover</button>
@@ -3915,6 +4901,154 @@ function renderSplashHtml(): string {
 </html>`;
 }
 
+function renderSplashCloudListHtml(workspaces: string[], error?: string): string {
+  const list =
+    workspaces.length > 0
+      ? workspaces
+          .map(
+            (w) =>
+              `<button data-action="pickWorkspace" data-workspace="${escapeHtml(w)}" class="secondary"><span class="label">${escapeHtml(w)}</span></button>`
+          )
+          .join("")
+      : `<p class="copy">No cloud workspaces yet. Create one below.</p>`;
+  const err = error ? `<p class="copy" style="color:var(--vscode-inputValidation-errorForeground)">${escapeHtml(error)}</p>` : "";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:32px; color:var(--vscode-foreground); background:var(--vscode-editor-background); font-family:var(--vscode-font-family); }
+    .card { width:min(460px,calc(100vw - 48px)); padding:30px; border:1px solid var(--vscode-panel-border); border-radius:20px; }
+    h1 { margin:0 0 16px; font-size:24px; }
+    .choices { display:grid; gap:10px; margin:16px 0; }
+    button { width:100%; border:1px solid var(--vscode-panel-border); border-radius:14px; padding:12px 16px; background:var(--vscode-input-background); color:inherit; font:inherit; text-align:left; cursor:pointer; }
+    button.ghost { width:auto; border:0; background:transparent; color:var(--vscode-textLink-foreground); text-align:center; }
+    .label { display:block; font-weight:650; }
+    .copy { color:var(--vscode-descriptionForeground); font-size:12px; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Open cloud workspace</h1>
+    ${err}
+    <section class="choices">${list}</section>
+    <button data-action="splashBack" class="ghost">Back</button>
+  </main>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.addEventListener("click", e => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const ws = btn.dataset.workspace;
+      vscode.postMessage({ command: btn.dataset.action, workspace: ws });
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function renderSplashCloudCreateHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:32px; color:var(--vscode-foreground); background:var(--vscode-editor-background); font-family:var(--vscode-font-family); }
+    .card { width:min(520px,calc(100vw - 48px)); padding:30px; border:1px solid var(--vscode-panel-border); border-radius:20px; }
+    h1 { margin:0 0 12px; font-size:24px; }
+    label { display:block; margin:12px 0 4px; font-size:12px; color:var(--vscode-descriptionForeground); }
+    input, textarea { width:100%; box-sizing:border-box; padding:8px; border:1px solid var(--vscode-input-border); background:var(--vscode-input-background); color:var(--vscode-input-foreground); border-radius:6px; font:inherit; }
+    textarea { min-height:200px; font-family:var(--vscode-editor-font-family); }
+    .actions { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; }
+    button { border:0; border-radius:6px; padding:8px 14px; background:var(--vscode-button-background); color:var(--vscode-button-foreground); cursor:pointer; }
+    button.secondary { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
+    button.ghost { background:transparent; color:var(--vscode-textLink-foreground); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Create cloud workspace</h1>
+    <label for="ws">Workspace name</label>
+    <input id="ws" placeholder="mssql-migration" />
+    <label for="yaml">skippr.yml</label>
+    <textarea id="yaml">skippr:
+  workspace: my-workspace
+pipelines:
+  main: {}
+</textarea>
+    <div class="actions">
+      <button data-action="createCloudWorkspace">Create</button>
+      <button data-action="splashBack" class="secondary">Back</button>
+    </div>
+  </main>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.addEventListener("click", e => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      if (btn.dataset.action === "createCloudWorkspace") {
+        const workspace = document.getElementById("ws").value.trim();
+        const configYaml = document.getElementById("yaml").value;
+        vscode.postMessage({ command: "createCloudWorkspace", workspace, configYaml });
+      } else {
+        vscode.postMessage({ command: btn.dataset.action });
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+async function applyActiveCloudWorkspace(
+  active: CloudWorkspaceContext,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem
+): Promise<void> {
+  activeConfigPath = active.configPath;
+  if (workbenchExtensionContext) {
+    await setActiveCloudWorkspace(workbenchExtensionContext, active);
+  }
+  await refreshConfigStatus(output, statusItem);
+  await refreshRunHistoryCloudContext();
+  void refreshRunHistory();
+  output.info(`Cloud workspace active: ${active.workspace} (${active.configPath})`);
+}
+
+let cloudSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let cloudSaveInFlight = false;
+
+function scheduleCloudWorkspaceSave(
+  context: vscode.ExtensionContext,
+  output: vscode.LogOutputChannel,
+  statusItem: vscode.StatusBarItem,
+  authProvider: SkipprAuthenticationProvider
+): void {
+  if (cloudSaveTimer) {
+    clearTimeout(cloudSaveTimer);
+  }
+  cloudSaveTimer = setTimeout(() => {
+    cloudSaveTimer = undefined;
+    void (async () => {
+      if (cloudSaveInFlight || !getActiveCloudContext(context)) {
+        return;
+      }
+      const session = await ensureSession(context, statusItem, authProvider);
+      if (!session) {
+        return;
+      }
+      cloudSaveInFlight = true;
+      try {
+        await saveActiveCloudWorkspace(context, apiRequest, session.token);
+        output.info("Cloud workspace saved to S3.");
+      } catch (err) {
+        output.warn(`Cloud workspace save failed: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        cloudSaveInFlight = false;
+      }
+    })();
+  }, 1500);
+}
+
 function isEmptyWorkbench(): boolean {
   return (vscode.workspace.workspaceFolders?.length ?? 0) === 0;
 }
@@ -3923,6 +5057,8 @@ async function showSplash(
   context: vscode.ExtensionContext,
   statusItem: vscode.StatusBarItem,
   authProvider: SkipprAuthenticationProvider,
+  output: vscode.LogOutputChannel,
+  runStatusItem: vscode.StatusBarItem,
   options: { auto?: boolean } = {}
 ): Promise<void> {
   if (activeSplashPanel) {
@@ -3966,60 +5102,172 @@ async function showSplash(
     }
   });
 
-  panel.webview.onDidReceiveMessage(async (message: { command?: SplashAction }) => {
-    switch (message.command) {
-      case "engineer":
-      case "continue":
-        await restoreFullIdeLayout();
-        await closeSplash(false);
-        return;
-      case "business":
-        await enterAgentsOnlyLayout();
-        await closeSplash(false);
-        return;
-      case "openRecent":
-        await runWorkbenchCommand("workbench.action.openRecent");
-        return;
-      case "openFolder":
-        await runWorkbenchCommand("workbench.action.files.openFileFolder");
-        return;
-      case "signin": {
-        const session = await signIn(context, statusItem, authProvider, false);
-        if (session) {
-          vscode.window.showInformationMessage(`Signed in to Skippr as ${session.email}.`);
+  panel.webview.onDidReceiveMessage(
+    async (message: { command?: SplashAction; workspace?: string; configYaml?: string }) => {
+      const requireCloudSession = async (): Promise<AuthSession | undefined> => {
+        let session = await ensureSession(context, statusItem, authProvider);
+        if (!session) {
+          const signed = await signIn(context, statusItem, authProvider, false);
+          if (!signed) {
+            vscode.window.showWarningMessage("Sign in to use cloud workspaces.");
+            return undefined;
+          }
+          session = signed;
         }
-        return;
+        return session;
+      };
+
+      switch (message.command) {
+        case "engineer":
+        case "continue":
+          await restoreFullIdeLayout();
+          await closeSplash(false);
+          return;
+        case "business":
+          await enterAgentsOnlyLayout();
+          await closeSplash(false);
+          return;
+        case "openRecent":
+          await runWorkbenchCommand("workbench.action.openRecent");
+          return;
+        case "openFolder":
+          await runWorkbenchCommand("workbench.action.files.openFileFolder");
+          return;
+        case "signin": {
+          const session = await signIn(context, statusItem, authProvider, false);
+          if (session) {
+            vscode.window.showInformationMessage(`Signed in to Skippr as ${session.email}.`);
+          }
+          return;
+        }
+        case "discover":
+          await restoreFullIdeLayout();
+          await closeSplash(false);
+          await vscode.commands.executeCommand("skippr.open.discover");
+          return;
+        case "openCloud": {
+          const session = await requireCloudSession();
+          if (!session) {
+            return;
+          }
+          try {
+            const workspaces = await listCloudWorkspaces(apiRequest, session.token);
+            panel.webview.html = renderSplashCloudListHtml(workspaces);
+          } catch (err) {
+            panel.webview.html = renderSplashCloudListHtml([], err instanceof Error ? err.message : String(err));
+          }
+          return;
+        }
+        case "createCloud": {
+          const session = await requireCloudSession();
+          if (!session) {
+            return;
+          }
+          panel.webview.html = renderSplashCloudCreateHtml();
+          return;
+        }
+        case "splashBack":
+          panel.webview.html = renderSplashHtml();
+          return;
+        case "pickWorkspace": {
+          const ws = message.workspace?.trim();
+          if (!ws) {
+            return;
+          }
+          const session = await requireCloudSession();
+          if (!session) {
+            return;
+          }
+          try {
+            const active = await openCloudWorkspace(context, apiRequest, session.token, ws);
+            if (active) {
+              await applyActiveCloudWorkspace(active, output, runStatusItem);
+              await restoreFullIdeLayout();
+              await closeSplash(false);
+              vscode.window.showInformationMessage(`Opened cloud workspace ${ws}.`);
+            }
+          } catch (err) {
+            vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+          }
+          return;
+        }
+        case "createCloudWorkspace": {
+          const ws = message.workspace?.trim();
+          const yaml = message.configYaml ?? "";
+          if (!ws) {
+            vscode.window.showWarningMessage("Workspace name is required.");
+            return;
+          }
+          const session = await requireCloudSession();
+          if (!session) {
+            return;
+          }
+          try {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const prefs = root
+              ? collectWorkspacePrefsFromLocal(root, vscode.workspace.workspaceFolders?.[0]?.uri)
+              : { version: 1 };
+            await createCloudWorkspace(apiRequest, session.token, ws, yaml, prefs);
+            vscode.window.showInformationMessage(`Cloud workspace ${ws} created.`, "Open now").then(async (choice) => {
+              if (choice === "Open now") {
+                const active = await openCloudWorkspace(context, apiRequest, session.token, ws);
+                if (active) {
+                  await applyActiveCloudWorkspace(active, output, runStatusItem);
+                  await restoreFullIdeLayout();
+                  await closeSplash(false);
+                }
+              } else {
+                panel.webview.html = renderSplashCloudListHtml(await listCloudWorkspaces(apiRequest, session.token));
+              }
+            });
+          } catch (err) {
+            vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+          }
+          return;
+        }
       }
-      case "discover":
-        await restoreFullIdeLayout();
-        await closeSplash(false);
-        await vscode.commands.executeCommand("skippr.open.discover");
-        return;
     }
-  });
+  );
 }
 
 function maybeOpenEmptyWorkbenchSplash(
   context: vscode.ExtensionContext,
   statusItem: vscode.StatusBarItem,
-  authProvider: SkipprAuthenticationProvider
+  authProvider: SkipprAuthenticationProvider,
+  output: vscode.LogOutputChannel,
+  runStatusItem: vscode.StatusBarItem
 ): void {
   if (!isEmptyWorkbench() || context.workspaceState.get<boolean>(splashDismissedKey)) {
     return;
   }
   setTimeout(() => {
     if (isEmptyWorkbench()) {
-      void showSplash(context, statusItem, authProvider, { auto: true });
+      void showSplash(context, statusItem, authProvider, output, runStatusItem, { auto: true });
     }
   }, 0);
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   workbenchExtensionContext = context;
+  setCloudWorkbenchContext(context);
+  await vscode.commands.executeCommand("setContext", "skippr.cloudWorkspaceActive", false);
+  const cloudRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (cloudRoot) {
+    await loadCloudContextFromActiveFile(context, cloudRoot);
+  }
+  if (getActiveCloudContext(context)) {
+    await vscode.commands.executeCommand("setContext", "skippr.cloudWorkspaceActive", true);
+    await refreshRunHistoryCloudContext();
+  }
+  const storedSession = await readAuthSession(context);
+  if (storedSession) {
+    setLastAuthToken(storedSession.token);
+  }
   observabilityStore = new SkipprRunStateStore();
   context.subscriptions.push(observabilityStore);
   registerSkipprRunStatusView(context);
   registerSkipprRunDetailsView(context, SKIPPR_RUN_TIMELINE_VIEW_ID, "timeline");
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_VIEW_ID, "schema");
   registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters");
   registerSkipprQueryResultsView(context);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
@@ -4033,9 +5281,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   runStatusItem.show();
 
   const output = vscode.window.createOutputChannel("Skippr", { log: true });
+  skipprLogOutput = output;
   context.subscriptions.push(runStatusItem, output);
+  registerSkipprSchemaDiffReviewView(context, output);
+  context.subscriptions.push(
+    vscode.commands.registerCommand("skippr.schemaDiff.openReview", () => {
+      void showSchemaDiffReviewPanel();
+    })
+  );
   registerSkipprConnectionsView(context, output);
   registerSkipprLineageLaunchView(context, output);
+  registerSkipprWorkflowViews(context, output);
   context.subscriptions.push(
     vscode.commands.registerCommand("skippr.internal.runModelForAgentChat", async (request: AgentModelRunRequest, bridgeDir?: string) => {
       const workspaceRoot = request?.workspaceRoot?.trim() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -4050,6 +5306,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot) {
     runHistory = new SkipprRunHistory(workspaceRoot, output);
+    await refreshRunHistoryCloudContext();
     void refreshRunHistory();
   }
   observabilityStore.onDidChange(() => schedulePostObservability(), undefined, context.subscriptions);
@@ -4061,6 +5318,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.onDidSaveTextDocument((doc) => {
       if (doc.languageId === "sql") {
         scheduleDbtEditorContextRefresh(output);
+      }
+      if (isCloudWorkspaceCacheFile(doc.uri.fsPath) && getActiveCloudContext(context)) {
+        scheduleCloudWorkspaceSave(context, output, statusItem, authProvider);
       }
     })
   );
@@ -4180,7 +5440,70 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       applySignedInAuthStatusBar(statusItem, existing.email);
     }),
     vscode.commands.registerCommand("skippr.openSplash", async () => {
-      await showSplash(context, statusItem, authProvider);
+      await showSplash(context, statusItem, authProvider, output, runStatusItem);
+    }),
+    vscode.commands.registerCommand("skippr.cloud.open", async () => {
+      const session = await ensureSession(context, statusItem, authProvider);
+      if (!session) {
+        const signed = await signIn(context, statusItem, authProvider, false);
+        if (!signed) {
+          return;
+        }
+      }
+      const active = await promptAndOpenCloudWorkspace(context, apiRequest, async () => {
+        const s = await ensureSession(context, statusItem, authProvider);
+        return s ? { token: s.token } : undefined;
+      });
+      if (active) {
+        await applyActiveCloudWorkspace(active, output, runStatusItem);
+      }
+    }),
+    vscode.commands.registerCommand("skippr.cloud.create", async () => {
+      await promptAndCreateCloudWorkspace(context, apiRequest, async () => {
+        const s = await ensureSession(context, statusItem, authProvider);
+        return s ? { token: s.token } : undefined;
+      });
+    }),
+    vscode.commands.registerCommand("skippr.file.newCloudWorkspace", async () => {
+      const session = await ensureSession(context, statusItem, authProvider);
+      if (!session) {
+        const signed = await signIn(context, statusItem, authProvider, false);
+        if (!signed) {
+          return;
+        }
+      }
+      await promptAndCreateCloudWorkspace(context, apiRequest, async () => {
+        const s = await ensureSession(context, statusItem, authProvider);
+        return s ? { token: s.token } : undefined;
+      });
+    }),
+    vscode.commands.registerCommand("skippr.file.openCloudWorkspace", async () => {
+      const session = await ensureSession(context, statusItem, authProvider);
+      if (!session) {
+        const signed = await signIn(context, statusItem, authProvider, false);
+        if (!signed) {
+          return;
+        }
+      }
+      const active = await promptAndOpenCloudWorkspace(context, apiRequest, async () => {
+        const s = await ensureSession(context, statusItem, authProvider);
+        return s ? { token: s.token } : undefined;
+      });
+      if (active) {
+        await applyActiveCloudWorkspace(active, output, runStatusItem);
+      }
+    }),
+    vscode.commands.registerCommand("skippr.cloud.save", async () => {
+      const session = await ensureSession(context, statusItem, authProvider);
+      if (!session) {
+        return;
+      }
+      try {
+        await saveActiveCloudWorkspace(context, apiRequest, session.token);
+        vscode.window.showInformationMessage("Cloud workspace saved.");
+      } catch (err) {
+        vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      }
     }),
     vscode.commands.registerCommand("skippr.cli.install", async () => {
       const result = await installSkipprCli(output);
@@ -4345,7 +5668,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       new SkipprPipelineCodeLensProvider("skippr.run.lensWithArgs", "skippr.run.pickPipelineAction")
     ),
     vscode.commands.registerCommand("skippr.run.stopSyncPipeline", () => {
-      stopActiveRun(runStatusItem, output);
+      void stopActiveRun(runStatusItem, output);
     }),
     vscode.debug.registerDebugAdapterDescriptorFactory("skippr", {
       createDebugAdapterDescriptor: () =>
@@ -4394,11 +5717,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   for (const panel of panelSpecs) {
     context.subscriptions.push(
       vscode.commands.registerCommand(panel.command, async (args?: unknown) => {
-        if (panel.id === "skippr.model") {
+        if (panel.model) {
           await openModelWorkflowInAgentChat(output, runStatusItem);
+          if (panel.workflowViewId) {
+            await revealWorkflowView(panel.workflowViewId);
+          }
           return;
         }
-        if (panel.id === "skippr.lineage") {
+        if (panel.lineage) {
           const lineageArgs = args as { configPath?: unknown; pipeline?: unknown } | undefined;
           await openLineagePanel(context, output, {
             configPath: typeof lineageArgs?.configPath === "string" ? lineageArgs.configPath : undefined,
@@ -4406,7 +5732,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           });
           return;
         }
-        await openPanel(context, panel.id, panel.name, statusItem, authProvider);
+        if (panel.workflowViewId) {
+          await revealWorkflowView(panel.workflowViewId);
+        }
       })
     );
   }
@@ -4441,7 +5769,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await refreshConfigStatus(output, runStatusItem);
     await runVectorIngestOnOpen(context, output, runStatusItem);
   });
-  maybeOpenEmptyWorkbenchSplash(context, statusItem, authProvider);
+  maybeOpenEmptyWorkbenchSplash(context, statusItem, authProvider, output, runStatusItem);
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (folder) {
+    void loadCloudContextFromActiveFile(context, folder);
+  }
 }
 
 export function deactivate(): void {}

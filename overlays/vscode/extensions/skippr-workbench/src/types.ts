@@ -217,6 +217,26 @@ export interface SkipprSchemaDiffPayload {
   [key: string]: unknown;
 }
 
+export type { SchemaDiffRow, SchemaDiffRowDecision, SchemaDiffRowKind, SchemaDiffReviewNamespace, SchemaDiffReviewState } from "./skipprSchemaDiffReview";
+
+export interface SkipprMetadataApplyResult {
+  ok: boolean;
+  namespace: string;
+  fields_written: number;
+  evolved: boolean;
+  error?: string;
+}
+
+export interface SkipprMetadataShowResult {
+  ok: boolean;
+  pipeline: string;
+  namespaces: Array<{
+    namespace: string;
+    fields: SkipprRunSchemaField[];
+  }>;
+  error?: string;
+}
+
 export interface SkipprFreshness {
   field_names?: string[];
   latest_timestamp?: number;

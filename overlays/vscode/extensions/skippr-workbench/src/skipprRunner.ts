@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getCloudProjectRootForConfig, getCloudWorkbenchContext } from "./skipprCloudWorkspace";
 import * as vscode from "vscode";
 import { SkipprRunEvent } from "./types";
 
@@ -425,7 +426,18 @@ export function buildCliCommand(cliPath: string, args: string[]): string[] {
 }
 
 /** Directory containing skippr.yml (absolute). Used as the child process cwd for every CLI invocation. */
-export function skipprProjectRoot(configPath: string | undefined, fallbackCwd: string): string {
+export function skipprProjectRoot(
+  configPath: string | undefined,
+  fallbackCwd: string,
+  cloudProjectRoot?: string
+): string {
+  const ctx = getCloudWorkbenchContext();
+  const resolvedCloud =
+    cloudProjectRoot?.trim() ||
+    (ctx ? getCloudProjectRootForConfig(ctx, configPath) : undefined);
+  if (resolvedCloud?.trim()) {
+    return path.resolve(resolvedCloud);
+  }
   const trimmed = configPath?.trim();
   if (trimmed) {
     return path.resolve(path.dirname(trimmed));
