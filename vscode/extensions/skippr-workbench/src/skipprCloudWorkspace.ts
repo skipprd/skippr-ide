@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { parseJwtTenantId } from "./skipprJwt";
 
 /** Synced to S3 as `workspace.json` (no secrets). */
 export interface CloudWorkspacePrefs {
@@ -58,25 +59,7 @@ type ApiRequestFn = (
   token?: string
 ) => Promise<Response>;
 
-export function parseJwtTenantId(token: string | undefined): string | undefined {
-  if (!token?.trim()) {
-    return undefined;
-  }
-  const parts = token.split(".");
-  if (parts.length < 2) {
-    return undefined;
-  }
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as {
-      tenant_id?: string;
-      tenantId?: string;
-    };
-    const tid = payload.tenant_id?.trim() || payload.tenantId?.trim();
-    return tid || undefined;
-  } catch {
-    return undefined;
-  }
-}
+export { parseJwtEmail, parseJwtTenantId } from "./skipprJwt";
 
 export function cloudCacheDir(projectRoot: string, tenantId: string, workspace: string): string {
   return path.join(projectRoot, ".skippr", "cloud-workspaces", tenantId, workspace);

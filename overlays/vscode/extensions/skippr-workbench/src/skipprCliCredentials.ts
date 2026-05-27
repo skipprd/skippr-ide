@@ -48,3 +48,19 @@ export async function clearSkipprCliCredentialsFile(): Promise<void> {
     // ignore ENOENT
   });
 }
+
+export async function readSkipprCliCredentialsFile(): Promise<SkipprCliStoredCredentials | undefined> {
+  const { file } = credentialsPaths();
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const parsed = JSON.parse(raw) as Partial<SkipprCliStoredCredentials>;
+    const access_token = parsed.access_token?.trim();
+    const refresh_token = parsed.refresh_token?.trim();
+    if (!access_token || !refresh_token) {
+      return undefined;
+    }
+    return { access_token, refresh_token };
+  } catch {
+    return undefined;
+  }
+}

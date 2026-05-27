@@ -1,3 +1,6 @@
+import { buildSkipprRunDisplayScript } from "./skipprRunDisplay";
+import { buildSyncMetricsChartScript, syncMetricsChartStyles } from "./skipprRunMetricsChart";
+
 export type SkipprRunDetailsViewKind = "timeline" | "schema" | "deadletters";
 
 export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKind): string {
@@ -8,8 +11,19 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
   <style>
     body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-panel-background, var(--vscode-editor-background)); font: 12px var(--vscode-font-family); }
-    .toolbar { height: 28px; display: flex; align-items: center; gap: 16px; padding: 0 10px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background, var(--vscode-editor-background)); }
-    .toolbar strong { font-weight: 600; }
+    .toolbar { min-height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background, var(--vscode-editor-background)); }
+    .toolbar strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    button.cancel-run {
+      all: unset; box-sizing: border-box; flex-shrink: 0; display: inline-flex; align-items: center; min-height: 22px; padding: 2px 10px;
+      border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+      background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+      cursor: pointer; font-size: 11px; font-weight: 600;
+    }
+    button.cancel-run:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .run-notice {
+      padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); border-left: 3px solid var(--vscode-editorWarning-foreground);
+      color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.45;
+    }
     .muted { color: var(--vscode-descriptionForeground); }
     .stats { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); border-bottom: 1px solid var(--vscode-panel-border); }
     .stat { min-height: 38px; padding: 5px 8px; border-right: 1px solid var(--vscode-panel-border); }
@@ -66,6 +80,23 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
     .schema-field { display: grid; grid-template-columns: minmax(96px, 1fr) 96px 64px; gap: 6px; min-height: 22px; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--vscode-panel-border); }
     .schema-field.pulse { animation: schemaPulse 1.4s ease-out 1; }
     @keyframes schemaPulse { from { background: color-mix(in srgb, var(--vscode-textLink-foreground) 14%, transparent); } to { background: transparent; } }
+    .toolbar .status-badge { flex-shrink: 0; }
+    .cloud-lock-banner { padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); border-left: 3px solid var(--vscode-editorWarning-foreground); font-size: 11px; line-height: 1.4; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+    .cloud-lock-banner .actions { display: inline-flex; align-items: center; gap: 6px; }
+    .info-tip {
+      display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex-shrink: 0;
+      border-radius: 50%; border: 1px solid var(--vscode-descriptionForeground); color: var(--vscode-descriptionForeground);
+      font-size: 10px; font-weight: 700; line-height: 1; cursor: help;
+    }
+    button.cancel-run {
+      all: unset; box-sizing: border-box; display: inline-flex; align-items: center; min-height: 22px; padding: 2px 10px;
+      border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+      background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+      cursor: pointer; font-size: 11px; font-weight: 600;
+    }
+    button.cancel-run:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .run-notice { padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); color: var(--vscode-descriptionForeground); font-size: 11px; }
+    ${syncMetricsChartStyles()}
   </style>
 </head>
 <body>
@@ -77,7 +108,13 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
       let metricMode = "rows";
       const viewKind = "${viewKind}";
       const root = document.getElementById("root");
+      ${buildSkipprRunDisplayScript()}
+      ${buildSyncMetricsChartScript()}
       function esc(v) { return String(v == null ? "" : v).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch])); }
+      function infoTip(text) {
+        const t = esc(text);
+        return '<span class="info-tip" tabindex="0" role="img" aria-label="' + t + '" title="' + t + '">?</span>';
+      }
       function num(v) { return typeof v === "number" ? v.toLocaleString() : "0"; }
       function elapsedMs(run) {
         if (typeof run.elapsedMs === "number") {
@@ -98,10 +135,35 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         const kind = String((run && (run.runKind || run.command)) || "");
         return kind === "model" || kind.startsWith("model");
       }
+      function cloudLockBanner() {
+        const ws = state.workspaceLock;
+        if (!ws || !ws.blocking || !ws.lock || !ws.workspace) { return ""; }
+        const lock = ws.lock;
+        const pipe = lock.pipeline ? " · " + esc(lock.pipeline) : "";
+        return '<div class="cloud-lock-banner">' +
+          '<strong>Cloud lock blocking runs</strong>' + infoTip("This cloud lock blocks new discover/sync/model runs in this workspace.") +
+          '<span>— ' + esc(ws.workspace) + ': ' + esc(lock.command + pipe) + ' (run ' + esc(lock.runId.slice(0, 8)) + '…)</span>' +
+          '<span class="actions"><button type="button" class="cancel-run" data-action="releaseCloudLock" data-workspace="' + esc(ws.workspace) + '" data-run-id="' + esc(lock.runId) + '">Release lock</button></span>' +
+          '</div>';
+      }
       function header(run) {
-        if (!run) { return ""; }
-        const phase = run.phase ? '<span class="muted">' + esc(run.phase) + '</span>' : "";
-        return '<div class="toolbar"><strong>' + esc(run.pipeline || run.label || run.command || "Skippr run") + '</strong><span class="muted">' + esc(run.status || "") + '</span><span class="muted">' + esc(run.runKind || run.command || "") + '</span>' + phase + '</div>';
+        if (!run) { return cloudLockBanner(); }
+        let cancelBtn = "";
+        if (run.status === "running" && state.localProcessActive) {
+          cancelBtn = '<button type="button" class="cancel-run" data-action="cancelRun">Cancel run</button>';
+        } else if (run.status === "running" && state.orphanLockReleaseAvailable) {
+          cancelBtn = '<button type="button" class="cancel-run" data-action="cancelRun">Release lock</button>';
+        }
+        const orphanTip = run.status === "running" && state.orphanLockReleaseAvailable && !state.localProcessActive
+          ? infoTip("No local CLI in this window. Release only if nothing is still syncing on CI or another machine.")
+          : "";
+        return '<div class="toolbar">' + cancelBtn + '<strong>' + esc(runTitle(run)) + '</strong>' + orphanTip + statusBadge(run.status) + '</div>';
+      }
+      function isSyncRun(run) {
+        const kinds = { sync: 1, "sync-once": 1, "sync-all-once": 1 };
+        const runKind = String((run && run.runKind) || "").trim();
+        const command = String((run && run.command) || "").trim();
+        return Boolean(kinds[runKind] || kinds[command]);
       }
       function valueOf(point, keys) {
         for (const key of keys) {
@@ -133,16 +195,6 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         });
       }
       const HISTOGRAM_POINTS = 30;
-      function emptyBucket() {
-        return { timestamp: "", processing: 0, synced: 0 };
-      }
-      function fixedHistogramBuckets(buckets) {
-        const recent = buckets.slice(-HISTOGRAM_POINTS);
-        while (recent.length < HISTOGRAM_POINTS) {
-          recent.unshift(emptyBucket());
-        }
-        return recent;
-      }
       function metricBuckets(run, mode) {
         const points = run && run.metricPoints ? run.metricPoints : [];
         if (mode === "bytes") {
@@ -173,35 +225,49 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         return Math.max(4, Math.round((value / max) * 100)) + "%";
       }
       function histogram(run) {
-        const metric = metricBuckets(run, metricMode);
-        const buckets = fixedHistogramBuckets(metric.buckets);
-        const max = Math.max(1, ...buckets.flatMap(b => [b.processing, b.synced]));
         const tabs = ["rows", "deadletters", "bytes"].map(mode =>
           '<button class="metric-tab ' + (mode === metricMode ? "active" : "") + '" data-metric="' + mode + '">' + esc(mode[0].toUpperCase() + mode.slice(1)) + '</button>'
         ).join("");
+        if (metricMode === "rows" && isSyncRun(run)) {
+          const chart = buildLiveSyncChart(run.metricPoints, {
+            height: 120,
+            maxSamples: HISTOGRAM_POINTS,
+            compact: false,
+            frozen: run.status !== "running"
+          });
+          return '<section class="metric-panel">' +
+            '<div class="metric-tabs">' + tabs + '</div>' +
+            chart +
+          '</section>';
+        }
+        const metric = metricBuckets(run, metricMode);
+        const buckets = compactMetricSamples(metric.buckets, HISTOGRAM_POINTS);
+        const max = Math.max(1, ...buckets.flatMap(b => [b.processing, b.synced]));
         const bars = buckets.map(bucket =>
           '<div class="bucket">' +
             '<div class="bar processing' + (bucket.processing <= 0 ? " zero" : "") + '" title="' + barTitle("Processing in WAL", bucket.processing, bucket.timestamp) + '" style="height:' + barHeight(bucket.processing, max) + '"></div>' +
-            '<div class="bar synced' + (bucket.synced <= 0 ? " zero" : "") + '" title="' + barTitle("Synced to destination", bucket.synced, bucket.timestamp) + '" style="height:' + barHeight(bucket.synced, max) + '"></div>' +
+            (metricMode === "deadletters" ? '' : '<div class="bar synced' + (bucket.synced <= 0 ? " zero" : "") + '" title="' + barTitle("Synced to destination", bucket.synced, bucket.timestamp) + '" style="height:' + barHeight(bucket.synced, max) + '"></div>') +
           '</div>'
         ).join("");
         return '<section class="metric-panel">' +
           '<div class="metric-tabs">' + tabs + '</div>' +
           '<div class="metric-copy">' + esc(metric.note) + '</div>' +
-          '<div class="legend"><span class="legend-item"><span class="swatch"></span>Processing in WAL</span><span class="legend-item"><span class="swatch synced"></span>Synced to destination</span></div>' +
-          '<div class="histogram">' + bars + '</div>' +
+          '<div class="legend"><span class="legend-item"><span class="swatch"></span>Interval total</span>' +
+            (metricMode === "deadletters" ? '' : '<span class="legend-item"><span class="swatch synced"></span>Synced</span>') +
+          '</div>' +
+          '<div class="histogram">' + (bars || '<div class="empty">No metric samples yet.</div>') + '</div>' +
         '</section>';
       }
       function syncRunView(run) {
-        if (!run) { return '<div class="empty">No run selected.</div>'; }
+        if (!run) { return cloudLockBanner() + '<div class="empty">No run selected.</div>'; }
         const timelineRows = (run.events || [])
           .filter(e => e.event !== "sync_status")
           .map(e => [e.timestamp || "", e.event, e.namespace || e.pipeline || "", eventDetail(e)]);
         if (run.status === "error" && run.detail && !timelineRows.some(row => row[3] === run.detail)) {
           timelineRows.push([run.finishedAt ? new Date(run.finishedAt).toISOString() : "", "run_error", run.pipeline || "", run.detail]);
         }
-        return header(run) + '<div class="stats">' +
-          stat("Status", run.status) + stat("Duration", duration(run)) + stat("Rows", num(run.totalRows ?? run.rowsWritten)) + stat("Bytes", num(run.bytesTotal)) + stat("Freshness", run.freshness && run.freshness.latest_iso ? new Date(run.freshness.latest_iso).toLocaleString() : "n/a") + stat("Deadletters", num(run.deadletters && run.deadletters.total)) +
+        return cloudLockBanner() + header(run) + '<div class="stats">' +
+          stat("Status", statusBadge(run.status)) + stat("Duration", duration(run)) + stat("Rows", num(run.totalRows ?? run.rowsWritten)) + stat("Bytes", num(run.bytesTotal)) + stat("Freshness", run.freshness && run.freshness.latest_iso ? new Date(run.freshness.latest_iso).toLocaleString() : "n/a") + stat("Deadletters", num(run.deadletters && run.deadletters.total)) +
         '</div>' + histogram(run) + table(timelineRows, ["Time", "Event", "Scope", "Detail"]);
       }
       function statusBadge(status) {
@@ -408,7 +474,11 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         if (!run) { return '<div class="empty">No run selected.</div>'; }
         return header(run) + '<div class="stats">' + stat("Configured", run.deadletters && run.deadletters.configured ? "yes" : "no") + stat("Total", num(run.deadletters && run.deadletters.total)) + '</div><div class="empty">Deadletter row tailing will appear here once skipprd exposes sink-agnostic tailing.</div>';
       }
-      function stat(label, value) { return '<section class="stat"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></section>'; }
+      function stat(label, value) {
+        const raw = value == null ? "" : String(value);
+        const html = raw.indexOf("<") >= 0 ? raw : esc(raw);
+        return '<section class="stat"><div class="label">' + esc(label) + '</div><div class="value">' + html + '</div></section>';
+      }
       function eventDetail(event) {
         return event.error || event.failure_summary || event.repair_status || event.phase || "";
       }
@@ -460,6 +530,20 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         }
       });
       root.addEventListener("click", event => {
+        const release = event.target.closest("button[data-action='releaseCloudLock']");
+        if (release && vscode) {
+          vscode.postMessage({
+            command: "releaseCloudLock",
+            workspace: release.dataset.workspace,
+            runId: release.dataset.runId
+          });
+          return;
+        }
+        const cancel = event.target.closest("button[data-action='cancelRun']");
+        if (cancel && vscode) {
+          vscode.postMessage({ command: "cancelRun" });
+          return;
+        }
         const review = event.target.closest("a[data-action='openSchemaReview']");
         if (review && vscode) {
           event.preventDefault();

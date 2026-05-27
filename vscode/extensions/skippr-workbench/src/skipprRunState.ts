@@ -1,5 +1,7 @@
 import * as crypto from "node:crypto";
 import * as vscode from "vscode";
+import { isTerminalHeadlineEvent, runTitle } from "./skipprRunDisplay";
+import { syncMetricHistorySamples } from "./skipprRunMetricsChart";
 import {
   SkipprAffectedAsset,
   SkipprDeadletterSummary,
@@ -29,6 +31,12 @@ export interface SkipprSchemaChange {
   timestamp: string;
 }
 
+export interface SkipprWorkspaceRunLockRef {
+  workspace: string;
+  runId: string;
+  version: number;
+}
+
 export interface SkipprObservedRun {
   id: string;
   command: string;
@@ -36,6 +44,8 @@ export interface SkipprObservedRun {
   label: string;
   pipeline?: string;
   configPath?: string;
+  /** Workspace run lock held for this run (persisted for reload / orphan release). */
+  workspaceRunLock?: SkipprWorkspaceRunLockRef;
   status: SkipprObservedRunStatus;
   phase?: string;
   startedAt: number;
@@ -69,6 +79,9 @@ export interface SkipprObservedRun {
 export interface SkipprRunHistoryMetricPoint {
   timestamp: string;
   rows_written?: number;
+  wal_write_rows_total?: number;
+  parquet_persisted_rows_total?: number;
+  messages_total?: number;
 }
 
 export interface SkipprRunHistorySummary {
@@ -97,13 +110,7 @@ export function isSyncRun(run: { runKind: string; command: string }): boolean {
 }
 
 export function syncMetricSparkline(run: Pick<SkipprObservedRun, "metricPoints">): SkipprRunHistoryMetricPoint[] | undefined {
-  if (!run.metricPoints.length) {
-    return undefined;
-  }
-  return run.metricPoints.slice(-24).map((point) => ({
-    timestamp: point.timestamp,
-    rows_written: point.rows_written
-  }));
+  return syncMetricHistorySamples(run);
 }
 
 export interface SkipprRunStateSnapshot {
@@ -111,6 +118,30 @@ export interface SkipprRunStateSnapshot {
   current?: SkipprObservedRun;
   selected?: SkipprObservedRun;
   history: SkipprRunHistorySummary[];
+}
+
+/** Previous-runs list: never include the active run (or other in-progress duplicates). */
+export function historyExcludingCurrent(
+  history: SkipprRunHistorySummary[],
+  current?: SkipprObservedRun
+): SkipprRunHistorySummary[] {
+  if (!current) {
+    return history;
+  }
+  const currentIds = new Set<string>([current.id]);
+  const lockRunId = current.workspaceRunLock?.runId.trim();
+  if (lockRunId) {
+    currentIds.add(lockRunId);
+  }
+  return history.filter((row) => {
+    if (currentIds.has(row.id)) {
+      return false;
+    }
+    if (current.status === "running" && row.status === "running") {
+      return false;
+    }
+    return true;
+  });
 }
 
 export class SkipprRunStateStore {
@@ -130,7 +161,7 @@ export class SkipprRunStateStore {
       type: "observability",
       current: this.currentRun,
       selected: this.selectedRun,
-      history: this.history
+      history: historyExcludingCurrent(this.history, this.currentRun)
     };
   }
 
@@ -141,6 +172,22 @@ export class SkipprRunStateStore {
 
   selectRun(run: SkipprObservedRun | undefined): void {
     this.selectedRun = run;
+    this.emit();
+  }
+
+  /** Restore a persisted in-progress run after IDE reload (local cache). */
+  restoreCurrentRun(run: SkipprObservedRun): void {
+    this.currentRun = run;
+    this.selectedRun = run;
+    this.emit();
+  }
+
+  attachWorkspaceRunLock(lock: SkipprWorkspaceRunLockRef): void {
+    if (!this.currentRun) {
+      return;
+    }
+    this.currentRun.id = lock.runId;
+    this.currentRun.workspaceRunLock = { workspace: lock.workspace, runId: lock.runId, version: lock.version };
     this.emit();
   }
 
@@ -190,7 +237,15 @@ export class SkipprRunStateStore {
     appendRetainedEvent(this.currentRun.events, event);
     this.currentRun.pipeline = event.pipeline ?? this.currentRun.pipeline;
     this.currentRun.phase = event.phase ?? this.currentRun.phase;
-    this.currentRun.headline = describeRunEvent(event) ?? this.currentRun.headline;
+    if (!isTerminalHeadlineEvent(event.event)) {
+      const eventHeadline = describeRunEvent(event);
+      if (eventHeadline) {
+        this.currentRun.headline = eventHeadline;
+      }
+    }
+    if (this.currentRun.pipeline) {
+      this.currentRun.headline = runTitle(this.currentRun);
+    }
     this.currentRun.totalRows = event.total_rows ?? event.metrics?.messages_total ?? this.currentRun.totalRows;
     this.currentRun.rowsWritten = event.rows_written ?? event.metrics?.rows_written ?? this.currentRun.rowsWritten;
     this.currentRun.bytesTotal = event.bytes ?? event.metrics?.bytes_total ?? this.currentRun.bytesTotal;
@@ -266,6 +321,22 @@ export class SkipprRunStateStore {
     this.currentRun.exitCode = outcome.exitCode;
     this.currentRun.signal = outcome.signal;
     this.currentRun.elapsedMs = outcome.elapsedMs ?? Date.now() - this.currentRun.startedAt;
+    this.currentRun.finishedAt = Date.now();
+    this.currentRun.detail = outcome.detail ?? this.currentRun.detail;
+    const finished = this.currentRun;
+    this.selectedRun = finished;
+    this.currentRun = undefined;
+    this.emit();
+    return finished;
+  }
+
+  /** End a detached in-progress run in the UI (no local CLI), e.g. after releasing an orphan lock. */
+  abandonCurrentRun(outcome: { status: SkipprObservedRunStatus; detail?: string }): SkipprObservedRun | undefined {
+    if (!this.currentRun) {
+      return undefined;
+    }
+    this.currentRun.status = outcome.status;
+    this.currentRun.elapsedMs = Date.now() - this.currentRun.startedAt;
     this.currentRun.finishedAt = Date.now();
     this.currentRun.detail = outcome.detail ?? this.currentRun.detail;
     const finished = this.currentRun;

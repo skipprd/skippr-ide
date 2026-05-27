@@ -28,6 +28,11 @@ import { openSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
 import { parseShellArgs } from "./skipprCliArgs";
+import {
+  authSessionFromCredentials,
+  credentialsAreValid,
+  loadCliCompatibleCredentials
+} from "./skipprAuthHydrate";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
 import {
   cloudWorkspacePreferred,
@@ -106,19 +111,43 @@ import {
   acquireWorkspaceRunLock,
   cancelWorkspaceRun,
   completeWorkspaceRunLock,
+  getWorkspaceRunLock,
   heavyCommandForKind,
-  isHeavyRunKind
+  isHeavyRunKind,
+  WorkspaceLockConflictError
 } from "./skipprRunApi";
+import {
+  type WorkspaceLockPanelState,
+  workspaceLockPanelFromApi,
+  type WorkspaceRunLockStatus
+} from "./skipprWorkspaceRunLock";
 import { workspaceSlugFromConfigPath } from "./skipprCloudWorkspace";
+import { runTitle } from "./skipprRunDisplay";
+import {
+  buildCancelRunConfirmation,
+  buildCloudWorkspaceLockReleaseConfirmation,
+  buildOrphanLockReleaseConfirmation,
+  CANCEL_RUN_CONFIRM_LABEL,
+  CANCEL_RUN_DISMISS_LABEL,
+  RELEASE_ORPHAN_LOCK_CONFIRM_LABEL
+} from "./skipprRunCancel";
 import {
   SkipprObservedRun,
   SkipprObservedRunStatus,
   SkipprRunHistorySummary,
   SkipprRunStateSnapshot,
   SkipprRunStateStore,
+  SkipprWorkspaceRunLockRef,
   isSyncRun,
   syncMetricSparkline
 } from "./skipprRunState";
+
+type ObservabilityWebviewPayload = SkipprRunStateSnapshot & {
+  localProcessActive: boolean;
+  workspaceRunLockActive: boolean;
+  orphanLockReleaseAvailable: boolean;
+  workspaceLock: WorkspaceLockPanelState;
+};
 
 const SKIPPR_RUN_STATUS_VIEW_ID = "skippr.runStatus";
 const SKIPPR_RUN_TIMELINE_VIEW_ID = "skippr.runTimeline";
@@ -203,12 +232,16 @@ interface SkipprRunRequest {
 
 type SkipprRunnableKind = SkipprRunKind | "ask" | "plan";
 
+let skipprAuthProvider: SkipprAuthenticationProvider | undefined;
+let skipprAuthStatusItem: vscode.StatusBarItem | undefined;
+let workspaceLockPanelState: WorkspaceLockPanelState = { signedIn: false, blocking: false };
+let workspaceLockRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
 let activeRun: SkipprProcess | undefined;
 let activeWorkspaceRunLock:
   | { workspace: string; runId: string; version: number }
   | undefined;
 let workbenchExtensionContext: vscode.ExtensionContext | undefined;
-let skipprLogOutput: vscode.LogOutputChannel | undefined;
 let activeConfigPath: string | undefined;
 let activeConfigStatus: SkipprDoctorResult | undefined;
 const sqlDocumentContexts = new Map<string, SkipprSqlDocumentContext>();
@@ -1017,18 +1050,102 @@ function postRunStatusPanel(payload: RunStatusPanelPayload): void {
   void runStatusWebviewView?.webview.postMessage(payload);
 }
 
+async function resolveActiveWorkspaceSlug(): Promise<string | undefined> {
+  if (!workbenchExtensionContext) {
+    return undefined;
+  }
+  const configPath = (await resolveSkipprConfigAtCwd()).trim() || activeConfigPath?.trim();
+  if (!configPath) {
+    return undefined;
+  }
+  const cloud = getActiveCloudContext(workbenchExtensionContext);
+  return workspaceSlugFromConfigPath(configPath, cloud);
+}
+
+function mapApiLockRow(row: {
+  runId: string;
+  command: string;
+  pipeline?: string;
+  status: string;
+  version: number;
+  leaseExpiresAt: string;
+  cancelRequested: boolean;
+}): WorkspaceRunLockStatus {
+  return {
+    runId: row.runId,
+    command: row.command,
+    pipeline: row.pipeline,
+    status: row.status,
+    version: row.version,
+    leaseExpiresAt: row.leaseExpiresAt,
+    cancelRequested: row.cancelRequested
+  };
+}
+
+async function refreshWorkspaceLockPanel(): Promise<void> {
+  const workspace = await resolveActiveWorkspaceSlug();
+  if (!workbenchExtensionContext || !skipprAuthProvider || !skipprAuthStatusItem) {
+    workspaceLockPanelState = workspaceLockPanelFromApi(workspace ?? "", false, undefined);
+    return;
+  }
+  const session = await ensureSession(workbenchExtensionContext, skipprAuthStatusItem, skipprAuthProvider);
+  if (!session?.token) {
+    workspaceLockPanelState = workspaceLockPanelFromApi(workspace ?? "", false, undefined);
+    return;
+  }
+  if (!workspace) {
+    workspaceLockPanelState = workspaceLockPanelFromApi("", true, undefined, "Open a workspace with skippr.yml to view cloud run locks.");
+    return;
+  }
+  try {
+    const row = await getWorkspaceRunLock(apiRequest, session.token, workspace);
+    workspaceLockPanelState = workspaceLockPanelFromApi(workspace, true, row ? mapApiLockRow(row) : undefined);
+  } catch (err) {
+    workspaceLockPanelState = workspaceLockPanelFromApi(
+      workspace,
+      true,
+      undefined,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+}
+
+function scheduleRefreshWorkspaceLockPanel(): void {
+  if (workspaceLockRefreshTimer) {
+    clearTimeout(workspaceLockRefreshTimer);
+  }
+  workspaceLockRefreshTimer = setTimeout(() => {
+    workspaceLockRefreshTimer = undefined;
+    void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
+  }, 400);
+}
+
+function observabilityWebviewPayload(): ObservabilityWebviewPayload | undefined {
+  const snapshot = observabilityStore?.snapshot();
+  if (!snapshot) {
+    return undefined;
+  }
+  return {
+    ...snapshot,
+    localProcessActive: Boolean(activeRun),
+    workspaceRunLockActive: Boolean(activeWorkspaceRunLock),
+    orphanLockReleaseAvailable: !activeRun && snapshot.current?.status === "running",
+    workspaceLock: workspaceLockPanelState
+  };
+}
+
 function postObservability(): void {
   if (observabilityPostTimer) {
     clearTimeout(observabilityPostTimer);
     observabilityPostTimer = undefined;
   }
-  const snapshot = observabilityStore?.snapshot();
-  if (!snapshot) {
+  const payload = observabilityWebviewPayload();
+  if (!payload) {
     return;
   }
-  void runStatusWebviewView?.webview.postMessage(snapshot);
+  void runStatusWebviewView?.webview.postMessage(payload);
   for (const webviewView of runDetailsWebviewViews.values()) {
-    void webviewView.webview.postMessage(snapshot);
+    void webviewView.webview.postMessage(payload);
   }
 }
 
@@ -1040,6 +1157,7 @@ function schedulePostObservability(): void {
     observabilityPostTimer = undefined;
     postObservability();
     refreshSchemaDiffReviewFromObservability();
+    scheduleRefreshWorkspaceLockPanel();
   }, OBSERVABILITY_POST_DEBOUNCE_MS);
 }
 
@@ -1357,7 +1475,10 @@ async function refreshRunHistoryCloudContext(): Promise<void> {
     return;
   }
   const cloud = getActiveCloudContext(workbenchExtensionContext);
-  const session = await readAuthSession(workbenchExtensionContext);
+  const session =
+    skipprAuthProvider && skipprAuthStatusItem
+      ? await ensureSession(workbenchExtensionContext, skipprAuthStatusItem, skipprAuthProvider)
+      : await readAuthSession(workbenchExtensionContext);
   if (cloud && session?.token) {
     runHistory.setCloudContext({
       apiRequest,
@@ -1369,6 +1490,16 @@ async function refreshRunHistoryCloudContext(): Promise<void> {
   }
 }
 
+function historyMetricSamplesComplete(row: SkipprRunHistorySummary): boolean {
+  const first = row.metricPoints?.[0];
+  return Boolean(
+    first &&
+      (first.wal_write_rows_total != null ||
+        first.parquet_persisted_rows_total != null ||
+        first.messages_total != null)
+  );
+}
+
 async function enrichRunHistoryMetricSparklines(
   history: SkipprRunHistorySummary[]
 ): Promise<SkipprRunHistorySummary[]> {
@@ -1377,7 +1508,7 @@ async function enrichRunHistoryMetricSparklines(
   }
   return Promise.all(
     history.map(async (row) => {
-      if (row.metricPoints?.length || !isSyncRun(row)) {
+      if (!isSyncRun(row) || historyMetricSamplesComplete(row)) {
         return row;
       }
       try {
@@ -1401,6 +1532,28 @@ async function refreshRunHistory(): Promise<void> {
   try {
     const history = await enrichRunHistoryMetricSparklines(await runHistory.recentRuns());
     observabilityStore.setHistory(history);
+  } catch {
+    // History is optional; runs must still work if sqlite is unavailable.
+  }
+}
+
+async function restoreInProgressRunFromLocalCache(): Promise<void> {
+  if (!runHistory || !observabilityStore || observabilityStore.snapshot().current) {
+    return;
+  }
+  try {
+    const summaries = await runHistory.recentRuns(100);
+    const inProgress = summaries.filter((row) => row.status === "running");
+    if (!inProgress.length) {
+      return;
+    }
+    const latest = inProgress.reduce((a, b) => (a.startedAt >= b.startedAt ? a : b));
+    const full = await runHistory.loadRun(latest.id);
+    if (!full || full.status !== "running") {
+      return;
+    }
+    observabilityStore.restoreCurrentRun(full);
+    postObservability();
   } catch {
     // History is optional; runs must still work if sqlite is unavailable.
   }
@@ -1496,7 +1649,7 @@ function finishRunStatusPanel(outcome: {
   activeRunStatusStartedAt = undefined;
 }
 
-function registerSkipprRunStatusView(context: vscode.ExtensionContext): void {
+function registerSkipprRunStatusView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SKIPPR_RUN_STATUS_VIEW_ID,
@@ -1506,10 +1659,20 @@ function registerSkipprRunStatusView(context: vscode.ExtensionContext): void {
           webviewView.webview.html = renderSkipprRunStatusPanelHtml();
           runStatusWebviewView = webviewView;
           postRunStatusPanel(runStatusPanelLast);
-          postObservability();
-          webviewView.webview.onDidReceiveMessage((message: { command?: string; runId?: string }) => {
+          void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
+          webviewView.webview.onDidReceiveMessage((message: {
+            command?: string;
+            runId?: string;
+            workspace?: string;
+          }) => {
             if (message.command === "openRun") {
-              void openHistoricalRun(message.runId);
+              void focusRunObservability(message.runId);
+            } else if (message.command === "cancelRun") {
+              void vscode.commands.executeCommand("skippr.run.stopSyncPipeline");
+            } else if (message.command === "releaseCloudLock" && message.workspace && message.runId) {
+              void releaseCloudWorkspaceLock(message.workspace, message.runId, output);
+            } else if (message.command === "refreshWorkspaceLock") {
+              void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
             }
           });
           webviewView.onDidDispose(() => {
@@ -1527,7 +1690,8 @@ function registerSkipprRunStatusView(context: vscode.ExtensionContext): void {
 function registerSkipprRunDetailsView(
   context: vscode.ExtensionContext,
   viewId: string,
-  viewKind: SkipprRunDetailsViewKind
+  viewKind: SkipprRunDetailsViewKind,
+  output: vscode.LogOutputChannel
 ): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -1538,13 +1702,21 @@ function registerSkipprRunDetailsView(
           webviewView.webview.html = renderSkipprRunDetailsPanelHtml(viewKind);
           runDetailsWebviewViews.set(viewId, webviewView);
           postObservability();
-          if (viewKind === "schema") {
-            webviewView.webview.onDidReceiveMessage((message: { command?: string }) => {
-              if (message.command === "openSchemaReview") {
-                void showSchemaDiffReviewPanel();
-              }
-            });
-          }
+          webviewView.webview.onDidReceiveMessage((message: {
+            command?: string;
+            workspace?: string;
+            runId?: string;
+          }) => {
+            if (message.command === "openSchemaReview") {
+              void showSchemaDiffReviewPanel();
+            } else if (message.command === "cancelRun" && viewKind === "timeline") {
+              void vscode.commands.executeCommand("skippr.run.stopSyncPipeline");
+            } else if (message.command === "releaseCloudLock" && message.workspace && message.runId) {
+              void releaseCloudWorkspaceLock(message.workspace, message.runId, output);
+            } else if (message.command === "refreshWorkspaceLock") {
+              void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
+            }
+          });
           webviewView.onDidDispose(() => {
             if (runDetailsWebviewViews.get(viewId) === webviewView) {
               runDetailsWebviewViews.delete(viewId);
@@ -1928,7 +2100,7 @@ function revealRunAndDebugView(): void {
 function setRunStatusRunning(statusItem: vscode.StatusBarItem, label: string): void {
   statusItem.command = "skippr.run.stopSyncPipeline";
   statusItem.text = `$(sync~spin) ${label}`;
-  statusItem.tooltip = "Skippr is running. Click to stop.";
+  statusItem.tooltip = "Skippr is running. Click to cancel.";
   if (activeRunStatusStartedAt === undefined) {
     revealRunAndDebugView();
     activeRunStatusStartedAt = Date.now();
@@ -2126,8 +2298,9 @@ async function runSkipprCommand(
   }
 
   let runLockEnv: NodeJS.ProcessEnv | undefined;
-  if (isHeavyRunKind(kind) && workbenchExtensionContext) {
-    const session = await readAuthSession(workbenchExtensionContext);
+  let cliOwnsWorkspaceRunLock = false;
+  if (isHeavyRunKind(kind) && workbenchExtensionContext && skipprAuthProvider && skipprAuthStatusItem) {
+    const session = await ensureSession(workbenchExtensionContext, skipprAuthStatusItem, skipprAuthProvider);
     const cloud = getActiveCloudContext(workbenchExtensionContext);
     const workspace = await workspaceSlugFromConfigPath(configPath, cloud);
     if (session?.token && workspace) {
@@ -2149,8 +2322,13 @@ async function runSkipprCommand(
           SKIPPR_RUN_VERSION: String(acquired.version),
           SKIPPR_CLOUD_WORKSPACE: workspace
         };
+        cliOwnsWorkspaceRunLock = true;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof WorkspaceLockConflictError) {
+          void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
+          void vscode.commands.executeCommand("workbench.view.debug");
+        }
         vscode.window.showErrorMessage(message);
         output.error(message);
         return undefined;
@@ -2196,15 +2374,16 @@ async function runSkipprCommand(
         const message = event.event === "sync_status" ? undefined : describeRunEvent(event);
         if (message) {
           output.info(message);
-          setRunStatusRunning(statusItem, message);
         }
-        if (observed && event.event !== "sync_status") {
+        if (observed) {
           scheduleHistorySave(observed);
-          if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
-            void showRunDetailsPanel();
-          }
-          if (event.event === "schema_evolved" && observed.schemaChanges.length) {
-            scheduleSchemaDiffAutoOpen(observed.id);
+          if (event.event !== "sync_status") {
+            if (kind === "discover" || kind === "sync" || kind === "sync-once" || kind === "sync-all-once") {
+              void showRunDetailsPanel();
+            }
+            if (event.event === "schema_evolved" && observed.schemaChanges.length) {
+              scheduleSchemaDiffAutoOpen(observed.id);
+            }
           }
         }
       },
@@ -2217,12 +2396,18 @@ async function runSkipprCommand(
 
   activeRun = run;
   const observedPipeline = kind === "sync-all-once" ? undefined : scopedPipeline;
-  observabilityStore?.startRun({
+  const startedRun = observabilityStore?.startRun({
     command: kind,
     label: run.label,
     pipeline: observedPipeline,
     configPath
   });
+  if (startedRun) {
+    if (activeWorkspaceRunLock) {
+      observabilityStore?.attachWorkspaceRunLock(activeWorkspaceRunLock);
+    }
+    scheduleHistorySave(observabilityStore?.snapshot().current ?? startedRun);
+  }
   void showRunDetailsPanel();
   const runDisplayName = observedPipeline ?? run.label;
   setRunStatusRunning(statusItem, runDisplayName);
@@ -2232,7 +2417,7 @@ async function runSkipprCommand(
   }
   const lock = activeWorkspaceRunLock;
   activeWorkspaceRunLock = undefined;
-  if (lock && workbenchExtensionContext) {
+  if (lock && workbenchExtensionContext && !cliOwnsWorkspaceRunLock) {
     const session = await readAuthSession(workbenchExtensionContext);
     if (session?.token) {
       const terminalStatus =
@@ -2242,18 +2427,25 @@ async function runSkipprCommand(
             ? "completed"
             : "failed";
       try {
+        let version = lock.version;
+        const current = await getWorkspaceRunLock(apiRequest, session.token, lock.workspace);
+        if (current?.runId === lock.runId) {
+          version = current.version;
+        }
         await completeWorkspaceRunLock(
           apiRequest,
           session.token,
           lock.workspace,
           lock.runId,
-          lock.version,
+          version,
           terminalStatus
         );
       } catch (err) {
         output.warn(`Complete run lock failed: ${String(err)}`);
       }
     }
+  } else if (cliOwnsWorkspaceRunLock) {
+    scheduleRefreshWorkspaceLockPanel();
   }
 
   finishRunStatusPanel({
@@ -2273,6 +2465,7 @@ async function runSkipprCommand(
   if (finishedRun) {
     flushHistorySave(finishedRun);
   }
+  scheduleRefreshWorkspaceLockPanel();
   setRunStatusIdle(statusItem);
 
   if (result.code === 0) {
@@ -3847,12 +4040,195 @@ async function runSkipprDebugConfiguration(
   await runSkipprCommand(kind, output, statusItem, pipeline, configPath, logLevelResolved, extraFromLaunch);
 }
 
-async function stopActiveRun(statusItem: vscode.StatusBarItem, output: vscode.LogOutputChannel): Promise<void> {
-  if (!activeRun) {
-    vscode.window.showInformationMessage("No Skippr run is active.");
+async function confirmCancelActiveRun(runLabel: string, workspaceRunLock: boolean): Promise<boolean> {
+  const { message, detail } = buildCancelRunConfirmation(runLabel, { workspaceRunLock });
+  const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, CANCEL_RUN_CONFIRM_LABEL);
+  return choice === CANCEL_RUN_CONFIRM_LABEL;
+}
+
+async function confirmOrphanLockRelease(runLabel: string): Promise<boolean> {
+  const { message, detail } = buildOrphanLockReleaseConfirmation(runLabel);
+  const choice = await vscode.window.showWarningMessage(
+    message,
+    { modal: true, detail },
+    RELEASE_ORPHAN_LOCK_CONFIRM_LABEL
+  );
+  return choice === RELEASE_ORPHAN_LOCK_CONFIRM_LABEL;
+}
+
+async function resolveWorkspaceRunLockForRun(run: SkipprObservedRun): Promise<SkipprWorkspaceRunLockRef | undefined> {
+  if (run.workspaceRunLock?.workspace?.trim() && run.workspaceRunLock.runId?.trim()) {
+    return run.workspaceRunLock;
+  }
+  const runId = run.id?.trim();
+  const configPath = run.configPath?.trim();
+  if (!runId || !configPath || !workbenchExtensionContext) {
+    return undefined;
+  }
+  const cloud = getActiveCloudContext(workbenchExtensionContext);
+  const workspace = await workspaceSlugFromConfigPath(configPath, cloud);
+  if (!workspace) {
+    return undefined;
+  }
+  return { workspace, runId, version: run.workspaceRunLock?.version ?? 0 };
+}
+
+async function confirmCloudWorkspaceLockRelease(
+  workspace: string,
+  lock: WorkspaceRunLockStatus
+): Promise<boolean> {
+  const { message, detail } = buildCloudWorkspaceLockReleaseConfirmation(workspace, lock);
+  const choice = await vscode.window.showWarningMessage(
+    message,
+    { modal: true, detail },
+    RELEASE_ORPHAN_LOCK_CONFIRM_LABEL
+  );
+  return choice === RELEASE_ORPHAN_LOCK_CONFIRM_LABEL;
+}
+
+async function releaseCloudWorkspaceLock(
+  workspace: string,
+  runId: string,
+  output: vscode.LogOutputChannel
+): Promise<void> {
+  if (!workbenchExtensionContext || !skipprAuthProvider || !skipprAuthStatusItem) {
     return;
   }
-  output.info(`Stopping ${activeRun.label}...`);
+  const session = await ensureSession(workbenchExtensionContext, skipprAuthStatusItem, skipprAuthProvider);
+  if (!session?.token) {
+    void vscode.window.showErrorMessage("Sign in to Skippr to release the workspace lock.", { modal: true });
+    return;
+  }
+
+  let lockSummary: WorkspaceRunLockStatus | undefined = workspaceLockPanelState.lock;
+  if (!lockSummary || lockSummary.runId !== runId) {
+    try {
+      const row = await getWorkspaceRunLock(apiRequest, session.token, workspace);
+      lockSummary = row ? mapApiLockRow(row) : undefined;
+    } catch {
+      lockSummary = {
+        runId,
+        command: "unknown",
+        status: "running",
+        version: 0,
+        leaseExpiresAt: "",
+        cancelRequested: false
+      };
+    }
+  }
+  if (!lockSummary) {
+    void vscode.window.showInformationMessage("No workspace lock is active on Skippr Cloud.");
+    void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
+    return;
+  }
+
+  if (!(await confirmCloudWorkspaceLockRelease(workspace, lockSummary))) {
+    return;
+  }
+
+  output.info(`Releasing cloud lock for workspace ${workspace} (run ${runId})…`);
+  try {
+    await cancelWorkspaceRun(apiRequest, session.token, workspace, runId);
+  } catch (err) {
+    output.warn(`Release cloud workspace lock failed: ${String(err)}`);
+    void vscode.window.showErrorMessage("Could not release the workspace lock on Skippr Cloud.", {
+      modal: true,
+      detail: String(err)
+    });
+    return;
+  }
+
+  const current = observabilityStore?.snapshot().current;
+  if (current?.status === "running" && !activeRun) {
+    const abandoned = observabilityStore?.abandonCurrentRun({
+      status: "stopped",
+      detail: "Cloud workspace lock released from IDE"
+    });
+    if (abandoned) {
+      flushHistorySave(abandoned);
+    }
+  }
+
+  await refreshWorkspaceLockPanel();
+  postObservability();
+  vscode.window.showInformationMessage(`Workspace lock released for ${workspace}. You can start a new run.`);
+}
+
+async function releaseOrphanedRunLock(
+  run: SkipprObservedRun,
+  statusItem: vscode.StatusBarItem,
+  output: vscode.LogOutputChannel
+): Promise<void> {
+  const label = runTitle(run);
+  if (!(await confirmOrphanLockRelease(label))) {
+    return;
+  }
+
+  const lock = await resolveWorkspaceRunLockForRun(run);
+  if (!lock) {
+    void vscode.window.showErrorMessage("Could not determine the workspace lock for this run.", {
+      modal: true,
+      detail:
+        "Sign in to Skippr and open the project skippr.yml in this workspace, then try again. " +
+        "Without workspace details the cloud lock cannot be released from here."
+    });
+    return;
+  }
+
+  if (!workbenchExtensionContext || !skipprAuthProvider || !skipprAuthStatusItem) {
+    return;
+  }
+  const session = await ensureSession(workbenchExtensionContext, skipprAuthStatusItem, skipprAuthProvider);
+  if (!session?.token) {
+    void vscode.window.showErrorMessage("Sign in to Skippr to release the workspace lock.", {
+      modal: true,
+      detail:
+        "Use Skippr Sign In, or run skippr user login in a terminal so ~/.skippr/credentials.json matches the CLI."
+    });
+    return;
+  }
+
+  output.info(`Releasing workspace lock for ${label} (run ${lock.runId})…`);
+  try {
+    await cancelWorkspaceRun(apiRequest, session.token, lock.workspace, lock.runId);
+  } catch (err) {
+    output.warn(`Release workspace lock failed: ${String(err)}`);
+    void vscode.window.showErrorMessage("Could not release the workspace lock on Skippr Cloud.", {
+      modal: true,
+      detail: String(err)
+    });
+    return;
+  }
+
+  const abandoned = observabilityStore?.abandonCurrentRun({
+    status: "stopped",
+    detail: "Workspace lock released from IDE (no local CLI)"
+  });
+  if (abandoned) {
+    flushHistorySave(abandoned);
+  }
+  setRunStatusIdle(statusItem);
+  postObservability();
+}
+
+async function stopActiveRun(statusItem: vscode.StatusBarItem, output: vscode.LogOutputChannel): Promise<void> {
+  if (!activeRun) {
+    const restored = observabilityStore?.snapshot().current;
+    if (restored?.status === "running") {
+      await releaseOrphanedRunLock(restored, statusItem, output);
+      return;
+    }
+    void vscode.window.showInformationMessage("No Skippr run is active.");
+    return;
+  }
+
+  const runLabel = activeRun.label;
+  const workspaceRunLock = Boolean(activeWorkspaceRunLock);
+  if (!(await confirmCancelActiveRun(runLabel, workspaceRunLock))) {
+    return;
+  }
+
+  output.info(`Cancelling ${runLabel}...`);
   const lock = activeWorkspaceRunLock;
   if (lock && workbenchExtensionContext) {
     const session = await readAuthSession(workbenchExtensionContext);
@@ -3860,7 +4236,16 @@ async function stopActiveRun(statusItem: vscode.StatusBarItem, output: vscode.Lo
       try {
         await cancelWorkspaceRun(apiRequest, session.token, lock.workspace, lock.runId);
       } catch (err) {
-        output.warn(`Cancel run API failed: ${String(err)}`);
+        output.warn(`Cancel workspace run failed: ${String(err)}`);
+        const retry = await vscode.window.showWarningMessage(
+          "Could not release the workspace run lock on Skippr Cloud.",
+          { modal: true, detail: `${String(err)}\n\nThe local CLI will still be stopped.` },
+          "Stop local CLI anyway",
+          CANCEL_RUN_DISMISS_LABEL
+        );
+        if (retry !== "Stop local CLI anyway") {
+          return;
+        }
       }
     }
   }
@@ -3985,6 +4370,45 @@ async function readAuthSession(context: vscode.ExtensionContext): Promise<AuthSe
   return { token, refreshToken, email };
 }
 
+const authHydrateDeps = (): {
+  authBaseUrl: string;
+  apiRequest: typeof apiRequest;
+  tryApiRequest: typeof tryApiRequest;
+} => ({
+  authBaseUrl: getAuthBaseUrl(),
+  apiRequest,
+  tryApiRequest
+});
+
+/**
+ * IDE secrets are separate from skippr-cli `~/.skippr/credentials.json` and `SKIPPR_API_KEY`.
+ * If the CLI can run, adopt the same session so cloud locks, release lock, and account UI work.
+ */
+async function hydrateAuthSessionFromCli(
+  context: vscode.ExtensionContext,
+  statusItem: vscode.StatusBarItem,
+  authProvider: SkipprAuthenticationProvider
+): Promise<AuthSession | undefined> {
+  const existing = await readAuthSession(context);
+  if (existing) {
+    return existing;
+  }
+
+  const creds = await loadCliCompatibleCredentials(authHydrateDeps());
+  if (!creds) {
+    return undefined;
+  }
+  if (!(await credentialsAreValid(authHydrateDeps(), creds))) {
+    return undefined;
+  }
+
+  const session = authSessionFromCredentials(creds);
+  await saveAuthSession(context, session);
+  applySignedInAuthStatusBar(statusItem, session.email, "Signed in (same session as Skippr CLI)");
+  authProvider.notifySessionCreated(session);
+  return session;
+}
+
 async function clearAuthSession(context: vscode.ExtensionContext): Promise<void> {
   setLastAuthToken(undefined);
   await context.secrets.delete(authTokenKey);
@@ -4023,15 +4447,6 @@ function applySignedOutAuthStatusBar(statusItem: vscode.StatusBarItem): void {
   statusItem.text = "$(sign-in) Skippr Sign In";
   statusItem.tooltip = "Sign in to Skippr";
   statusItem.command = "skippr.auth.account";
-}
-
-async function syncAuthStatusBarFromStoredSecrets(context: vscode.ExtensionContext, statusItem: vscode.StatusBarItem): Promise<void> {
-  const stored = await readAuthSession(context);
-  if (stored) {
-    applySignedInAuthStatusBar(statusItem, stored.email, "Signed in to Skippr (validating…)");
-  } else {
-    applySignedOutAuthStatusBar(statusItem);
-  }
 }
 
 function escapeHtml(value: string): string {
@@ -4207,7 +4622,10 @@ async function ensureSession(
   statusItem: vscode.StatusBarItem,
   authProvider: SkipprAuthenticationProvider
 ): Promise<AuthSession | undefined> {
-  const existing = await readAuthSession(context);
+  let existing = await readAuthSession(context);
+  if (!existing) {
+    existing = await hydrateAuthSessionFromCli(context, statusItem, authProvider);
+  }
   if (!existing) {
     applySignedOutAuthStatusBar(statusItem);
     return undefined;
@@ -4856,30 +5274,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await vscode.commands.executeCommand("setContext", "skippr.cloudWorkspaceActive", true);
     await refreshRunHistoryCloudContext();
   }
-  const storedSession = await readAuthSession(context);
-  if (storedSession) {
-    setLastAuthToken(storedSession.token);
-  }
   observabilityStore = new SkipprRunStateStore();
   context.subscriptions.push(observabilityStore);
-  registerSkipprRunStatusView(context);
-  registerSkipprRunDetailsView(context, SKIPPR_RUN_TIMELINE_VIEW_ID, "timeline");
-  registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_VIEW_ID, "schema");
-  registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters");
+  const output = vscode.window.createOutputChannel("Skippr", { log: true });
+  context.subscriptions.push(output);
+  registerSkipprRunStatusView(context, output);
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_TIMELINE_VIEW_ID, "timeline", output);
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_VIEW_ID, "schema", output);
+  registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters", output);
   registerSkipprQueryResultsView(context);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   const authProvider = new SkipprAuthenticationProvider(context, statusItem);
-  await syncAuthStatusBarFromStoredSecrets(context, statusItem);
+  skipprAuthProvider = authProvider;
+  skipprAuthStatusItem = statusItem;
+  await ensureSession(context, statusItem, authProvider);
+  await refreshWorkspaceLockPanel();
   statusItem.show();
   context.subscriptions.push(statusItem);
 
   const runStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 999);
   setRunStatusIdle(runStatusItem);
   runStatusItem.show();
-
-  const output = vscode.window.createOutputChannel("Skippr", { log: true });
-  skipprLogOutput = output;
-  context.subscriptions.push(runStatusItem, output);
+  context.subscriptions.push(runStatusItem);
   registerSkipprSchemaDiffReviewView(context, output);
   context.subscriptions.push(
     vscode.commands.registerCommand("skippr.schemaDiff.openReview", () => {
@@ -4903,7 +5319,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (workspaceRoot) {
     runHistory = new SkipprRunHistory(workspaceRoot, output);
     await refreshRunHistoryCloudContext();
-    void refreshRunHistory();
+    await refreshRunHistory();
+    await restoreInProgressRunFromLocalCache();
   }
   observabilityStore.onDidChange(() => schedulePostObservability(), undefined, context.subscriptions);
   void runWorkbenchCommand("skippr.workbench.forceRunPanels");

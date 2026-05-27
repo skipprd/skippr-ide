@@ -15,6 +15,30 @@ export interface LockConflictBody {
   activeStatus?: string;
 }
 
+export class WorkspaceLockConflictError extends Error {
+  readonly conflict: LockConflictBody;
+
+  constructor(conflict: LockConflictBody) {
+    const pipe = conflict.activePipeline ? ` on pipeline '${conflict.activePipeline}'` : "";
+    super(
+      conflict.error ??
+        `Workspace already running ${conflict.activeCommand ?? "a job"}${pipe} (run ${conflict.activeRunId ?? "unknown"}).`
+    );
+    this.name = "WorkspaceLockConflictError";
+    this.conflict = conflict;
+  }
+}
+
+export interface WorkspaceRunLockApiRow {
+  runId: string;
+  command: string;
+  pipeline?: string;
+  status: string;
+  version: number;
+  leaseExpiresAt: string;
+  cancelRequested: boolean;
+}
+
 export type ApiRequestFn = (
   path: string,
   method: string,
@@ -52,17 +76,32 @@ export async function acquireWorkspaceRunLock(
   );
   if (response.status === 409) {
     const conflict = (await response.json().catch(() => ({}))) as LockConflictBody;
-    const pipe = conflict.activePipeline ? ` on pipeline '${conflict.activePipeline}'` : "";
-    throw new Error(
-      conflict.error ??
-        `Workspace already running ${conflict.activeCommand ?? "a job"}${pipe} (run ${conflict.activeRunId ?? "unknown"}). Stop or wait for it to finish.`
-    );
+    throw new WorkspaceLockConflictError(conflict);
   }
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     throw new Error(text || `acquire run lock failed (${response.status})`);
   }
   return (await response.json()) as AcquireLockResult;
+}
+
+export async function getWorkspaceRunLock(
+  apiRequest: ApiRequestFn,
+  token: string,
+  workspace: string
+): Promise<WorkspaceRunLockApiRow | undefined> {
+  const response = await apiRequest(
+    `/auth/workspaces/${encodeURIComponent(workspace)}/runs/lock`,
+    "GET",
+    undefined,
+    token
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `get workspace lock failed (${response.status})`);
+  }
+  const payload = (await response.json()) as { lock?: WorkspaceRunLockApiRow | null };
+  return payload.lock ?? undefined;
 }
 
 export async function cancelWorkspaceRun(

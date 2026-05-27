@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CodeWindow } from '../../../../base/browser/window.js';
+import { CodeWindow } from '../../../base/browser/window.js';
 
 const confettiColors = [
 	'#007acc',
