@@ -1,7 +1,18 @@
 # Skippr IDE (VSCode Fork)
 
+[![CI](https://github.com/skipprd/skippr-ide/actions/workflows/ci.yml/badge.svg)](https://github.com/skipprd/skippr-ide/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/skipprd/skippr-ide)](https://github.com/skipprd/skippr-ide/releases)
+
 This repository builds a downloadable Skippr IDE desktop app from a VSCode fork.
-It is not packaged as an external extension install flow.
+It is not packaged as an external extension install flow. The workbench drives
+**`sde`**, which invokes **`skipprd`** on PATH.
+
+Docs: https://ide.skippr.io
+
+This repository is **source-available** under [PolyForm Shield 1.0.0](./LICENSE) for Skippr overlay files. Upstream VS Code remains MIT.
+
+Licensor Line of Business: Skippr IDE (https://ide.skippr.io)
+
 
 ## Repository Layout
 
