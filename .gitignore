@@ -22,10 +22,8 @@ test-results/
 test-results.xml
 coverage/
 
-# Packaged app output regenerated from source
-VSCode-*/
-vscode-*/
-*.app/
+# Generated VS Code checkout (bootstrap). Overlay under overlays/vscode is SoT.
+/vscode/
 
 # Local environment and logs
 .env
