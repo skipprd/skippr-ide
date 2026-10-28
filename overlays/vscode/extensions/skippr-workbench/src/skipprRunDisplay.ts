@@ -1,3 +1,5 @@
+import { RUN_KIND_LABELS, runKindLabelFromUnknown } from "./skipprRunKinds";
+
 /** Human-readable run titles and status for Run sidebar / timeline webviews. */
 
 export interface RunDisplayLike {
@@ -11,32 +13,9 @@ export interface RunDisplayLike {
 
 const TERMINAL_PHASES = new Set(["complete", "completed", "success", "failed", "error", "stopped", "idle"]);
 
-export function runKindLabel(runKind: string | undefined, command?: string): string {
-  const kind = (runKind || command || "").trim().toLowerCase();
-  if (kind === "discover") {
-    return "Discover";
-  }
-  if (kind === "model" || kind.startsWith("model")) {
-    return "Model";
-  }
-  if (kind === "sync-all-once") {
-    return "Sync all";
-  }
-  if (kind === "sync" || kind === "sync-once" || kind.startsWith("sync")) {
-    return "Sync";
-  }
-  if (kind === "doctor") {
-    return "Doctor";
-  }
-  if (!kind) {
-    return "Run";
-  }
-  return kind.charAt(0).toUpperCase() + kind.slice(1);
-}
-
 export function runTitle(run: RunDisplayLike): string {
   const pipeline = run.pipeline?.trim();
-  const kind = runKindLabel(run.runKind, run.command);
+  const kind = runKindLabelFromUnknown(run.runKind, run.command);
   if (pipeline) {
     return kind + " · " + pipeline;
   }
@@ -80,13 +59,12 @@ export function isTerminalHeadlineEvent(eventName: string): boolean {
 /** In-webview helpers for run title, status badge, and phase hints. */
 export function buildSkipprRunDisplayScript(): string {
   return `
+      const RUN_KIND_LABELS = ${JSON.stringify(RUN_KIND_LABELS)};
       function runKindLabel(runKind, command) {
         const kind = String(runKind || command || "").trim().toLowerCase();
-        if (kind === "discover") { return "Discover"; }
-        if (kind === "model" || kind.startsWith("model")) { return "Model"; }
-        if (kind === "sync-all-once") { return "Sync all"; }
-        if (kind === "sync" || kind === "sync-once" || kind.startsWith("sync")) { return "Sync"; }
-        if (kind === "doctor") { return "Doctor"; }
+        if (Object.prototype.hasOwnProperty.call(RUN_KIND_LABELS, kind)) { return RUN_KIND_LABELS[kind]; }
+        if (kind.startsWith("model")) { return RUN_KIND_LABELS.model; }
+        if (kind.startsWith("sync") && kind !== "sync-all-once") { return RUN_KIND_LABELS["sync-once"]; }
         if (!kind) { return "Run"; }
         return kind.charAt(0).toUpperCase() + kind.slice(1);
       }

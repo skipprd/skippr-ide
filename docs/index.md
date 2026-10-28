@@ -15,7 +15,7 @@ brew install sde skipprd
 
 ## Workbench
 
-Discover, Sync, Model, Catalog, and Lineage panels call `sde`. Engine jobs (`discover` / `sync`) run through `skipprd`.
+Connections, Run, Deadletters, Results, Lineage, and Dashboards call `sde`. Engine jobs (`discover` / `sync`) run through `skipprd`.
 
 - [Skippr Data Engineer](https://data-engineer.skippr.io)
-- [Skipprd](https://elt.skippr.io)
+- [Skipprd](https://skippr.io)

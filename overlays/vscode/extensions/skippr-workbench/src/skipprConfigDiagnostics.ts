@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import { isSkipprConfigDocument, listPipelineDefinitionLines } from "./skipprPipelineCodeLens";
 import { effectiveEnvForSkipprConfig } from "./skipprDotEnv";
 import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
+import { mergeSkipprSpawnEnvWithLocalRuntimePlugins } from "./skipprLocalRuntimePlugins";
 import { buildCliCommand, formatCliCommand, skipprProjectRoot } from "./skipprRunner";
 import type { SkipprDoctorResult } from "./types";
 
@@ -144,7 +145,12 @@ export function registerSkipprConfigDiagnostics(context: vscode.ExtensionContext
           }
           const folder = workspaceFolderForConfigPath(configPath);
           const cwd = configPath ? path.dirname(configPath) : folder?.fsPath ?? "";
-          const env = mergeSkipprSpawnEnv(effectiveEnvForSkipprConfig(configPath, process.env), folder, undefined);
+          const env = await mergeSkipprSpawnEnvWithLocalRuntimePlugins(
+            effectiveEnvForSkipprConfig(configPath, process.env),
+            configPath,
+            undefined,
+            host.output
+          );
           const { code, json } = await runDoctorJson(cliPath, configPath, cwd, env);
           if (code !== 0 || !json?.checks) {
             return;
@@ -221,9 +227,13 @@ export function registerSkipprConfigDiagnostics(context: vscode.ExtensionContext
           vscode.window.showWarningMessage("Skippr CLI not found; interpolation diagnostics refreshed, doctor skipped.");
           return;
         }
-        const folder = folderOf(doc);
         const cwd = path.dirname(doc.uri.fsPath);
-        const env = mergeSkipprSpawnEnv(effectiveEnvForSkipprConfig(doc.uri.fsPath, process.env), folder, undefined);
+        const env = await mergeSkipprSpawnEnvWithLocalRuntimePlugins(
+          effectiveEnvForSkipprConfig(doc.uri.fsPath, process.env),
+          doc.uri.fsPath,
+          undefined,
+          host.output
+        );
         host.output.info(`$ ${formatCliCommand(cliPath, ["--config", doc.uri.fsPath, "doctor", "--output", "json"])}`);
         const { code, json } = await runDoctorJson(cliPath, doc.uri.fsPath, cwd, env);
         if (code === 0 && json?.checks) {

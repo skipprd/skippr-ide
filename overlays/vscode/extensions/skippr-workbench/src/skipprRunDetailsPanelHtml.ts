@@ -262,13 +262,13 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         if (!run) { return cloudLockBanner() + '<div class="empty">No run selected.</div>'; }
         const timelineRows = (run.events || [])
           .filter(e => e.event !== "sync_status")
-          .map(e => [e.timestamp || "", e.event, e.namespace || e.pipeline || "", eventDetail(e)]);
-        if (run.status === "error" && run.detail && !timelineRows.some(row => row[3] === run.detail)) {
-          timelineRows.push([run.finishedAt ? new Date(run.finishedAt).toISOString() : "", "run_error", run.pipeline || "", run.detail]);
+          .map(e => [e.timestamp || "", e.namespace || e.pipeline || "", e.description || e.event]);
+        if (run.status === "error" && run.detail && !timelineRows.some(row => row[2] === run.detail)) {
+          timelineRows.push([run.finishedAt ? new Date(run.finishedAt).toISOString() : "", run.pipeline || "", run.detail]);
         }
         return cloudLockBanner() + header(run) + '<div class="stats">' +
           stat("Status", statusBadge(run.status)) + stat("Duration", duration(run)) + stat("Rows", num(run.totalRows ?? run.rowsWritten)) + stat("Bytes", num(run.bytesTotal)) + stat("Freshness", run.freshness && run.freshness.latest_iso ? new Date(run.freshness.latest_iso).toLocaleString() : "n/a") + stat("Deadletters", num(run.deadletters && run.deadletters.total)) +
-        '</div>' + histogram(run) + table(timelineRows, ["Time", "Event", "Scope", "Detail"]);
+        '</div>' + histogram(run) + table(timelineRows, ["Time", "Scope", "Detail"]);
       }
       function statusBadge(status) {
         const value = status || "idle";
@@ -370,33 +370,15 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         ]);
         const rows = (run.events || [])
           .filter(e => significant.has(e.event) || (e.event === "tool_end" && e.status === "error"))
-          .map(e => [e.timestamp || "", modelEventLabel(e), modelEventDetail(e)]);
-        if (run.status === "error" && run.detail && !rows.some(row => row[2] === run.detail)) {
-          rows.push([run.finishedAt ? new Date(run.finishedAt).toISOString() : "", "Run failed", run.detail]);
+          .map(e => [e.timestamp || "", e.description || e.event]);
+        if (run.status === "error" && run.detail && !rows.some(row => row[1] === run.detail)) {
+          rows.push([run.finishedAt ? new Date(run.finishedAt).toISOString() : "", run.detail]);
         }
         return rows;
       }
-      function modelEventLabel(event) {
-        switch (event.event) {
-          case "model_start": return "Started";
-          case "model_thread_resumed": return "Thread resumed";
-          case "model_preflight": return "dbt preflight";
-          case "model_authoring_start": return "Authoring";
-          case "model_file_changed": return "Files changed";
-          case "model_review_ready": return "Review ready";
-          case "model_validation_start": return "Validation started";
-          case "model_validation":
-          case "model_validation_complete": return "Validation";
-          case "model_phase_changed": return event.phase ? "Phase: " + event.phase : "Phase changed";
-          case "model_complete": return "Complete";
-          case "model_error": return "Error";
-          case "tool_end": return (event.clean_name || event.name || "Tool") + " failed";
-          default: return event.event || "Event";
-        }
-      }
       function modelTimeline(rows) {
         if (!rows.length) { return ""; }
-        return '<div class="model-section-title">Timeline</div>' + table(rows, ["Time", "Event", "Detail"]);
+        return '<div class="model-section-title">Timeline</div>' + table(rows, ["Time", "Event"]);
       }
       function modelFileSummary(run) {
         const initial = run.modelFileSummary || {};
@@ -478,42 +460,6 @@ export function renderSkipprRunDetailsPanelHtml(viewKind: SkipprRunDetailsViewKi
         const raw = value == null ? "" : String(value);
         const html = raw.indexOf("<") >= 0 ? raw : esc(raw);
         return '<section class="stat"><div class="label">' + esc(label) + '</div><div class="value">' + html + '</div></section>';
-      }
-      function eventDetail(event) {
-        return event.error || event.failure_summary || event.repair_status || event.phase || "";
-      }
-      function modelEventDetail(event) {
-        if (event.event === "tool_start") {
-          return (event.clean_name || event.name || "tool") + " running";
-        }
-        if (event.event === "tool_end") {
-          return (event.clean_name || event.name || "tool") + " " + (event.status || "finished") + (event.error ? ": " + event.error : "");
-        }
-        if (event.event === "model_preflight") {
-          const pre = event.model_preflight || {};
-          return pre.ok ? "dbt ready" : (pre.remediation || event.error || "dbt preflight failed");
-        }
-        if (event.event === "model_thread_resumed") {
-          return "thread " + (event.thread_id || "unknown") + " resumed";
-        }
-        if (event.event === "model_file_changed" || event.event === "model_review_ready") {
-          const files = event.changed_files || [];
-          const created = event.created_count != null ? event.created_count : files.filter(file => file.change_kind === "created").length;
-          const modified = event.modified_count != null ? event.modified_count : files.filter(file => file.change_kind === "modified").length;
-          const deleted = event.deleted_count != null ? event.deleted_count : files.filter(file => file.change_kind === "deleted").length;
-          return event.summary || (files.length + " files: " + created + " created, " + modified + " modified, " + deleted + " deleted");
-        }
-        if (event.event === "model_validation" || event.event === "model_validation_complete") {
-          const validation = event.validation || {};
-          return validation.message || (validation.ok ? "validation passed" : "validation failed");
-        }
-        if (event.event === "model_validation_start") {
-          return "validation started";
-        }
-        if (event.event === "model_authoring_start") {
-          return "agent authoring started";
-        }
-        return event.error || event.failure_summary || event.summary || event.repair_status || event.phase || "";
       }
       function table(rows, headings) {
         const head = headings ? '<tr>' + headings.map(h => '<th>' + esc(h) + '</th>').join("") + '</tr>' : "";

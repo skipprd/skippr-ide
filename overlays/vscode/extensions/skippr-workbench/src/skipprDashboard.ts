@@ -1,17 +1,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { SKIPPR_AGENT_HOST_SESSION_TYPE } from "./skipprAgentHost";
+import { renderDashboardFormHtml, SKIPPR_DASHBOARDS_FORM_VIEW_ID, dashboardFormSetModeMessage } from "./skipprDashboardFormHtml";
 import { renderDashboardPanelHtml } from "./skipprDashboardPanelHtml";
 import { pipelineName } from "./skipprRunner";
 
 export const SKIPPR_DASHBOARDS_VIEW_ID = "skippr.dashboards";
-export const SKIPPR_DASHBOARDS_CONTAINER_ID = "skippr.dashboards.activity";
+export const SKIPPR_DASHBOARDS_CONTAINER_ID = "skippr.dashboards.panel";
 export const SKIPPR_BUSINESS_DASHBOARD_PANEL_TYPE = "skippr.businessDashboard";
 export const EXPERIENCE_MODE_KEY = "skippr.experienceMode";
 export const BUSINESS_LIGHT_THEME_KEY = "skippr.businessUser.forceLightTheme";
 export const SAVED_COLOR_THEME_KEY = "skippr.businessUser.savedColorTheme";
 export const DASHBOARD_FILTERS_STATE_KEY = "skippr.dashboardFilters";
-export const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
 
 const DASHBOARD_API_VERSION = "skippr.dev/dashboard/v1";
 
@@ -553,7 +554,130 @@ export function registerDashboardContributions(
     engineerDashboardPanel.webview.postMessage({ type: "dashboardList", command: "refresh", id });
   };
 
+  let dashboardFormView: vscode.WebviewView | undefined;
+  let pendingDashboardFormMode: ReturnType<typeof dashboardFormSetModeMessage> | undefined;
+  const postDashboardFormMode = () => {
+    if (!dashboardFormView || !pendingDashboardFormMode) {
+      return;
+    }
+    dashboardFormView.webview.postMessage(pendingDashboardFormMode);
+  };
+  const revealDashboardForm = async (
+    mode: "create" | "addFromTable" | "addFromEditor" | "model",
+    dashId?: string
+  ) => {
+    pendingDashboardFormMode = dashboardFormSetModeMessage(mode, dashId);
+    await vscode.commands.executeCommand(`${SKIPPR_DASHBOARDS_FORM_VIEW_ID}.focus`);
+    postDashboardFormMode();
+  };
+
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(SKIPPR_DASHBOARDS_FORM_VIEW_ID, {
+      resolveWebviewView(webviewView) {
+        dashboardFormView = webviewView;
+        webviewView.webview.options = { enableScripts: true };
+        webviewView.webview.html = renderDashboardFormHtml();
+        webviewView.webview.onDidReceiveMessage(async (msg: {
+          command?: string;
+          mode?: string;
+          id?: string;
+          title?: string;
+          pipeline?: string;
+          table?: string;
+          goal?: string;
+        }) => {
+          if (msg.command === "ready") {
+            postDashboardFormMode();
+            return;
+          }
+          if (msg.command !== "submit") {
+            return;
+          }
+          const root = getRoot();
+          if (!root) {
+            return;
+          }
+          if (msg.mode === "create") {
+            const newId = msg.id?.trim();
+            if (!newId) {
+              vscode.window.showWarningMessage("Dashboard id is required.");
+              return;
+            }
+            const filePath = dashboardFilePath(root, newId);
+            if (fs.existsSync(filePath)) {
+              vscode.window.showWarningMessage(`Dashboard ${newId} already exists.`);
+              return;
+            }
+            writeDashboardYaml(filePath, {
+              api_version: DASHBOARD_API_VERSION,
+              id: newId,
+              title: msg.title?.trim() || newId,
+              pipeline: msg.pipeline?.trim() || "bike_hire",
+              published: false,
+              filters: [],
+              widgets: []
+            });
+            tree.refresh();
+            openEditorPanel(newId);
+            return;
+          }
+          if (msg.mode === "addFromTable") {
+            const table = msg.table?.trim();
+            const dashId = msg.id?.trim();
+            if (!table || !dashId) {
+              vscode.window.showWarningMessage("Table name and dashboard id are required.");
+              return;
+            }
+            const sql = `SELECT *\nFROM ${table}\nLIMIT 100`;
+            appendWidgetYaml(root, dashId, table, "sql", sql);
+            tree.refresh();
+            openEditorPanel(dashId);
+            return;
+          }
+          if (msg.mode === "addFromEditor") {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+              vscode.window.showWarningMessage("Open a SQL or dbt file in a workspace first.");
+              return;
+            }
+            const rel = path.relative(root, editor.document.uri.fsPath).replace(/\\/g, "/");
+            const targetDash = msg.id?.trim();
+            if (!targetDash) {
+              vscode.window.showWarningMessage("Dashboard id is required.");
+              return;
+            }
+            const sql = editor.selection.isEmpty
+              ? editor.document.getText().trim()
+              : editor.document.getText(editor.selection).trim();
+            if (!sql) {
+              vscode.window.showWarningMessage("No SQL found in the active editor.");
+              return;
+            }
+            appendWidgetYaml(root, targetDash, path.basename(rel), "sql", sql);
+            tree.refresh();
+            openEditorPanel(targetDash);
+            return;
+          }
+          if (msg.mode === "model") {
+            const goal = msg.goal?.trim();
+            const p = msg.pipeline ? pipelineName(msg.pipeline) : undefined;
+            if (!goal || !p) {
+              vscode.window.showWarningMessage("Modeling goal and pipeline are required.");
+              return;
+            }
+            await vscode.commands.executeCommand(`workbench.action.chat.openNewSessionSidebar.${SKIPPR_AGENT_HOST_SESSION_TYPE}`, {
+              prompt: `Extend dbt models for a dashboard: ${goal}. Pipeline: ${p}.`,
+              initialSessionOptions: { mode: "agent", pipeline: p }
+            });
+          }
+        });
+        webviewView.onDidDispose(() => {
+          if (dashboardFormView === webviewView) {
+            dashboardFormView = undefined;
+          }
+        });
+      }
+    }),
     vscode.commands.registerCommand("skippr.dashboard.open", (dashId?: string) => {
       if (!dashId) {
         return;
@@ -564,90 +688,16 @@ export function registerDashboardContributions(
       await openBusinessDashboardPanel(context);
     }),
     vscode.commands.registerCommand("skippr.dashboard.create", async () => {
-      const root = getRoot();
-      if (!root) {
-        return;
-      }
-      const newId = await vscode.window.showInputBox({ prompt: "Dashboard id (filename)", placeHolder: "revenue_overview" });
-      if (!newId?.trim()) {
-        return;
-      }
-      const title = (await vscode.window.showInputBox({ prompt: "Dashboard title", value: newId })) ?? newId;
-      const pipeline =
-        (await vscode.window.showInputBox({ prompt: "Pipeline name", placeHolder: "bike_hire" })) ?? "bike_hire";
-      const filePath = dashboardFilePath(root, newId.trim());
-      if (fs.existsSync(filePath)) {
-        vscode.window.showWarningMessage(`Dashboard ${newId} already exists.`);
-        return;
-      }
-      writeDashboardYaml(filePath, {
-        api_version: DASHBOARD_API_VERSION,
-        id: newId.trim(),
-        title,
-        pipeline,
-        published: false,
-        filters: [],
-        widgets: []
-      });
-      tree.refresh();
-      openEditorPanel(newId.trim());
+      await revealDashboardForm("create");
     }),
     vscode.commands.registerCommand("skippr.dashboard.addFromTable", async () => {
-      const root = getRoot();
-      if (!root) {
-        return;
-      }
-      const table = await vscode.window.showInputBox({ prompt: "Table name (schema.table or table)" });
-      const dashId = await vscode.window.showInputBox({ prompt: "Dashboard id to add widget to" });
-      if (!table?.trim() || !dashId?.trim()) {
-        return;
-      }
-      const sql = `SELECT *\nFROM ${table.trim()}\nLIMIT 100`;
-      appendWidgetYaml(root, dashId.trim(), table.trim(), "sql", sql);
-      tree.refresh();
-      openEditorPanel(dashId.trim());
+      await revealDashboardForm("addFromTable");
     }),
     vscode.commands.registerCommand("skippr.dashboard.addFromEditor", async (dashId?: string) => {
-      const editor = vscode.window.activeTextEditor;
-      const root = getRoot();
-      if (!editor || !root) {
-        vscode.window.showWarningMessage("Open a SQL or dbt file in a workspace first.");
-        return;
-      }
-      const rel = path.relative(root, editor.document.uri.fsPath).replace(/\\/g, "/");
-      const targetDash =
-        typeof dashId === "string" && dashId.trim()
-          ? dashId.trim()
-          : (await vscode.window.showInputBox({ prompt: "Dashboard id" }))?.trim();
-      if (!targetDash) {
-        return;
-      }
-      const sql = editor.selection.isEmpty ? editor.document.getText().trim() : editor.document.getText(editor.selection).trim();
-      if (!sql) {
-        vscode.window.showWarningMessage("No SQL found in the active editor.");
-        return;
-      }
-      appendWidgetYaml(root, targetDash, path.basename(rel), "sql", sql);
-      tree.refresh();
-      openEditorPanel(targetDash);
+      await revealDashboardForm("addFromEditor", typeof dashId === "string" ? dashId : undefined);
     }),
     vscode.commands.registerCommand("skippr.dashboard.modelForDashboard", async () => {
-      const goal = await vscode.window.showInputBox({
-        prompt: "Modeling goal for dashboard backing data",
-        placeHolder: "Create a mart for daily revenue by region"
-      });
-      if (!goal) {
-        return;
-      }
-      const pipelineRaw = await vscode.window.showInputBox({ prompt: "Pipeline" });
-      const p = pipelineRaw ? pipelineName(pipelineRaw) : undefined;
-      if (!p) {
-        return;
-      }
-      await vscode.commands.executeCommand(`workbench.action.chat.openNewSessionSidebar.${SKIPPR_AGENT_HOST_SESSION_TYPE}`, {
-        prompt: `Extend dbt models for a dashboard: ${goal}. Pipeline: ${p}.`,
-        initialSessionOptions: { mode: "agent", pipeline: p }
-      });
+      await revealDashboardForm("model");
     })
   );
 }

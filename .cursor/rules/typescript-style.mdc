@@ -1,0 +1,18 @@
+---
+description: TypeScript style for Skippr IDE overlays — construction, one design, overlay SoT
+globs: "**/*.{ts,tsx}"
+alwaysApply: false
+---
+
+# TypeScript (Skippr IDE)
+
+- **Overlay SoT:** edit `overlays/vscode/…`. Do not patch generated `vscode/` copies or packaged app trees.
+- **One design:** one type, module, and UI path per job. If a parallel helper exists, delete it in the same change. Do not wrap the old path.
+- **Design by construction:** encode invariants in the type system (string unions, discriminated unions, branded types). Prefer a `tsc` error over runtime “don’t call this wrong.” See `skipprRunner.type-tests.ts`.
+- Flat functions over premature classes. Extract an interface only when there are (or will immediately be) multiple implementors.
+- Fail closed at trust boundaries (auth, CLI spawn, config). Silent `catch` that continues is a bug.
+- No `as any` to silence the checker. Narrow with unions or parse at the edge.
+- Prefer deleting obsolete modules over `// legacy` or dual command+palette handlers for the same choice.
+- Match existing formatting; do not reformat unrelated files.
+- Product UI: in-context next to the action. Do not add command-palette/quick-pick flows for normal choices.
+- Comments explain **why**, not what the type already states.

@@ -1,0 +1,13 @@
+---
+description: TDD for Skippr IDE logic — failing tests first; no kernel sim/fuzz stack
+alwaysApply: true
+---
+
+# TDD (Skippr IDE)
+
+1. Write the **failing test first** for domain logic (run state, JWT, schema, CLI args, cancel, lineage, locks). Do not implement that logic without it.
+2. **Unit** tests with colocated `*.test.ts` and `node:test`. **Type** tests (`*.type-tests.ts`, `@ts-expect-error`) for illegal combinations. Skip a test only with a named reason (pure HTML copy, docs-only, generated `vscode/`).
+3. New workbench `*.test.ts` files are picked up by `overlays/vscode/extensions/skippr-workbench/package.json` `scripts.test` (`rm -rf out && tsc && node --test 'out/**/*.test.js'`).
+4. MUST NOT `sleep`, wall-clock races, or live `sde`/`skipprd`/network as unit correctness. Live engine loops are developer verification.
+5. Red → green → refactor; hard-cutover obsolete tests with the code. If a test encoded the discarded path, replace it rather than keeping both.
+6. UI, layout, and webview HTML: verify in the running app (`npm run dev`), not by inventing a simulation harness. Skill: **`tdd-ide`**.

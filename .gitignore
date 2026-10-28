@@ -1,8 +1,14 @@
 # OS/editor noise
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
+Desktop.ini
 *.swp
 *.swo
+*~
+.idea/
+*.iml
 
 # Dependencies
 node_modules/
@@ -11,8 +17,15 @@ node_modules/
 dist/
 out/
 .build/
+*.tsbuildinfo
 *.vsix
 *.tgz
+*.zip
+
+# TypeScript / VitePress
+docs/node_modules/
+docs/.vitepress/dist
+docs/.vitepress/cache
 
 # VS Code test/runtime artifacts
 .vscode-test/
@@ -25,6 +38,11 @@ coverage/
 # Generated VS Code checkout (bootstrap). Overlay under overlays/vscode is SoT.
 /vscode/
 
+# Packaged desktop app trees (gulp vscode-*-min-ci). Do not commit.
+/VSCode-darwin-*/
+/VSCode-linux-*/
+/VSCode-win32-*/
+
 # Local environment and logs
 .env
 .env.*
@@ -33,6 +51,11 @@ coverage/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.skippr/
 
-rust-core/target
-artifacts
+# Rust
+/target/
+**/*.rs.bk
+
+# Package zips and CI outputs
+/artifacts/

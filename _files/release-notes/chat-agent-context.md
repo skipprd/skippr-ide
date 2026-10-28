@@ -10,6 +10,6 @@ Requires a `skipprd` build that includes the companion `skipprd` / `react` chat-
 ## Human review
 
 1. `npm run apply:overlay` then `npm run dev` from `skippr-ide/vscode`; launch Extension Development Host.
-2. Enable `skippr.dev.useLocalSkipprd`; open `sdgsdgsdsd` with root `skippr.yml`.
+2. Enable `skippr.dev.useLocalSde`; open `sdgsdgsdsd` with root `skippr.yml`.
 3. Open Skippr Agent (`agent-host-skippr`), mode **ask**, pipeline **bike_hire**.
 4. Run verification steps T1–T7 in `skipprd/_files/release-notes/chat-agent-context.md`.

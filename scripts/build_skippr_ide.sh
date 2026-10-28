@@ -13,9 +13,6 @@ fi
 
 ensure_vscode_node "${VSCODE_DIR}"
 
-echo "Compiling Rust core..."
-cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml"
-
 echo "Installing JS dependencies..."
 cd "${VSCODE_DIR}"
 npm install

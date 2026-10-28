@@ -15,8 +15,7 @@
     "package:linux:armhf": "bash scripts/package_skippr_ide.sh linux armhf",
     "package:win32:x64": "bash scripts/package_skippr_ide.sh win32 x64",
     "package:win32:arm64": "bash scripts/package_skippr_ide.sh win32 arm64",
-    "verify:fork": "bash scripts/verify_fork_setup.sh",
-    "build:rust": "cargo build --manifest-path rust-core/Cargo.toml"
+    "verify:fork": "bash scripts/verify_fork_setup.sh"
   },
   "devDependencies": {
     "@types/node": "^20.14.2"

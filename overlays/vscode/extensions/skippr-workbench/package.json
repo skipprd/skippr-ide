@@ -12,16 +12,6 @@
     "onStartupFinished"
   ],
   "contributes": {
-    "configuration": {
-      "title": "Skippr",
-      "properties": {
-        "skippr.businessUser.forceLightTheme": {
-          "type": "boolean",
-          "default": true,
-          "description": "When entering Business User mode, switch to a light workbench theme."
-        }
-      }
-    },
     "configurationDefaults": {
       "workbench.startupEditor": "none",
       "workbench.welcomePage.experimentalOnboarding": false,
@@ -50,14 +40,6 @@
         "title": "Skippr: Open Welcome"
       },
       {
-        "command": "skippr.cloud.open",
-        "title": "Skippr: Open Cloud Workspace"
-      },
-      {
-        "command": "skippr.cloud.create",
-        "title": "Skippr: Create Cloud Workspace"
-      },
-      {
         "command": "skippr.file.newCloudWorkspace",
         "title": "New Cloud Workspace..."
       },
@@ -80,22 +62,6 @@
       {
         "command": "skippr.auth.account",
         "title": "Skippr: Account"
-      },
-      {
-        "command": "skippr.open.discover",
-        "title": "Skippr: Show Run Activity"
-      },
-      {
-        "command": "skippr.open.sync",
-        "title": "Skippr: Show Run Activity"
-      },
-      {
-        "command": "skippr.open.model",
-        "title": "Skippr: Model"
-      },
-      {
-        "command": "skippr.open.catalog",
-        "title": "Skippr: Catalog"
       },
       {
         "command": "skippr.open.lineage",
@@ -128,10 +94,6 @@
       {
         "command": "skippr.run.doctor",
         "title": "Skippr: Doctor"
-      },
-      {
-        "command": "skippr.run.pickPipelineAction",
-        "title": "Skippr: Run pipeline…"
       },
       {
         "command": "skippr.showPipelineRunMenu",
@@ -221,11 +183,6 @@
         "icon": "$(play)"
       },
       {
-        "command": "skippr.sql.pickRunMode",
-        "title": "Run mode",
-        "icon": "$(chevron-down)"
-      },
-      {
         "command": "skippr.sql.setRunModeSql",
         "title": "SQL"
       },
@@ -261,29 +218,13 @@
         "command": "skippr.dashboard.modelForDashboard",
         "title": "Skippr: Model for Dashboard"
       }
-      ],
-    "submenus": [
-      {
-        "id": "skippr.sql.runMode",
-        "label": "Run DBT SQL mode"
-      }
     ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "skipprConnectionsActivity",
-          "title": "Connections",
+          "title": "Skippr",
           "icon": "media/plug.svg"
-        },
-        {
-          "id": "skipprLineageActivity",
-          "title": "Lineage",
-          "icon": "media/lineage-graph.svg"
-        },
-        {
-          "id": "skippr.dashboards.activity",
-          "title": "Dashboards",
-          "icon": "media/skippr.svg"
         }
       ],
       "panel": [
@@ -301,6 +242,16 @@
           "id": "skippr.query.results.panel",
           "title": "Results",
           "icon": "media/skippr.svg"
+        },
+        {
+          "id": "skippr.lineage.panel",
+          "title": "Lineage",
+          "icon": "media/lineage-graph.svg"
+        },
+        {
+          "id": "skippr.dashboards.panel",
+          "title": "Dashboards",
+          "icon": "media/skippr.svg"
         }
       ]
     },
@@ -311,29 +262,6 @@
           "name": "Connections",
           "type": "webview",
           "order": 1
-        }
-      ],
-      "skipprLineageActivity": [
-        {
-          "id": "skippr.lineageLaunch",
-          "name": "Lineage",
-          "type": "webview",
-          "order": 1
-        }
-      ],
-      "skippr.dashboards.activity": [
-        {
-          "id": "skippr.dashboards",
-          "name": "Dashboards",
-          "order": 1
-        }
-      ],
-      "debug": [
-        {
-          "id": "skippr.runStatus",
-          "name": "",
-          "type": "webview",
-          "order": 50
         }
       ],
       "skippr.run.timeline.panel": [
@@ -354,6 +282,12 @@
           "name": "Schema review",
           "type": "webview",
           "order": 3
+        },
+        {
+          "id": "skippr.runStatus",
+          "name": "",
+          "type": "webview",
+          "order": 0
         }
       ],
       "skippr.run.deadletters.panel": [
@@ -371,9 +305,40 @@
           "type": "webview",
           "order": 1
         }
+      ],
+      "skippr.lineage.panel": [
+        {
+          "id": "skippr.lineageLaunch",
+          "name": "Lineage",
+          "type": "webview",
+          "order": 1
+        },
+        {
+          "id": "skippr.lineageGraph",
+          "name": "Graph",
+          "type": "webview",
+          "order": 2
+        }
+      ],
+      "skippr.dashboards.panel": [
+        {
+          "id": "skippr.dashboards",
+          "name": "Dashboards",
+          "order": 1
+        },
+        {
+          "id": "skippr.dashboards.form",
+          "name": "New dashboard",
+          "type": "webview",
+          "order": 2
+        }
       ]
     },
     "submenus": [
+      {
+        "id": "skippr.sql.runMode",
+        "label": "Run DBT SQL mode"
+      },
       {
         "id": "skippr.debug.toolbar",
         "label": "Skippr"
@@ -434,7 +399,7 @@
       ],
       "skippr.debug.toolbar": [
         {
-          "command": "skippr.run.pickPipelineAction",
+          "submenu": "skippr.pipelineRun",
           "group": "1_run@5"
         },
         {
@@ -470,6 +435,11 @@
         }
       ],
       "editor/context": [
+        {
+          "submenu": "skippr.pipelineRun",
+          "group": "skippr@1",
+          "when": "resourceFilename =~ /skippr.ya?ml/"
+        },
         {
           "command": "skippr.sql.runSelection",
           "group": "navigation@9",
@@ -525,34 +495,40 @@
           "command": "skippr.auth.account"
         },
         {
-          "command": "skippr.open.discover"
+          "command": "skippr.file.newCloudWorkspace",
+          "when": "false"
         },
         {
-          "command": "skippr.open.sync"
+          "command": "skippr.file.openCloudWorkspace",
+          "when": "false"
         },
         {
-          "command": "skippr.open.model"
+          "command": "skippr.run.discoverPipeline",
+          "when": "false"
         },
         {
-          "command": "skippr.run.discoverPipeline"
+          "command": "skippr.run.syncPipelineOnce",
+          "when": "false"
         },
         {
-          "command": "skippr.run.syncPipelineOnce"
+          "command": "skippr.run.syncAllOnce",
+          "when": "false"
         },
         {
-          "command": "skippr.run.syncAllOnce"
+          "command": "skippr.run.startSyncPipeline",
+          "when": "false"
         },
         {
-          "command": "skippr.run.startSyncPipeline"
+          "command": "skippr.run.modelPipeline",
+          "when": "false"
         },
         {
-          "command": "skippr.run.modelPipeline"
+          "command": "skippr.run.doctor",
+          "when": "false"
         },
         {
-          "command": "skippr.run.doctor"
-        },
-        {
-          "command": "skippr.run.stopSyncPipeline"
+          "command": "skippr.run.stopSyncPipeline",
+          "when": "false"
         },
         {
           "command": "skippr.cli.install"
@@ -573,10 +549,59 @@
           "command": "skippr.openConfig"
         },
         {
-          "command": "skippr.editPipelineEnv"
+          "command": "skippr.editPipelineEnv",
+          "when": "false"
         },
         {
           "command": "skippr.refreshDiagnostics"
+        },
+        {
+          "command": "skippr.open.lineage",
+          "when": "false"
+        },
+        {
+          "command": "skippr.schemaDiff.openReview",
+          "when": "false"
+        },
+        {
+          "command": "skippr.sql.askDataQuestion",
+          "when": "false"
+        },
+        {
+          "command": "skippr.sql.runSelection",
+          "when": "false"
+        },
+        {
+          "command": "skippr.sql.runDocument",
+          "when": "false"
+        },
+        {
+          "command": "skippr.sql.runDbtDocument",
+          "when": "false"
+        },
+        {
+          "command": "skippr.sql.setRunModeSql",
+          "when": "false"
+        },
+        {
+          "command": "skippr.sql.setRunModeTests",
+          "when": "false"
+        },
+        {
+          "command": "skippr.dashboard.create",
+          "when": "false"
+        },
+        {
+          "command": "skippr.dashboard.addFromTable",
+          "when": "false"
+        },
+        {
+          "command": "skippr.dashboard.addFromEditor",
+          "when": "false"
+        },
+        {
+          "command": "skippr.dashboard.modelForDashboard",
+          "when": "false"
         }
       ]
     },
@@ -590,20 +615,37 @@
         "program": "./out/extension.js",
         "configurationAttributes": {
           "launch": {
-            "required": ["type", "request", "name", "skipprKind"],
+            "required": [
+              "type",
+              "request",
+              "name",
+              "skipprKind"
+            ],
             "properties": {
               "type": {
-                "enum": ["skippr"]
+                "enum": [
+                  "skippr"
+                ]
               },
               "request": {
-                "enum": ["launch"]
+                "enum": [
+                  "launch"
+                ]
               },
               "name": {
                 "type": "string"
               },
               "skipprKind": {
                 "type": "string",
-                "enum": ["discover", "sync", "sync-once", "sync-all-once", "model", "doctor", "test"],
+                "enum": [
+                  "discover",
+                  "sync",
+                  "sync-once",
+                  "sync-all-once",
+                  "model",
+                  "doctor",
+                  "test"
+                ],
                 "description": "discover; sync or sync-once for one sync pass; sync-all-once; model; doctor; test (dbt)."
               },
               "pipeline": {
@@ -616,7 +658,12 @@
               },
               "logLevel": {
                 "type": "string",
-                "enum": ["debug", "info", "warn", "error"],
+                "enum": [
+                  "debug",
+                  "info",
+                  "warn",
+                  "error"
+                ],
                 "description": "Log level passed to Skippr."
               },
               "skipprExtraArgs": {
@@ -747,6 +794,11 @@
     "configuration": {
       "title": "Skippr IDE",
       "properties": {
+        "skippr.businessUser.forceLightTheme": {
+          "type": "boolean",
+          "default": true,
+          "description": "When entering Business User mode, switch to a light workbench theme."
+        },
         "skippr.workspacePath": {
           "type": "string",
           "default": "",
@@ -765,17 +817,22 @@
         "skippr.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Optional advanced override for the Skippr CLI path. Leave empty to use an installed skippr binary on PATH; see skippr.dev.useLocalSkipprd to build from a local skipprd checkout."
+          "description": "Optional override for the sde binary. Leave empty to use sde on PATH (~/.skippr/bin/sde) or cargo run -p sde from a local sde checkout when skippr.dev.useLocalSde is true."
+        },
+        "skippr.dev.sdeRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a local sde checkout (workspace Cargo.toml). Also honored via SKIPPR_SDE_ROOT."
         },
         "skippr.dev.reactRoot": {
           "type": "string",
           "default": "",
-          "description": "Optional path to a local react checkout for cargo path patches (defaults to ../react next to skipprd). Also honored via SKIPPR_REACT_ROOT."
+          "description": "Optional path to a local react checkout (defaults to ../react next to skipprd). Also honored via SKIPPR_REACT_ROOT."
         },
-        "skippr.dev.useLocalSkipprd": {
+        "skippr.dev.useLocalSde": {
           "type": "boolean",
           "default": true,
-          "description": "When true, run skippr via `cargo run` from a detected local skipprd repo instead of an installed skippr binary. Turn off to force an installed release binary. Requires CodeArtifact auth (CARGO_REGISTRIES_REACT_CARGO_TOKEN) or a sibling ../react checkout."
+          "description": "When true, run sde via `cargo run -p sde` from a detected local sde checkout instead of an installed sde binary. Turn off to force Homebrew/PATH sde. skipprd checkout is still used to build runtime plugins."
         },
         "skippr.dev.skipprdRoot": {
           "type": "string",
@@ -799,7 +856,12 @@
         },
         "skippr.logLevel": {
           "type": "string",
-          "enum": ["debug", "info", "warn", "error"],
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
           "default": "info",
           "description": "Log level passed to Skippr run commands."
         },
@@ -846,7 +908,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -w -p ./",
-    "test": "tsc -p ./ && node --test out/skipprLineageSchema.test.js out/skipprRunMetricsChart.test.js out/skipprRunDisplay.test.js out/skipprRunCancel.test.js out/skipprJwt.test.js out/skipprWorkspaceRunLock.test.js"
+    "test": "rm -rf out && tsc -p ./ && node --test --test-force-exit 'out/**/*.test.js'"
   },
   "devDependencies": {
     "@types/node": "^20.14.2",

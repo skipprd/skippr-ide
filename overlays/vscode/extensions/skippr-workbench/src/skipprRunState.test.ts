@@ -1,10 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { historyExcludingCurrent, type SkipprRunHistorySummary } from "./skipprRunState";
+import { historyExcludingCurrent } from "./skipprRunHistoryList";
 
-function row(
-  overrides: Partial<SkipprRunHistorySummary> & Pick<SkipprRunHistorySummary, "id">
-): SkipprRunHistorySummary {
+type HistoryRow = {
+  id: string;
+  command: string;
+  runKind: string;
+  label: string;
+  status: string;
+  startedAt: number;
+};
+
+function row(overrides: Partial<HistoryRow> & Pick<HistoryRow, "id">): HistoryRow {
   return {
     command: "sync",
     runKind: "sync",

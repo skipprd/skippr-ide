@@ -55,9 +55,6 @@ declare module 'vscode' {
 }
 EOF
 
-echo "Compiling Rust core..."
-cargo build --manifest-path "${ROOT_DIR}/rust-core/Cargo.toml"
-
 echo "Compiling built-in skippr-workbench..."
 (cd "${VSCODE_DIR}/extensions/skippr-workbench" && npm run compile)
 

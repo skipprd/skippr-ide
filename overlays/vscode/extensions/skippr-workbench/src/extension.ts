@@ -4,9 +4,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
 import {
-  installSkipprCli,
+  installSde,
   isSkipprRunKind,
-  resolveSkipprCli,
+  resolveSde,
   runSkipprJson,
   skipprProjectRoot,
   showSkipprVersion,
@@ -15,25 +15,31 @@ import {
   PipelineName,
   pipelineName,
   startSkipprRun,
-  updateSkipprCli
+  updateSde
 } from "./skipprRunner";
 import {
   SkipprPipelineCodeLensProvider,
   skipprConfigDocumentSelector
 } from "./skipprPipelineCodeLens";
 import { resolvePipelineForFile, type SkipprFilePipelineResolution } from "./skipprFilePipelineIndex";
-import type { SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
+import { isSkipprPipelineRunCommand, type SkipprPipelineRunCommand } from "./skipprPipelineRunContext";
 import { getSkipprPipelineLensTarget } from "./skipprPipelineLensContext";
-import { openSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
+import { registerSkipprPipelineRunMenu } from "./skipprPipelineActionMenu";
 import { registerSkipprPipelineTestControllers } from "./skipprPipelineTestController";
 import { runSkipprJsonLines, type SkipprTestListJson } from "./skipprDbtTestController";
 import { parseShellArgs } from "./skipprCliArgs";
+import { VECTOR_INGEST_KEY, buildSdeMetadataApplyArgs, buildVectorIngestArgs } from "./skipprSdeArgv";
 import {
   authSessionFromCredentials,
   credentialsAreValid,
   loadCliCompatibleCredentials
 } from "./skipprAuthHydrate";
-import { mergeSkipprSpawnEnv, workspaceFolderForConfigPath } from "./skipprEnv";
+import { workspaceFolderForConfigPath } from "./skipprEnv";
+import { SKIPPR_AGENT_HOST_SESSION_TYPE } from "./skipprAgentHost";
+import { runKindLabel, type SkipprRunnableKind } from "./skipprRunKinds";
+import { describeRunEvent } from "./skipprRunEventDescribe";
+import { SKIPPR_BEFORE_SCHEME } from "./skipprAgentFileDiff";
+import { SkipprBeforeContentProvider, openSkipprAgentFileDiff } from "./skipprAgentFileDiffHost";
 import {
   cloudWorkspacePreferred,
   collectWorkspacePrefsFromLocal,
@@ -45,8 +51,6 @@ import {
   listCloudWorkspaces,
   loadCloudContextFromActiveFile,
   openCloudWorkspace,
-  promptAndCreateCloudWorkspace,
-  promptAndOpenCloudWorkspace,
   saveActiveCloudWorkspace,
   setActiveCloudWorkspace,
   setCloudWorkbenchContext,
@@ -100,7 +104,6 @@ import { renderSkipprConnectionsPanelHtml } from "./skipprConnectionsPanelHtml";
 import {
   compileDbtSqlForQuery,
   detectDbtSqlFile,
-  dbtRunModeMenuTitle,
   DbtEditorRunMode,
   probeDbtFileHasTests,
   probeDbtFileMeta,
@@ -168,16 +171,7 @@ const SKIPPR_QUERY_RESULTS_VIEW_ID = "skippr.queryResults";
 const SKIPPR_QUERY_RESULTS_CONTAINER_ID = "skippr.query.results.panel";
 const SKIPPR_CONNECTIONS_VIEW_ID = "skippr.connections";
 const SKIPPR_LINEAGE_LAUNCH_VIEW_ID = "skippr.lineageLaunch";
-const RUN_AND_DEBUG_VIEW_COMMAND = "workbench.view.debug";
-const SKIPPR_AGENT_HOST_SESSION_TYPE = "agent-host-skippr";
-
-const panelSpecs: Array<{ command: string; lineage?: boolean; model?: boolean; run?: boolean }> = [
-  { command: "skippr.open.discover", run: true },
-  { command: "skippr.open.sync", run: true },
-  { command: "skippr.open.model", model: true },
-  { command: "skippr.open.catalog", lineage: true },
-  { command: "skippr.open.lineage", lineage: true }
-];
+const SKIPPR_LINEAGE_GRAPH_VIEW_ID = "skippr.lineageGraph";
 
 const workspacePathKey = "skippr.workspacePath";
 const apiTargetKey = "skippr.apiTarget";
@@ -239,7 +233,6 @@ interface SkipprRunRequest {
   logLevel?: string;
 }
 
-type SkipprRunnableKind = SkipprRunKind | "ask" | "plan";
 
 let skipprAuthProvider: SkipprAuthenticationProvider | undefined;
 let skipprAuthStatusItem: vscode.StatusBarItem | undefined;
@@ -564,7 +557,7 @@ async function refreshConfigStatus(output: vscode.LogOutputChannel, statusItem: 
     statusItem.tooltip = "No skippr.yml or skippr.yaml found. Click to set up Skippr.";
     return;
   }
-  const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+  const cliPath = await resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
   if (!cliPath) {
     statusItem.command = "skippr.cli.install";
     statusItem.text = "$(warning) Skippr: CLI missing";
@@ -661,7 +654,7 @@ async function getCachedConfigShow(
       const cliPath =
         resolveCli === "offerInstall"
           ? await resolveCliOrOfferInstall(output)
-          : await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+          : await resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
       if (!cliPath) {
         return undefined;
       }
@@ -703,7 +696,7 @@ async function fetchTestSelectOptionsForRunDebug(
   if (!cfg || !pipe) {
     return [];
   }
-  const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+  const cliPath = await resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
   if (!cliPath) {
     return [];
   }
@@ -723,25 +716,6 @@ async function fetchTestSelectOptionsForRunDebug(
     value: t.unique_id,
     label: t.name?.trim() ? `${t.name} (${t.unique_id})` : t.unique_id
   }));
-}
-
-function runKindLabel(kind: SkipprRunnableKind): string {
-  switch (kind) {
-    case "ask":
-      return "Ask";
-    case "plan":
-      return "Plan";
-    case "discover":
-      return "Discover";
-    case "sync-once":
-      return "Sync Once";
-    case "sync-all-once":
-      return "Sync All Once";
-    case "sync":
-      return "Start Sync";
-    case "model":
-      return "Model";
-  }
 }
 
 function renderRunConfigHtml(kind: SkipprRunnableKind, pipelines: string[], configPaths: string[], configPath: string | undefined, defaultPipeline: string, logLevel: string): string {
@@ -923,83 +897,6 @@ async function showRunConfigModal(kind: SkipprRunnableKind, output: vscode.LogOu
       }
     });
   });
-}
-
-function describeRunEvent(event: SkipprRunEvent): string | undefined {
-  switch (event.event) {
-    case "discover_start":
-      return `Discover started: ${event.pipeline ?? "pipeline"}`;
-    case "namespace_discovered":
-      return `Discovered ${event.namespace ?? "namespace"} (${event.field_count ?? 0} fields)`;
-    case "schema_evolved":
-      return `Schema evolved: ${event.namespace ?? "namespace"} (${event.fields_added?.length ?? 0} added)`;
-    case "discover_complete":
-      return `Discover complete: ${event.pipeline ?? "pipeline"} (${event.namespaces_discovered ?? 0} namespaces)`;
-    case "sync_start":
-      return `Sync started: ${event.pipeline ?? "pipeline"}`;
-    case "sync_status":
-      return `Sync status: ${event.pipeline ?? "pipeline"} rows=${event.total_rows ?? 0} written=${event.rows_written ?? 0}`;
-    case "batch_ingested":
-      return `Batch ingested: ${event.namespace ?? "namespace"} rows=${event.rows ?? 0}`;
-    case "compaction_complete":
-      return `Compaction complete: ${event.namespace ?? "namespace"}`;
-    case "output_synced":
-      return `Output synced: ${event.namespace ?? "namespace"} rows=${event.rows_written ?? 0}`;
-    case "sync_complete":
-      return `Sync complete: ${event.pipeline ?? "pipeline"} rows=${event.total_rows ?? 0}`;
-    case "sync_error":
-      return `Sync error: ${event.error ?? "unknown error"}`;
-    case "tool_start":
-      return undefined;
-    case "tool_end":
-      if (event.status === "ok" || event.status === "success") {
-        return undefined;
-      }
-      return `Tool ${event.status ?? "finished"}: ${event.clean_name ?? event.name ?? "tool"}`;
-    case "model_start":
-      return `Model started: ${event.pipeline ?? "pipeline"}`;
-    case "model_thread_resumed":
-      return `Model resumed thread ${event.thread_id ?? "unknown"}`;
-    case "model_preflight":
-      return event.model_preflight?.ok
-        ? `Model preflight passed: ${event.model_preflight.command ?? "dbt"}`
-        : `Model preflight failed: ${event.model_preflight?.remediation ?? event.error ?? "dbt environment issue"}`;
-    case "model_authoring_start":
-      return `Model authoring started`;
-    case "model_file_changed":
-      return `Model files changed: ${event.changed_files?.length ?? 0}`;
-    case "model_review_ready":
-      return event.summary ?? `Model review ready: ${event.total_count ?? event.changed_files?.length ?? 0} files`;
-    case "model_validation_start":
-      return `Model validation started`;
-    case "model_validation":
-      return event.validation?.ok
-        ? `Model validation passed`
-        : `Model validation failed: ${event.validation?.message ?? event.error ?? "unknown error"}`;
-    case "model_validation_complete":
-      return event.validation?.ok
-        ? `Model validation passed`
-        : `Model validation failed: ${event.validation?.message ?? event.error ?? "unknown error"}`;
-    case "model_phase_changed":
-      return `Model phase: ${event.phase ?? "unknown"}`;
-    case "model_complete":
-      return `Model complete: ${event.pipeline ?? "pipeline"}`;
-    case "model_error":
-      return `Model error: ${event.error ?? event.failure_summary ?? "unknown error"}`;
-    case "ask_start":
-      return `Ask started: ${event.pipeline ?? "pipeline"}`;
-    case "ask_complete":
-      return `Ask complete: ${event.pipeline ?? "pipeline"}`;
-    case "ask_error":
-      return `Ask error: ${event.error ?? "unknown error"}`;
-    case "plan_start":
-      return `Plan started: ${event.pipeline ?? "pipeline"}`;
-    case "plan_complete":
-      return `Plan complete: ${event.pipeline ?? "pipeline"}`;
-    case "plan_error":
-      return `Plan error: ${event.error ?? "unknown error"}`;
-  }
-  return undefined;
 }
 
 type RunStatusPanelPhase = "idle" | "running" | "success" | "error" | "stopped";
@@ -1310,23 +1207,13 @@ async function saveSchemaDiffReview(output: vscode.LogOutputChannel): Promise<vo
     const afterFields = Array.isArray(change?.schema?.fields) ? change.schema.fields : [];
     const fields = applyRowDecisions(ns.rows, afterFields);
     const schemaJson = JSON.stringify({ fields });
-    const args = [
-      "--config",
+    const args = buildSdeMetadataApplyArgs({
       configPath,
-      "--log",
       logLevel,
-      "metadata",
-      "apply",
-      "--pipeline",
       pipeline,
-      "--namespace",
-      ns.namespace,
-      "--schema-json",
-      schemaJson,
-      "--evolved",
-      "--output",
-      "json"
-    ];
+      namespace: ns.namespace,
+      schemaJson
+    });
     const result = await runSkipprJson<SkipprMetadataApplyResult>(
       cliPath,
       args,
@@ -1924,7 +1811,8 @@ function connectionsPayloadFromConfigShow(show: SkipprConfigShowResult, configPa
       sources: show.sources.map(fallbackConnection),
       sinks: show.sinks.map(fallbackConnection),
       schema_sinks: show.schema_sinks.map(fallbackConnection)
-    }
+    },
+    pipelines: show.pipelines
   };
 }
 
@@ -2024,6 +1912,37 @@ async function openConfigAtConnection(configPath: string | undefined, connection
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
+async function savePipelineEnvFromConnections(
+  output: vscode.LogOutputChannel,
+  configPath: string | undefined,
+  pipeline: string | undefined,
+  key: string | undefined,
+  value: string | undefined
+): Promise<void> {
+  const resolvedConfigPath = configPath || activeConfigPath || (await chooseActiveConfig(output));
+  if (!resolvedConfigPath) {
+    vscode.window.showWarningMessage("No skippr.yml or skippr.yaml in the workspace.");
+    return;
+  }
+  const name = pipeline?.trim();
+  const envKey = key?.trim();
+  if (!name || !envKey || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
+    vscode.window.showWarningMessage("Pipeline and a valid environment variable name are required.");
+    return;
+  }
+  const folderUri = workspaceFolderForConfigPath(resolvedConfigPath);
+  const conf = vscode.workspace.getConfiguration(undefined, folderUri);
+  const cur = conf.get<Record<string, Record<string, string>>>("pipelineEnv", {});
+  const next: Record<string, Record<string, string>> = { ...cur };
+  next[name] = { ...(next[name] ?? {}), [envKey]: value ?? "" };
+  await conf.update(
+    "pipelineEnv",
+    next,
+    folderUri ? vscode.ConfigurationTarget.WorkspaceFolder : vscode.ConfigurationTarget.Workspace
+  );
+  vscode.window.showInformationMessage(`Updated skippr.pipelineEnv for pipeline "${name}".`);
+}
+
 function registerSkipprConnectionsView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -2037,9 +1956,20 @@ function registerSkipprConnectionsView(context: vscode.ExtensionContext, output:
             brandLogoUris: lineageBrandLogoUris(webviewView.webview, context.extensionUri)
           });
           let lastPayload = await refreshConnectionsPanel(output);
-          webviewView.webview.onDidReceiveMessage(async (message: { command?: string; kind?: string; name?: string; pipeline?: string }) => {
+          webviewView.webview.onDidReceiveMessage(async (message: {
+            command?: string;
+            kind?: string;
+            name?: string;
+            pipeline?: string;
+            key?: string;
+            value?: string;
+          }) => {
             if (message.command === "ready" || message.command === "refresh") {
               lastPayload = await refreshConnectionsPanel(output);
+              return;
+            }
+            if (message.command === "savePipelineEnv") {
+              await savePipelineEnvFromConnections(output, lastPayload.configPath, message.pipeline, message.key, message.value);
               return;
             }
             const connection = findConnection(lastPayload, message.kind, message.name);
@@ -2069,7 +1999,7 @@ function registerSkipprConnectionsView(context: vscode.ExtensionContext, output:
   );
 }
 
-function registerSkipprQueryResultsView(context: vscode.ExtensionContext): void {
+function registerSkipprQueryResultsView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SKIPPR_QUERY_RESULTS_VIEW_ID,
@@ -2082,6 +2012,9 @@ function registerSkipprQueryResultsView(context: vscode.ExtensionContext): void 
           webviewView.webview.onDidReceiveMessage((message: { command?: string; text?: string }) => {
             if (message.command === "copy" && typeof message.text === "string") {
               void vscode.env.clipboard.writeText(message.text);
+            }
+            if (message.command === "ask" && typeof message.text === "string") {
+              void askDataQuestion(output, message.text);
             }
           });
           webviewView.onDidDispose(() => {
@@ -2102,8 +2035,8 @@ function setRunStatusIdle(statusItem: vscode.StatusBarItem): void {
   statusItem.tooltip = "Run Skippr discover or sync commands";
 }
 
-function revealRunAndDebugView(): void {
-  void vscode.commands.executeCommand(RUN_AND_DEBUG_VIEW_COMMAND).then(undefined, () => undefined);
+function revealSkipprRunPanel(): void {
+  void vscode.commands.executeCommand(`${SKIPPR_RUN_TIMELINE_VIEW_ID}.focus`).then(undefined, () => undefined);
 }
 
 function setRunStatusRunning(statusItem: vscode.StatusBarItem, label: string): void {
@@ -2111,7 +2044,7 @@ function setRunStatusRunning(statusItem: vscode.StatusBarItem, label: string): v
   statusItem.text = `$(sync~spin) ${label}`;
   statusItem.tooltip = "Skippr is running. Click to cancel.";
   if (activeRunStatusStartedAt === undefined) {
-    revealRunAndDebugView();
+    revealSkipprRunPanel();
     activeRunStatusStartedAt = Date.now();
   }
   postRunStatusPanel({
@@ -2125,7 +2058,7 @@ function setRunStatusRunning(statusItem: vscode.StatusBarItem, label: string): v
 
 async function resolveCliOrOfferInstall(output: vscode.LogOutputChannel): Promise<string | undefined> {
   const config = vscode.workspace.getConfiguration();
-  const cliPath = await resolveSkipprCli(config.get<string>(cliPathKey, ""));
+  const cliPath = await resolveSde(config.get<string>(cliPathKey, ""));
   if (cliPath) {
     return cliPath;
   }
@@ -2133,9 +2066,9 @@ async function resolveCliOrOfferInstall(output: vscode.LogOutputChannel): Promis
   output.warn("Skippr CLI was not found on PATH.");
   const choice = await vscode.window.showWarningMessage("Skippr CLI was not found.", "Install CLI");
   if (choice === "Install CLI") {
-    const result = await installSkipprCli(output);
+    const result = await installSde(output);
     if (result.code === 0) {
-      return resolveSkipprCli(config.get<string>(cliPathKey, ""));
+      return resolveSde(config.get<string>(cliPathKey, ""));
     }
   }
   return undefined;
@@ -2217,10 +2150,6 @@ async function runSkipprDoctor(
 type RunSkipprCliFlags = {
   discoverOutput?: string;
   modelNoResume?: boolean;
-  modelGoal?: string;
-  modelScope?: string;
-  modelTargetModels?: string;
-  modelArtifacts?: string;
 };
 
 type RunSkipprObserver = {
@@ -2235,10 +2164,6 @@ type AgentModelRunRequest = {
   pipeline?: string;
   configPath?: string;
   noResume?: boolean;
-  goal?: string;
-  scope?: string;
-  targetModels?: string;
-  artifacts?: string;
   workspaceRoot?: string;
   sourceChatSessionId?: string;
   sourceTurnId?: string;
@@ -2266,7 +2191,7 @@ async function runSkipprCommand(
 ): Promise<{ code: number | null; signal: string | null; elapsedMs: number; errorDetail?: string } | undefined> {
   if (activeRun) {
     if (kind === "model") {
-      output.show(true);
+      revealSkipprRunPanel();
       output.info(`Attached to active ${activeRun.label}. Stop/cancel is the only in-flight control surface.`);
       vscode.window.showInformationMessage(`Attached to active ${activeRun.label}.`);
       const result = { code: null, signal: null, elapsedMs: 0, errorDetail: `Another Skippr run is already active: ${activeRun.label}` };
@@ -2274,7 +2199,7 @@ async function runSkipprCommand(
       return result;
     }
     vscode.window.showWarningMessage(`Skippr is already running: ${activeRun.label}`);
-    output.show(true);
+    revealSkipprRunPanel();
     return undefined;
   }
 
@@ -2344,7 +2269,7 @@ async function runSkipprCommand(
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof WorkspaceLockConflictError) {
           void refreshWorkspaceLockPanel().then(() => postObservability(), () => undefined);
-          void vscode.commands.executeCommand("workbench.view.debug");
+          void vscode.commands.executeCommand(`${SKIPPR_RUN_TIMELINE_VIEW_ID}.focus`);
         }
         vscode.window.showErrorMessage(message);
         output.error(message);
@@ -2377,11 +2302,7 @@ async function runSkipprCommand(
           kind,
           pipeline: scopedPipeline!,
           discoverOutput: kind === "discover" ? cliFlags?.discoverOutput : undefined,
-          modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined,
-          modelGoal: kind === "model" ? cliFlags?.modelGoal : undefined,
-          modelScope: kind === "model" ? cliFlags?.modelScope : undefined,
-          modelTargetModels: kind === "model" ? cliFlags?.modelTargetModels : undefined,
-          modelArtifacts: kind === "model" ? cliFlags?.modelArtifacts : undefined
+          modelNoResume: kind === "model" ? cliFlags?.modelNoResume : undefined
         };
   const run = startSkipprRun(
     runOptions,
@@ -2735,11 +2656,7 @@ async function runAgentModelBridgeRequest(
     getLogLevel(),
     [],
     {
-      modelNoResume: request.noResume === true,
-      modelGoal: request.goal,
-      modelScope: request.scope,
-      modelTargetModels: request.targetModels,
-      modelArtifacts: request.artifacts
+      modelNoResume: request.noResume === true
     },
     {
       onEvent: (event) => {
@@ -2832,6 +2749,9 @@ function appendDbtFileDiffMessages(
       linesAdded: changedFile.lines_added,
       linesRemoved: changedFile.lines_removed
     });
+    if (skipprBeforeProvider) {
+      void openSkipprAgentFileDiff(skipprBeforeProvider, absolutePath, beforeContent);
+    }
   }
 }
 
@@ -3023,7 +2943,7 @@ async function resolveSqlQueryContextQuiet(output: vscode.LogOutputChannel): Pro
     return undefined;
   }
   const config = vscode.workspace.getConfiguration();
-  const cliPath = await resolveSkipprCli(config.get<string>(cliPathKey, ""));
+  const cliPath = await resolveSde(config.get<string>(cliPathKey, ""));
   if (!cliPath) {
     return undefined;
   }
@@ -3046,9 +2966,10 @@ interface SkipprLineageCliResult {
   error?: string;
 }
 
-let activeLineagePanel: vscode.WebviewPanel | undefined;
+let lineageGraphWebviewView: vscode.WebviewView | undefined;
 let lineageLaunchWebviewView: vscode.WebviewView | undefined;
 let connectionsWebviewView: vscode.WebviewView | undefined;
+let skipprBeforeProvider: SkipprBeforeContentProvider | undefined;
 let activeLineageContext: SkipprLineageContext | undefined;
 let activeLineageFieldFocus: SkipprLineageFieldFocus | undefined;
 let activeLineageSelectedNode: LineageNodeLike | undefined;
@@ -3065,7 +2986,7 @@ function lineageBrandLogoUris(webview: vscode.Webview, extensionUri: vscode.Uri)
 }
 
 function postLineagePanel(payload: SkipprLineagePanelPayload): void {
-  void activeLineagePanel?.webview.postMessage(payload);
+  void lineageGraphWebviewView?.webview.postMessage(payload);
 }
 
 function postLineageActivity(message: unknown): void {
@@ -3224,9 +3145,11 @@ async function resolveLineageContext(
     } else if (candidates.length === 1) {
       pipeline = candidates[0];
     } else if (candidates.length > 1) {
-      pipeline = (await vscode.window.showQuickPick(candidates, { placeHolder: "Select a Skippr pipeline for lineage" })) ?? "";
+      await vscode.commands.executeCommand(`${SKIPPR_LINEAGE_LAUNCH_VIEW_ID}.focus`);
+      return undefined;
     } else {
-      pipeline = (await vscode.window.showInputBox({ prompt: "Pipeline name for lineage" }))?.trim() ?? "";
+      await vscode.commands.executeCommand(`${SKIPPR_LINEAGE_LAUNCH_VIEW_ID}.focus`);
+      return undefined;
     }
   }
   if (!pipeline) {
@@ -3235,8 +3158,76 @@ async function resolveLineageContext(
   return { cliPath, configPath, pipeline };
 }
 
+function bindLineageGraphMessages(webview: vscode.Webview, output: vscode.LogOutputChannel): void {
+  webview.onDidReceiveMessage((message: {
+    command?: string;
+    fieldNodeId?: string;
+    schema?: unknown;
+    nodeId?: string;
+    action?: string;
+    node?: LineageNodeLike;
+  }) => {
+    if (message.command === "refresh") {
+      void refreshLineagePanel(output, "refresh");
+    } else if (message.command === "importHistory") {
+      void refreshLineagePanel(output, "import-query-history");
+    } else if (message.command === "clearField") {
+      void refreshLineagePanel(output, "graph");
+    } else if (message.command === "selectField") {
+      const fieldNodeId = typeof message.fieldNodeId === "string" ? message.fieldNodeId.trim() : "";
+      if (fieldNodeId) {
+        void refreshLineagePanel(output, "graph", { fieldNodeId });
+      }
+    } else if (message.command === "selectedNode") {
+      const schema = message.schema as LineageSchemaPayload | undefined;
+      activeLineageSelectedNode =
+        message.node ??
+        (schema?.node?.id ? lineageNodeFromGraph(schema.node.id, activeLineageGraph) : undefined);
+      if (schema) {
+        postLineageActivity({ command: "selectedNode", schema });
+      }
+    } else if (message.command === "lineageAction") {
+      const action = typeof message.action === "string" ? (message.action.trim() as LineageResourceAction) : undefined;
+      const nodeId = typeof message.nodeId === "string" ? message.nodeId.trim() : "";
+      const node = nodeId ? lineageNodeFromGraph(nodeId, activeLineageGraph) ?? activeLineageSelectedNode : activeLineageSelectedNode;
+      if (action && node && activeLineageContext) {
+        void openLineageResource(action, node, activeLineageContext, output);
+      }
+    }
+  });
+}
+
+function registerSkipprLineageGraphView(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): void {
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(SKIPPR_LINEAGE_GRAPH_VIEW_ID, {
+      resolveWebviewView(webviewView) {
+        lineageGraphWebviewView = webviewView;
+        webviewView.webview.options = {
+          enableScripts: true,
+          localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")]
+        };
+        webviewView.webview.html = renderSkipprLineagePanelHtml({
+          cspSource: webviewView.webview.cspSource,
+          brandLogoUris: lineageBrandLogoUris(webviewView.webview, context.extensionUri)
+        });
+        bindLineageGraphMessages(webviewView.webview, output);
+        webviewView.onDidDispose(() => {
+          lineageGraphWebviewView = undefined;
+          activeLineageContext = undefined;
+          activeLineageFieldFocus = undefined;
+          activeLineageSelectedNode = undefined;
+          activeLineageGraph = undefined;
+        });
+        if (activeLineageContext) {
+          void refreshLineagePanel(output, "graph");
+        }
+      }
+    })
+  );
+}
+
 async function openLineagePanel(
-  context: vscode.ExtensionContext,
+  _context: vscode.ExtensionContext,
   output: vscode.LogOutputChannel,
   requested?: { configPath?: string; pipeline?: string }
 ): Promise<void> {
@@ -3246,69 +3237,7 @@ async function openLineagePanel(
   }
   activeLineageContext = ctx;
   activeLineageFieldFocus = undefined;
-  if (activeLineagePanel) {
-    activeLineagePanel.reveal(vscode.ViewColumn.Active);
-  } else {
-    activeLineagePanel = vscode.window.createWebviewPanel(
-      "skippr.lineage",
-      "Skippr Lineage",
-      vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")]
-      }
-    );
-    activeLineagePanel.webview.html = renderSkipprLineagePanelHtml({
-      cspSource: activeLineagePanel.webview.cspSource,
-      brandLogoUris: lineageBrandLogoUris(activeLineagePanel.webview, context.extensionUri)
-    });
-    activeLineagePanel.webview.onDidReceiveMessage((message: {
-      command?: string;
-      asset?: string;
-      field?: string;
-      fieldNodeId?: string;
-      schema?: unknown;
-      nodeId?: string;
-      action?: string;
-      node?: LineageNodeLike;
-    }) => {
-      if (message.command === "refresh") {
-        void refreshLineagePanel(output, "refresh");
-      } else if (message.command === "importHistory") {
-        void refreshLineagePanel(output, "import-query-history");
-      } else if (message.command === "clearField") {
-        void refreshLineagePanel(output, "graph");
-      } else if (message.command === "selectField") {
-        const fieldNodeId = typeof message.fieldNodeId === "string" ? message.fieldNodeId.trim() : "";
-        if (fieldNodeId) {
-          void refreshLineagePanel(output, "graph", { fieldNodeId });
-        }
-      } else if (message.command === "selectedNode") {
-        const schema = message.schema as LineageSchemaPayload | undefined;
-        activeLineageSelectedNode =
-          message.node ??
-          (schema?.node?.id ? lineageNodeFromGraph(schema.node.id, activeLineageGraph) : undefined);
-        if (schema) {
-          postLineageActivity({ command: "selectedNode", schema });
-        }
-      } else if (message.command === "lineageAction") {
-        const action = typeof message.action === "string" ? (message.action.trim() as LineageResourceAction) : undefined;
-        const nodeId = typeof message.nodeId === "string" ? message.nodeId.trim() : "";
-        const node = nodeId ? lineageNodeFromGraph(nodeId, activeLineageGraph) ?? activeLineageSelectedNode : activeLineageSelectedNode;
-        if (action && node && activeLineageContext) {
-          void openLineageResource(action, node, activeLineageContext, output);
-        }
-      }
-    });
-    activeLineagePanel.onDidDispose(() => {
-      activeLineagePanel = undefined;
-      activeLineageContext = undefined;
-      activeLineageFieldFocus = undefined;
-      activeLineageSelectedNode = undefined;
-      activeLineageGraph = undefined;
-    });
-  }
+  await vscode.commands.executeCommand(`${SKIPPR_LINEAGE_GRAPH_VIEW_ID}.focus`);
   await refreshLineagePanel(output, "graph");
 }
 
@@ -3574,9 +3503,10 @@ function threadIdFromChatJsonLines(lines: unknown[]): string | undefined {
   return undefined;
 }
 
-async function askDataQuestion(output: vscode.LogOutputChannel): Promise<void> {
-  const question = (await vscode.window.showInputBox({ prompt: "Ask a data question", placeHolder: "e.g. Which customers drove revenue last month?" }))?.trim();
+async function askDataQuestion(output: vscode.LogOutputChannel, questionRaw?: string): Promise<void> {
+  const question = questionRaw?.trim();
   if (!question) {
+    await showQueryResultsPanel();
     return;
   }
   const ctx = await resolveSqlQueryContext(output, vscode.window.activeTextEditor);
@@ -3778,27 +3708,13 @@ async function runVectorIngestOnOpen(
   }
   await context.globalState.update(stateKey, true);
 
-  const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+  const cliPath = await resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
   if (!cliPath) {
     output.info("Skipping automatic Skippr vector ingest: CLI not configured.");
     return;
   }
 
-  const args = [
-    "--config",
-    configPath,
-    "vector",
-    "ingest-docs",
-    "--pipeline",
-    "vector_ingest",
-    "--src-path",
-    folder.uri.fsPath,
-    "--include-glob",
-    "**/*",
-    "--output",
-    "json",
-    ...vectorOnOpenExcludeGlobs.flatMap((glob) => ["--exclude-glob", glob])
-  ];
+  const args = buildVectorIngestArgs(configPath, folder.uri.fsPath, vectorOnOpenExcludeGlobs);
 
   const headline = "Vector ingest";
   output.info(`Starting automatic Skippr vector ingest for ${folder.uri.fsPath}.`);
@@ -3817,7 +3733,7 @@ async function runVectorIngestOnOpen(
           args,
           getConfigCwd(configPath),
           output,
-          await skipprSpawnEnv(configPath, "vector_ingest", output),
+          await skipprSpawnEnv(configPath, undefined, output),
           configPath
         );
         progress.report({ message: "Finalizing vector index..." });
@@ -3836,7 +3752,7 @@ async function runVectorIngestOnOpen(
     if (ok) {
       output.info("Automatic Skippr vector ingest completed.");
     } else {
-      output.warn("Automatic Skippr vector ingest skipped or failed. Ensure skippr.yml defines pipelines.vector_ingest and vector_sources.");
+      output.warn(`Automatic Skippr vector ingest skipped or failed. Ensure skippr.yml defines vector_sources.${VECTOR_INGEST_KEY}.`);
     }
   } finally {
     setRunStatusIdle(statusItem);
@@ -3864,8 +3780,9 @@ async function runLensPipelineCommand(
   const pipeline =
     candidates.length === 1
       ? candidates[0]
-      : await vscode.window.showQuickPick(candidates, { title: "Pipeline for Skippr action" });
+      : undefined;
   if (!pipeline) {
+    vscode.window.showErrorMessage("Skippr: click a run action on a pipeline in skippr.yml.");
     return;
   }
   await runLensPipelineWithArgs(configPath, pipeline, command, context, output, statusItem);
@@ -3883,11 +3800,11 @@ async function runLensPipelineWithArgs(
     vscode.window.showErrorMessage("Skippr: missing pipeline or config path.");
     return;
   }
-  const cmd = command as SkipprPipelineRunCommand;
-  if (cmd !== "discover" && cmd !== "sync" && cmd !== "model" && cmd !== "doctor" && cmd !== "lineage") {
+  if (!isSkipprPipelineRunCommand(command)) {
     vscode.window.showErrorMessage("Skippr: unknown run action.");
     return;
   }
+  const cmd = command;
   if (cmd === "lineage") {
     await openLineagePanel(context, output, {
       configPath: configFsPath.trim(),
@@ -3910,22 +3827,6 @@ async function runLensPipelineWithArgs(
     output,
     statusItem
   );
-}
-
-async function runPickPipelineAction(
-  configFsPath: unknown,
-  pipeline: unknown,
-  line: unknown,
-  output: vscode.LogOutputChannel,
-  _statusItem: vscode.StatusBarItem
-): Promise<boolean> {
-  if (typeof configFsPath !== "string" || typeof pipeline !== "string" || !pipeline.trim()) {
-    vscode.window.showErrorMessage("Skippr: missing pipeline or config path.");
-    return false;
-  }
-  const lineIndex = typeof line === "number" && Number.isFinite(line) ? line : 0;
-  await openSkipprPipelineRunMenu(configFsPath.trim(), pipeline.trim(), lineIndex);
-  return true;
 }
 
 async function runSkipprTestFromCliPanel(
@@ -4313,13 +4214,8 @@ async function showSetupWebview(output: vscode.LogOutputChannel, statusItem: vsc
   }
 
   const defaultName = path.basename(folder.fsPath);
-  const name = await vscode.window.showInputBox({
-    title: "Skippr Project Name",
-    prompt: "Enter the Skippr project name to initialize in the selected folder.",
-    value: defaultName,
-    validateInput: (value) => (value.trim() ? undefined : "Project name is required.")
-  });
-  if (!name?.trim()) {
+  const name = defaultName.trim();
+  if (!name) {
     return;
   }
 
@@ -4337,13 +4233,13 @@ async function showSetupWebview(output: vscode.LogOutputChannel, statusItem: vsc
       title: `Initializing Skippr project ${name.trim()}`,
       cancellable: false
     },
-    () =>
+    async () =>
       runSkipprJson<InitCommandResult>(
         cliPath,
         ["--config", path.join(folder.fsPath, "skippr.yml"), "init", name.trim(), "--output", "json"],
         folder.fsPath,
         output,
-        mergeSkipprSpawnEnv(process.env, folder, undefined, path.join(folder.fsPath, "skippr.yml")),
+        await skipprSpawnEnv(path.join(folder.fsPath, "skippr.yml"), undefined, output),
         path.join(folder.fsPath, "skippr.yml")
       )
   );
@@ -4527,6 +4423,7 @@ function renderAccountOverlayHtml(session: AuthSession | undefined, account: Ski
       </div>
       ${account ? "" : `<p class="warning">Could not load account details from Skippr. You can refresh or sign in again.</p>`}
       <div class="actions">
+        <label class="amount">Amount USD <input id="creditAmount" type="number" min="5" value="25" /></label>
         <button data-action="refresh">Refresh</button>
         <button data-action="buyCredits">Buy credits</button>
         <button data-action="acceptEula">Accept EULA</button>
@@ -4552,7 +4449,9 @@ function renderAccountOverlayHtml(session: AuthSession | undefined, account: Ski
     .metric { padding: 14px; border: 1px solid var(--vscode-panel-border); border-radius: 12px; background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-input-background)); }
     .metric span { display: block; color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 6px; }
     .metric strong { font-size: 18px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; align-items: center; }
+    .amount { display: inline-flex; align-items: center; gap: 8px; color: var(--vscode-descriptionForeground); }
+    .amount input { width: 88px; padding: 6px 8px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; }
     button { border: 0; border-radius: 6px; padding: 8px 12px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
     button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
@@ -4570,7 +4469,8 @@ function renderAccountOverlayHtml(session: AuthSession | undefined, account: Ski
     document.addEventListener('click', event => {
       const button = event.target.closest('button[data-action]');
       if (button) {
-        vscode.postMessage({ command: button.dataset.action });
+        const amount = document.getElementById('creditAmount') && document.getElementById('creditAmount').value;
+        vscode.postMessage({ command: button.dataset.action, amount });
       }
     });
   </script>
@@ -4593,7 +4493,7 @@ async function showAccount(
     panel.webview.html = renderAccountOverlayHtml(session, account);
   };
 
-  panel.webview.onDidReceiveMessage(async (message: { command?: string }) => {
+  panel.webview.onDidReceiveMessage(async (message: { command?: string; amount?: string }) => {
     const session = await readAuthSession(context);
     if (message.command === "signIn") {
       await signIn(context, statusItem, authProvider);
@@ -4609,8 +4509,7 @@ async function showAccount(
       return;
     }
     if (message.command === "buyCredits") {
-      const amount = await vscode.window.showInputBox({ title: "Buy Skippr Credits", prompt: "Amount in USD", value: "25" });
-      const parsed = Number(amount);
+      const parsed = Number(message.amount);
       if (Number.isFinite(parsed) && parsed >= 5) {
         const response = await apiRequest("/account/buy-credits", "POST", { amount: parsed }, session.token);
         if (response.ok) {
@@ -4759,7 +4658,6 @@ async function enterBusinessUserLayout(context: vscode.ExtensionContext, output:
     await applyBusinessLightTheme(workbenchExtensionContext, forceLight);
   }
   await runWorkbenchCommand("workbench.action.activityBarLocation.default");
-  await runWorkbenchCommand("skippr.workbench.forceActivityBar");
   await runWorkbenchCommand("workbench.action.closeSidebar");
   await runWorkbenchCommand("workbench.action.closePanel");
   await openBusinessDashboardPanel(context);
@@ -5200,7 +5098,7 @@ async function showSplash(
         case "discover":
           await restoreFullIdeLayout(context);
           await closeSplash(false);
-          await vscode.commands.executeCommand("skippr.open.discover");
+          await vscode.commands.executeCommand("skippr.run.discoverPipeline");
           return;
         case "openCloud": {
           const session = await requireCloudSession();
@@ -5324,7 +5222,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerSkipprRunDetailsView(context, SKIPPR_RUN_TIMELINE_VIEW_ID, "timeline", output);
   registerSkipprRunDetailsView(context, SKIPPR_RUN_SCHEMA_VIEW_ID, "schema", output);
   registerSkipprRunDetailsView(context, SKIPPR_RUN_DEADLETTERS_VIEW_ID, "deadletters", output);
-  registerSkipprQueryResultsView(context);
+  registerSkipprQueryResultsView(context, output);
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   const authProvider = new SkipprAuthenticationProvider(context, statusItem);
   skipprAuthProvider = authProvider;
@@ -5346,6 +5244,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   registerSkipprConnectionsView(context, output);
   registerSkipprLineageLaunchView(context, output);
+  registerSkipprLineageGraphView(context, output);
+  skipprBeforeProvider = new SkipprBeforeContentProvider();
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(SKIPPR_BEFORE_SCHEME, skipprBeforeProvider)
+  );
   context.subscriptions.push(
     vscode.commands.registerCommand("skippr.internal.runModelForAgentChat", async (request: AgentModelRunRequest, bridgeDir?: string) => {
       const workspaceRoot = request?.workspaceRoot?.trim() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -5370,7 +5273,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   observabilityStore.onDidChange(() => schedulePostObservability(), undefined, context.subscriptions);
   void runWorkbenchCommand("skippr.workbench.forceRunPanels");
-  void runWorkbenchCommand("skippr.workbench.forceActivityBar");
   await vscode.commands.executeCommand("setContext", SKIPPR_RUN_TOOLBAR_CONTEXT_KEY, true);
   await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
   context.subscriptions.push(
@@ -5436,12 +5338,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
   registerSkipprConfigDiagnostics(context, {
-    resolveCliPath: () => resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
+    resolveCliPath: () => resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
     output
   });
+  registerSkipprPipelineRunMenu(context);
   registerSkipprPipelineTestControllers(context, {
     output,
-    resolveCliPath: () => resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
+    resolveCliPath: () => resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, "")),
     getConfigCwd: (configFsPath: string) => getConfigCwd(configFsPath),
     revealSkipprOutput: () => output.show(false),
     getLogLevel: () => getLogLevel(),
@@ -5502,56 +5405,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("skippr.openSplash", async () => {
       await showSplash(context, statusItem, authProvider, output, runStatusItem);
     }),
-    vscode.commands.registerCommand("skippr.cloud.open", async () => {
-      const session = await ensureSession(context, statusItem, authProvider);
-      if (!session) {
-        const signed = await signIn(context, statusItem, authProvider, false);
-        if (!signed) {
-          return;
-        }
-      }
-      const active = await promptAndOpenCloudWorkspace(context, apiRequest, async () => {
-        const s = await ensureSession(context, statusItem, authProvider);
-        return s ? { token: s.token } : undefined;
-      });
-      if (active) {
-        await applyActiveCloudWorkspace(active, output, runStatusItem);
-      }
-    }),
-    vscode.commands.registerCommand("skippr.cloud.create", async () => {
-      await promptAndCreateCloudWorkspace(context, apiRequest, async () => {
-        const s = await ensureSession(context, statusItem, authProvider);
-        return s ? { token: s.token } : undefined;
-      });
-    }),
     vscode.commands.registerCommand("skippr.file.newCloudWorkspace", async () => {
-      const session = await ensureSession(context, statusItem, authProvider);
-      if (!session) {
-        const signed = await signIn(context, statusItem, authProvider, false);
-        if (!signed) {
-          return;
-        }
-      }
-      await promptAndCreateCloudWorkspace(context, apiRequest, async () => {
-        const s = await ensureSession(context, statusItem, authProvider);
-        return s ? { token: s.token } : undefined;
-      });
+      await showSplash(context, statusItem, authProvider, output, runStatusItem);
     }),
     vscode.commands.registerCommand("skippr.file.openCloudWorkspace", async () => {
-      const session = await ensureSession(context, statusItem, authProvider);
-      if (!session) {
-        const signed = await signIn(context, statusItem, authProvider, false);
-        if (!signed) {
-          return;
-        }
-      }
-      const active = await promptAndOpenCloudWorkspace(context, apiRequest, async () => {
-        const s = await ensureSession(context, statusItem, authProvider);
-        return s ? { token: s.token } : undefined;
-      });
-      if (active) {
-        await applyActiveCloudWorkspace(active, output, runStatusItem);
-      }
+      await showSplash(context, statusItem, authProvider, output, runStatusItem);
     }),
     vscode.commands.registerCommand("skippr.cloud.save", async () => {
       const session = await ensureSession(context, statusItem, authProvider);
@@ -5566,24 +5424,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand("skippr.cli.install", async () => {
-      const result = await installSkipprCli(output);
+      const result = await installSde(output);
       if (result.code === 0) {
-        vscode.window.showInformationMessage("Skippr CLI installed.");
+        vscode.window.showInformationMessage("sde installed.");
       } else {
-        vscode.window.showErrorMessage("Skippr CLI install failed. See Skippr output for details.");
+        vscode.window.showErrorMessage("sde install failed. See Skippr output for details.");
       }
     }),
     vscode.commands.registerCommand("skippr.cli.update", async () => {
-      const cliPath = await resolveSkipprCli(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
-      const result = await updateSkipprCli(
+      const cliPath = await resolveSde(vscode.workspace.getConfiguration().get<string>(cliPathKey, ""));
+      const result = await updateSde(
         cliPath,
         output,
-        mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(undefined), undefined)
+        await skipprSpawnEnv(undefined, undefined, output)
       );
       if (result.code === 0) {
-        vscode.window.showInformationMessage("Skippr CLI updated.");
+        vscode.window.showInformationMessage("sde updated.");
       } else {
-        vscode.window.showErrorMessage("Skippr CLI update failed. See Skippr output for details.");
+        vscode.window.showErrorMessage("sde update failed. See Skippr output for details.");
       }
     }),
     vscode.commands.registerCommand("skippr.cli.showVersion", async () => {
@@ -5594,7 +5452,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const result = await showSkipprVersion(
         cliPath,
         output,
-        mergeSkipprSpawnEnv(process.env, workspaceFolderForConfigPath(undefined), undefined)
+        await skipprSpawnEnv(undefined, undefined, output)
       );
       if (result.code !== 0) {
         vscode.window.showErrorMessage("Unable to read Skippr CLI version. See Skippr output for details.");
@@ -5626,23 +5484,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("skippr.sql.runDbtDocument", async () => {
       await runSqlTextFromEditor(false, output, runStatusItem);
     }),
-    vscode.commands.registerCommand("skippr.sql.pickRunMode", async () => {
-      const picked = await vscode.window.showQuickPick(
-        [
-          { label: "SQL", description: "Compile model and run warehouse SQL", mode: "sql" as const },
-          { label: "Tests", description: "Run dbt tests for this model", mode: "tests" as const }
-        ],
-        {
-          title: "Run DBT SQL",
-          placeHolder: `Current: ${dbtRunModeMenuTitle(dbtEditorRunMode)}`
-        }
-      );
-      if (!picked) {
-        return;
-      }
-      dbtEditorRunMode = picked.mode;
-      await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
-    }),
     vscode.commands.registerCommand("skippr.sql.setRunModeSql", async () => {
       dbtEditorRunMode = "sql";
       await vscode.commands.executeCommand("setContext", "skippr.editorDbtRunMode", dbtEditorRunMode);
@@ -5655,44 +5496,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await askDataQuestion(output);
     }),
     vscode.commands.registerCommand("skippr.editPipelineEnv", async () => {
-      const configPath = activeConfigPath ?? (await chooseActiveConfig(output));
-      if (!configPath) {
-        vscode.window.showWarningMessage("No skippr.yml or skippr.yaml in the workspace.");
-        return;
-      }
-      const folderUri = workspaceFolderForConfigPath(configPath);
-      const conf = vscode.workspace.getConfiguration(undefined, folderUri);
-      const show = await getConfigShow(output);
-      const fallback = conf.get<string>(defaultPipelineKey, "").trim();
-      const names = show?.pipelines?.length ? show.pipelines : fallback ? [fallback] : [];
-      if (!names.length) {
-        vscode.window.showWarningMessage("No pipelines found. Set skippr.defaultPipeline or fix the config.");
-        return;
-      }
-      const pipeline = await vscode.window.showQuickPick(names, { title: "Pipeline for per-pipeline env vars" });
-      if (!pipeline) {
-        return;
-      }
-      const key = await vscode.window.showInputBox({
-        prompt: "Environment variable name (e.g. SNOWFLAKE_ACCOUNT)",
-        validateInput: (v) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(v.trim()) ? undefined : "Use letters, numbers, underscore; start with a letter or _.")
-      });
-      if (!key?.trim()) {
-        return;
-      }
-      const val = await vscode.window.showInputBox({ prompt: `Value for ${key.trim()}` });
-      if (val === undefined) {
-        return;
-      }
-      const cur = conf.get<Record<string, Record<string, string>>>("pipelineEnv", {});
-      const next: Record<string, Record<string, string>> = { ...cur };
-      next[pipeline] = { ...(next[pipeline] ?? {}), [key.trim()]: val };
-      await conf.update(
-        "pipelineEnv",
-        next,
-        folderUri ? vscode.ConfigurationTarget.WorkspaceFolder : vscode.ConfigurationTarget.Workspace
-      );
-      vscode.window.showInformationMessage(`Updated skippr.pipelineEnv for pipeline "${pipeline}".`);
+      await vscode.commands.executeCommand(`${SKIPPR_CONNECTIONS_VIEW_ID}.focus`);
     }),
     vscode.commands.registerCommand("skippr.run.discoverPipeline", async () => {
       await runSkipprCommand("discover", output, runStatusItem);
@@ -5712,9 +5516,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("skippr.run.doctor", async () => {
       await runSkipprDoctor(output, runStatusItem);
     }),
-    vscode.commands.registerCommand("skippr.run.pickPipelineAction", async (configFsPath: unknown, pipeline: unknown, line: unknown) => {
-      await runPickPipelineAction(configFsPath, pipeline, line, output, runStatusItem);
-    }),
     vscode.commands.registerCommand("skippr.run.lens.discover", () => runLensPipelineCommand("discover", context, output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lens.sync", () => runLensPipelineCommand("sync", context, output, runStatusItem)),
     vscode.commands.registerCommand("skippr.run.lens.model", () => runLensPipelineCommand("model", context, output, runStatusItem)),
@@ -5725,8 +5526,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ),
     vscode.languages.registerCodeLensProvider(
       skipprConfigDocumentSelector,
-      new SkipprPipelineCodeLensProvider("skippr.run.lensWithArgs", "skippr.run.pickPipelineAction")
+      new SkipprPipelineCodeLensProvider("skippr.run.lensWithArgs", "skippr.showPipelineRunMenu")
     ),
+    vscode.commands.registerCommand("skippr.open.lineage", async (args?: unknown) => {
+      const lineageArgs = args as { configPath?: unknown; pipeline?: unknown } | undefined;
+      await openLineagePanel(context, output, {
+        configPath: typeof lineageArgs?.configPath === "string" ? lineageArgs.configPath : undefined,
+        pipeline: typeof lineageArgs?.pipeline === "string" ? lineageArgs.pipeline : undefined
+      });
+    }),
     vscode.commands.registerCommand("skippr.run.stopSyncPipeline", () => {
       void stopActiveRun(runStatusItem, output);
     }),
@@ -5773,28 +5581,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     })
   );
-
-  for (const panel of panelSpecs) {
-    context.subscriptions.push(
-      vscode.commands.registerCommand(panel.command, async (args?: unknown) => {
-        if (panel.model) {
-          await openModelWorkflowInAgentChat(output, runStatusItem);
-          return;
-        }
-        if (panel.lineage) {
-          const lineageArgs = args as { configPath?: unknown; pipeline?: unknown } | undefined;
-          await openLineagePanel(context, output, {
-            configPath: typeof lineageArgs?.configPath === "string" ? lineageArgs.configPath : undefined,
-            pipeline: typeof lineageArgs?.pipeline === "string" ? lineageArgs.pipeline : undefined
-          });
-          return;
-        }
-        if (panel.run) {
-          revealRunAndDebugView();
-        }
-      })
-    );
-  }
 
   void ensureSession(context, statusItem, authProvider);
   const configWatcher = vscode.workspace.createFileSystemWatcher("**/skippr.{yml,yaml}");

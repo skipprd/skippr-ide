@@ -1,0 +1,32 @@
+---
+description: Skippr IDE core — overlay SoT, one design, types, in-context UI, pragmatic TDD
+alwaysApply: true
+---
+
+# Skippr IDE — core agent rules
+
+Product: **Skippr IDE**. Overlay SoT is `overlays/vscode/`. Public docs in `docs/`. See root `AGENTS.md`.
+
+## Principles (priority)
+
+1. **One design** — one type and UI path per job. Delete the old way in the same change. Overlay wins over generated `vscode/`. Skill: **`hard-cutover`**.
+2. **Types over runtime convention** — unions, branded types, enums. Illegal states unrepresentable. Type errors over “don’t call this wrong.”
+3. Simplest design that works — no class/trait hierarchies with one implementor; no re-export-only modules.
+4. DRY — shared logic in one module; no copy-paste CLI argv, auth, or serialization.
+5. Reuse/extend existing code **into that one design** — never as a second path, adapter, or “legacy” module.
+6. **TDD for logic** — failing test first for domain modules. No kernel simulation/fuzz stack. Skill: **`tdd-ide`**.
+
+## Overlay
+
+- Edit `overlays/vscode/…` only. Run `npm run apply:overlay`. Do not dual-edit `vscode/` or packaged `VSCode-*` trees.
+- `/vscode/` is generated and gitignored.
+
+## Product UI
+
+- In-context buttons and forms in Skippr views.
+- No command palette, `showQuickPick`, or `showInputBox` for product choices. OTP email/code in `skipprOverlayUi.ts` is the only exception.
+- One UI path: replacing a palette flow means deleting it in the same change.
+
+## Engines
+
+The workbench drives **`sde`** → **`skipprd`**. Do not reimplement discover, sync, or model inside the IDE.

@@ -46,6 +46,8 @@ export function renderSkipprQueryResultsPanelHtml(): string {
     button:hover { background: var(--vscode-button-secondaryHoverBackground); }
     button.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
     button:disabled { opacity: .45; cursor: default; }
+    .ask { display: flex; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+    .ask input { flex: 1; box-sizing: border-box; padding: 4px 8px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; }
     select { box-sizing: border-box; max-width: 180px; padding: 2px 6px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; }
     label { display: inline-flex; align-items: center; gap: 4px; color: var(--vscode-descriptionForeground); }
     .answer { padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); line-height: 1.45; }
@@ -185,6 +187,9 @@ export function renderSkipprQueryResultsPanelHtml(): string {
           data.header.map(name => optionHtml(name, chart.y.includes(name))).join("") +
           '</select></label>';
       }
+      function askHtml() {
+        return '<form class="ask" id="askForm"><input name="question" placeholder="Ask a data question..." /><button type="submit">Ask</button></form>';
+      }
       function header() {
         const rows = payload.data && Array.isArray(payload.data.rows) ? payload.data.rows.length : 0;
         const canChart = Boolean(activeChart());
@@ -194,13 +199,21 @@ export function renderSkipprQueryResultsPanelHtml(): string {
       }
       function render() {
         if (payload.status === "idle") {
-          root.innerHTML = header() + '<div class="empty">Run SQL from the editor or ask a data question to populate results.</div>';
+          root.innerHTML = askHtml() + header() + '<div class="empty">Run SQL from the editor or ask a data question to populate results.</div>';
           return;
         }
         const answer = payload.answer ? '<div class="answer">' + esc(payload.answer) + (payload.sql ? '<div class="sql">' + esc(payload.sql) + '</div>' : '') + '</div>' : (payload.sql ? '<div class="answer"><div class="sql">' + esc(payload.sql) + '</div></div>' : "");
         const body = payload.status === "error" ? '<div class="error">' + esc(payload.error || "Query failed") + '</div>' : (mode === "chart" ? chartHtml() : tableHtml());
-        root.innerHTML = header() + answer + body;
+        root.innerHTML = askHtml() + header() + answer + body;
       }
+      root.addEventListener("submit", event => {
+        const form = event.target && event.target.closest ? event.target.closest("#askForm") : null;
+        if (!form) { return; }
+        event.preventDefault();
+        const data = new FormData(form);
+        const text = String(data.get("question") || "").trim();
+        if (text) { vscode.postMessage({ command: "ask", text }); }
+      });
       root.addEventListener("change", event => {
         const target = event.target;
         if (!(target instanceof HTMLSelectElement)) { return; }

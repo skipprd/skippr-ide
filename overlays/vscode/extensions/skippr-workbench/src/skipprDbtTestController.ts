@@ -18,7 +18,7 @@ export interface SkipprDbtTestDeps {
   /** Opens the Skippr output channel so CLI / dbt logs are visible. */
   revealSkipprOutput: () => void;
   /** Process environment for Skippr CLI (merged workspace + per-pipeline settings). */
-  getSpawnEnv: (ref: PipelineRef) => NodeJS.ProcessEnv;
+  getSpawnEnv: (ref: PipelineRef) => Promise<NodeJS.ProcessEnv>;
   /** Log level for `skippr test run --log` (align with Run Skippr / skippr.logLevel). */
   getLogLevel?: () => string;
   /** Extra CLI args from `skippr.run.extraArgs` (same as title bar). */
@@ -139,7 +139,7 @@ export async function resolveDbtChildrenForPipelineItem(
       ["--config", ref.configFsPath, "test", "list", "--pipeline", ref.pipeline, "--output", "json"],
       cwd,
       deps.output,
-      deps.getSpawnEnv(ref),
+      await deps.getSpawnEnv(ref),
       ref.configFsPath
     );
     const payload = result.value;
@@ -370,7 +370,7 @@ export async function runDbtTestsForRequest(
         cwd,
         deps.output,
         token,
-        deps.getSpawnEnv(ref)
+        await deps.getSpawnEnv(ref)
       );
       run.appendOutput(`Finished with exit code ${code ?? "?"}. JSONL events: ${lines.length}.\n`);
       const results = new Map<string, JsonlTestResult>();

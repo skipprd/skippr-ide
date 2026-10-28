@@ -7,23 +7,19 @@ import {
   mergeSkipprSpawnEnv,
   workspaceFolderForConfigPath
 } from "./skipprEnv";
-import { resolveSkipprdRepoRoot, useLocalSkipprdFromSettings } from "./skipprRunner";
+import { resolveSkipprdRepoRoot } from "./skipprRunner";
 
 const manifestBuilds = new Map<string, Promise<string | undefined>>();
 const resolvedManifestDirs = new Map<string, string>();
 
 export function useLocalRuntimePluginsFromSettings(): boolean {
-  const conf = vscode.workspace.getConfiguration();
-  if (conf.get<boolean>("skippr.dev.useLocalRuntimePlugins", true) === false) {
+  if (process.env.SKIPPR_USE_LOCAL_RUNTIME_PLUGINS === "0") {
     return false;
   }
   if (process.env.SKIPPR_USE_LOCAL_RUNTIME_PLUGINS === "1") {
     return true;
   }
-  if (process.env.SKIPPR_USE_LOCAL_RUNTIME_PLUGINS === "0") {
-    return false;
-  }
-  return useLocalSkipprdFromSettings() || Boolean(resolveSkipprdRepoRoot());
+  return vscode.workspace.getConfiguration().get<boolean>("skippr.dev.useLocalRuntimePlugins", true);
 }
 
 function buildCacheKey(skipprdRoot: string, configPath: string, pipeline: string | undefined): string {
@@ -136,24 +132,6 @@ export async function ensureLocalRuntimePluginManifests(
     manifestBuilds.set(cacheKey, pending);
   }
   return pending;
-}
-
-export function spawnEnvWithCachedLocalRuntimePlugins(
-  base: NodeJS.ProcessEnv,
-  configPath: string | undefined,
-  pipeline: string | undefined
-): NodeJS.ProcessEnv {
-  const folder = workspaceFolderForConfigPath(configPath);
-  const merged = mergeSkipprSpawnEnv(base, folder, pipeline, configPath);
-  if (!useLocalRuntimePluginsFromSettings() || !configPath?.trim()) {
-    return merged;
-  }
-  const skipprdRoot = resolveSkipprdRepoRoot();
-  if (!skipprdRoot) {
-    return merged;
-  }
-  const manifestDir = resolvedManifestDirs.get(buildCacheKey(skipprdRoot, configPath.trim(), pipeline));
-  return manifestDir ? applyLocalRuntimePluginSpawnVars(merged, manifestDir) : merged;
 }
 
 export async function mergeSkipprSpawnEnvWithLocalRuntimePlugins(

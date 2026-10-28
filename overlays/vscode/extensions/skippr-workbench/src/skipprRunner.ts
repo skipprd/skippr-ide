@@ -1,10 +1,31 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { getCloudProjectRootForConfig, getCloudWorkbenchContext } from "./skipprCloudWorkspace";
 import * as vscode from "vscode";
+import { runKindLabel } from "./skipprRunKinds";
+import {
+  INSTALL_SDE_ARGV,
+  PRODUCT_CLI,
+  UPGRADE_SDE_ARGV,
+  buildLocalSdeCargoCommand,
+  buildSdeRunArgs,
+  installedProductCliCandidates,
+  type SkipprRunKind,
+  type SkipprRunOptions
+} from "./skipprSdeArgv";
 import { SkipprRunEvent } from "./types";
+
+export {
+  LOCAL_CARGO_PACKAGE,
+  PRODUCT_CLI,
+  installedProductCliCandidates,
+  pipelineName,
+  type PipelineName,
+  type PipelineScopedRunKind,
+  type SkipprRunKind,
+  type SkipprRunOptions
+} from "./skipprSdeArgv";
 
 const transcriptLineMaxChars = 20_000;
 const outputLineMaxChars = 12_000;
@@ -29,43 +50,6 @@ function forwardRunTranscriptLine(
     })
     .then(undefined, () => undefined);
 }
-
-export type SkipprRunKind = "discover" | "sync-once" | "sync-all-once" | "sync" | "model";
-export type PipelineScopedRunKind = Exclude<SkipprRunKind, "sync-all-once">;
-export type PipelineName = string & { readonly __skipprPipelineName: unique symbol };
-
-export function pipelineName(value: string): PipelineName | undefined {
-  const trimmed = value.trim();
-  return trimmed ? (trimmed as PipelineName) : undefined;
-}
-
-interface BaseSkipprRunOptions {
-  cliPath?: string;
-  cwd: string;
-  configPath: string;
-  logLevel: string;
-  /** Appended after built flags (e.g. from the Run panel “Args” field). */
-  extraArgs?: string[];
-  /** When set, used as the child process environment (typically `process.env` merged with Skippr settings). */
-  spawnEnv?: NodeJS.ProcessEnv;
-}
-
-export type SkipprRunOptions =
-  | (BaseSkipprRunOptions & {
-      kind: PipelineScopedRunKind;
-      pipeline: PipelineName;
-      /** `skippr discover --output` (CLI: progress | json | text). */
-      discoverOutput?: string;
-      /** When true, pass `skippr model --no-resume`. */
-      modelNoResume?: boolean;
-      modelGoal?: string;
-      modelScope?: string;
-      modelTargetModels?: string;
-      modelArtifacts?: string;
-    })
-  | (BaseSkipprRunOptions & {
-      kind: "sync-all-once";
-    });
 
 export interface SkipprRunResult {
   code: number | null;
@@ -95,48 +79,28 @@ export interface SkipprJsonCommandResult<T> {
   stdout: string;
 }
 
-const installerCommand = "curl -fsSL https://install.skippr.io/install.sh | sh -";
 const localCargoCli = "__skippr_local_cargo__";
-const REACT_CARGO_REGISTRY_INDEX = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/";
-
-/** Crates published to react-cargo that skipprd resolves from path when ../react exists. */
-const REACT_CARGO_PATCHES: ReadonlyArray<readonly [string, string]> = [
-  ["react", "src/runtime"],
-  ["react-core", "src/core"],
-  ["react-http-protocol", "src/http-protocol"],
-  ["react-transport", "src/transport"],
-  ["react-view", "src/view"],
-  ["react-module-storage-s3", "src/modules/adaptors/storage-s3"],
-  ["react-module-storage-local", "src/modules/adaptors/storage-local"],
-  ["react-module-storage-memory", "src/modules/adaptors/storage-memory"],
-  ["react-module-provider-vector-lance", "src/modules/providers/vector-lance"],
-  ["react-suite-debugger", "src/suites/suite_debugger"]
-];
 
 export function isLocalCargoCli(cliPath: string): boolean {
   return cliPath === localCargoCli;
 }
 
-export function useLocalSkipprdFromSettings(): boolean {
+export function useLocalSdeFromSettings(): boolean {
   return (
-    vscode.workspace.getConfiguration().get<boolean>("skippr.dev.useLocalSkipprd", true) ||
-    process.env.SKIPPR_USE_LOCAL_SKIPPRD === "1"
+    vscode.workspace.getConfiguration().get<boolean>("skippr.dev.useLocalSde", true) ||
+    process.env.SKIPPR_USE_LOCAL_SDE === "1"
   );
 }
 
-export function findInstalledSkipprCli(): string | undefined {
-  const candidates = [
-    path.join(os.homedir(), ".skippr", "bin", "skippr"),
-    "/usr/local/bin/skippr",
-    "/opt/homebrew/bin/skippr"
-  ];
+export function findInstalledSde(): string | undefined {
+  const candidates = installedProductCliCandidates();
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;
     }
   }
   try {
-    const resolved = execFileSync("which", ["skippr"], { encoding: "utf8" }).trim();
+    const resolved = execFileSync("which", [PRODUCT_CLI], { encoding: "utf8" }).trim();
     if (resolved && existsSync(resolved)) {
       return resolved;
     }
@@ -146,91 +110,38 @@ export function findInstalledSkipprCli(): string | undefined {
   return undefined;
 }
 
-function localReactRootFromSkipprdManifest(manifestPath: string): string | undefined {
-  const settingsRoot = vscode.workspace.getConfiguration().get<string>("skippr.dev.reactRoot", "").trim();
-  const configured = process.env.SKIPPR_REACT_ROOT?.trim() || settingsRoot;
-  if (configured && existsSync(path.join(configured, "Cargo.toml"))) {
-    return path.resolve(configured);
-  }
-  const skipprdRoot = path.dirname(manifestPath);
-  const candidates = [
-    ...((vscode.workspace.workspaceFolders ?? [])
-      .filter((folder) => folder.name === "react" || folder.uri.fsPath.endsWith(`${path.sep}react`))
-      .map((folder) => folder.uri.fsPath)),
-    path.resolve(skipprdRoot, "../react"),
-    path.resolve(skipprdRoot, "../../react")
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(path.join(candidate, "Cargo.toml"))) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
-function reactCargoPatchConfigArgs(manifestPath: string): string[] {
-  const reactRoot = localReactRootFromSkipprdManifest(manifestPath);
-  const args = ["--config", `registries.react-cargo.index="${REACT_CARGO_REGISTRY_INDEX}"`];
-  if (!reactRoot) {
-    return args;
-  }
-  for (const [crateName, relativePath] of REACT_CARGO_PATCHES) {
-    args.push("--config", `patch."react-cargo".${crateName}.path="${path.resolve(reactRoot, relativePath)}"`);
-  }
-  return args;
-}
-
-export function reactCargoAuthHint(): string {
-  return (
-    "Skippr could not fetch React crates from the private react-cargo registry. " +
-    "Place a sibling ../react checkout next to skipprd (or set SKIPPR_REACT_ROOT), run " +
-    "the local dev CLI through cargo, install the release CLI (Skippr: Install CLI), " +
-    "or export CARGO_REGISTRIES_REACT_CARGO_TOKEN (see skipprd/docs/docs/maintainers/local-development.md)."
-  );
-}
-
 function enrichCargoFailureDetail(detail: string | undefined, stderrHint?: string): string | undefined {
   const combined = [detail, stderrHint].filter((part): part is string => Boolean(part?.trim())).join("\n");
-  if (!combined.includes("react-cargo")) {
-    return detail;
-  }
-  return `${combined}\n${reactCargoAuthHint()}`;
+  return combined.trim() ? combined : detail;
 }
 
-export async function resolveSkipprCli(configuredPath: string | undefined): Promise<string | undefined> {
+export async function resolveSde(configuredPath: string | undefined): Promise<string | undefined> {
   const trimmed = configuredPath?.trim();
   if (trimmed) {
     return trimmed;
   }
 
-  const manifest = resolveLocalSkipprdManifest();
-  if (manifest && useLocalSkipprdFromSettings()) {
+  const manifest = resolveLocalSdeManifest();
+  if (manifest && useLocalSdeFromSettings()) {
     return localCargoCli;
   }
-  return findInstalledSkipprCli();
+  return findInstalledSde();
 }
 
-export async function installSkipprCli(output: vscode.LogOutputChannel): Promise<SkipprRunResult> {
+export async function installSde(output: vscode.LogOutputChannel): Promise<SkipprRunResult> {
   output.show(true);
-  output.info(`Installing Skippr CLI with: ${installerCommand}`);
-  return runShellCommand(installerCommand, output);
+  output.info(`Installing ${PRODUCT_CLI} with Homebrew (${INSTALL_SDE_ARGV.join(" ")}).`);
+  return runCommand([...INSTALL_SDE_ARGV], output);
 }
 
-export async function updateSkipprCli(
-  cliPath: string | undefined,
+export async function updateSde(
+  _cliPath: string | undefined,
   output: vscode.LogOutputChannel,
   spawnEnv: NodeJS.ProcessEnv = process.env
 ): Promise<SkipprRunResult> {
   output.show(true);
-  if (cliPath) {
-    const update = await runCommand(buildCliCommand(cliPath, ["update"]), output, undefined, spawnEnv);
-    if (update.code === 0) {
-      return update;
-    }
-    output.warn("`skippr update` failed or is not supported; falling back to installer.");
-  }
-  output.info(`Updating Skippr CLI with: ${installerCommand}`);
-  return runShellCommand(installerCommand, output);
+  output.info(`Updating ${PRODUCT_CLI} with Homebrew (${UPGRADE_SDE_ARGV.join(" ")}).`);
+  return runCommand([...UPGRADE_SDE_ARGV], output, undefined, spawnEnv);
 }
 
 export async function showSkipprVersion(
@@ -304,7 +215,7 @@ export async function runSkipprJson<T>(
 }
 
 export function startSkipprRun(options: SkipprRunOptions, callbacks: SkipprRunnerCallbacks): SkipprProcess {
-  const command = options.cliPath || "skippr";
+  const command = options.cliPath || PRODUCT_CLI;
   const args = buildRunArgs(options);
   const [spawnCommand, ...spawnArgs] = buildCliCommand(command, args);
   const label = labelForRun(options);
@@ -411,22 +322,11 @@ export function buildCliCommand(cliPath: string, args: string[]): string[] {
   if (cliPath !== localCargoCli) {
     return [cliPath, ...args];
   }
-  const manifestPath = resolveLocalSkipprdManifest();
+  const manifestPath = resolveLocalSdeManifest();
   if (!manifestPath) {
-    return ["skippr", ...args];
+    return [PRODUCT_CLI, ...args];
   }
-  const patchArgs = reactCargoPatchConfigArgs(manifestPath);
-  return [
-    "cargo",
-    "run",
-    "--manifest-path",
-    manifestPath,
-    ...patchArgs,
-    "-p",
-    "skippr-cli",
-    "--",
-    ...args
-  ];
+  return buildLocalSdeCargoCommand(manifestPath, args);
 }
 
 /** Directory containing skippr.yml (absolute). Used as the child process cwd for every CLI invocation. */
@@ -502,6 +402,34 @@ function localSkipprdManifestCandidates(): string[] {
   ];
 }
 
+export function resolveLocalSdeManifest(): string | undefined {
+  const candidates = [
+    process.env.SKIPPR_SDE_MANIFEST_PATH,
+    ...localSdeManifestCandidates()
+  ].filter((candidate): candidate is string => Boolean(candidate?.trim()));
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function localSdeManifestCandidates(): string[] {
+  const settingsRoot = vscode.workspace.getConfiguration().get<string>("skippr.dev.sdeRoot", "").trim();
+  const configured = process.env.SKIPPR_SDE_ROOT?.trim() || settingsRoot;
+  if (configured) {
+    return [path.resolve(configured, "Cargo.toml")];
+  }
+  const skipprdRoot = resolveSkipprdRepoRoot();
+  const workspaceCandidates = (vscode.workspace.workspaceFolders ?? []).flatMap((folder) => [
+    path.join(folder.uri.fsPath, "Cargo.toml"),
+    path.join(folder.uri.fsPath, "sde", "Cargo.toml"),
+    path.join(path.dirname(folder.uri.fsPath), "sde", "Cargo.toml")
+  ]);
+  return [
+    ...workspaceCandidates,
+    ...(skipprdRoot ? [path.resolve(skipprdRoot, "../sde/Cargo.toml")] : []),
+    path.resolve(__dirname, "../../../../../sde/Cargo.toml"),
+    path.resolve(__dirname, "../../../../../../sde/Cargo.toml")
+  ];
+}
+
 export function isSkipprRunKind(value: unknown): value is SkipprRunKind {
   return (
     value === "discover" ||
@@ -513,75 +441,15 @@ export function isSkipprRunKind(value: unknown): value is SkipprRunKind {
 }
 
 export function buildRunArgs(options: SkipprRunOptions): string[] {
-  const args: string[] = [];
-  args.push("--config", options.configPath);
-  if (options.logLevel.trim()) {
-    args.push("--log", options.logLevel.trim());
-  }
-
-  if (options.kind === "discover") {
-    args.push("discover");
-    args.push("--pipeline", options.pipeline);
-    const raw = (options.discoverOutput ?? "json").trim().toLowerCase();
-    const out = raw === "progress" || raw === "json" || raw === "text" ? raw : "json";
-    args.push("--output", out);
-  } else if (options.kind === "model") {
-    args.push("model");
-    args.push("--pipeline", options.pipeline);
-    args.push("--dbt-output-path", modelDbtOutputPath(options));
-    if (options.modelNoResume) {
-      args.push("--no-resume");
-    }
-    if (options.modelGoal?.trim()) {
-      args.push("--goal", options.modelGoal.trim());
-    }
-    if (options.modelScope?.trim()) {
-      args.push("--scope", options.modelScope.trim());
-    }
-    if (options.modelTargetModels?.trim()) {
-      args.push("--target-models", options.modelTargetModels.trim());
-    }
-    if (options.modelArtifacts?.trim()) {
-      args.push("--artifacts", options.modelArtifacts.trim());
-    }
-    args.push("--output", "jsonl");
-  } else if (options.kind === "sync-all-once") {
-    args.push("sync", "--once", "--output", "json");
-  } else {
-    args.push("sync");
-    args.push("--pipeline", options.pipeline);
-    if (options.kind === "sync-once") {
-      args.push("--once");
-    }
-    args.push("--output", "json");
-  }
-  if (options.extraArgs?.length) {
-    args.push(...options.extraArgs);
-  }
-  return args;
-}
-
-function modelDbtOutputPath(options: SkipprRunOptions): string {
-  if (options.kind !== "model") {
-    return path.join(skipprProjectRoot(options.configPath, options.cwd), "dbt");
-  }
-  return path.join(skipprProjectRoot(options.configPath, options.cwd), options.pipeline, "dbt");
+  return buildSdeRunArgs(options, skipprProjectRoot(options.configPath, options.cwd));
 }
 
 function labelForRun(options: SkipprRunOptions): string {
-  if (options.kind === "discover") {
-    return `Discover ${options.pipeline}`;
-  }
-  if (options.kind === "model") {
-    return `Model ${options.pipeline}`;
-  }
+  const kind = runKindLabel(options.kind);
   if (options.kind === "sync-all-once") {
-    return "Sync all once";
+    return kind;
   }
-  if (options.kind === "sync-once") {
-    return `Sync ${options.pipeline} once`;
-  }
-  return `Sync ${options.pipeline}`;
+  return `${kind} ${options.pipeline}`;
 }
 
 function compactTranscriptLine(line: string): string {
@@ -689,12 +557,6 @@ function flushRemainder(buffer: string, onLine: (line: string) => void): void {
   if (buffer.trim()) {
     onLine(buffer);
   }
-}
-
-function runShellCommand(command: string, output: vscode.LogOutputChannel): Promise<SkipprRunResult> {
-  const shell = os.platform() === "win32" ? "cmd" : "sh";
-  const args = os.platform() === "win32" ? ["/c", command] : ["-lc", command];
-  return runCommand([shell, ...args], output);
 }
 
 function runCommand(

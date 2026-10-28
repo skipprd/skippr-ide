@@ -36,6 +36,9 @@ export function renderSkipprConnectionsPanelHtml(options?: { cspSource?: string;
     .dropdown-item:hover { color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground)); background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); }
     .empty, .error, .loading { padding: 14px 8px; color: var(--vscode-descriptionForeground); }
     .error { color: var(--vscode-errorForeground); }
+    .env { margin-top: 10px; padding: 8px; border: 1px solid var(--vscode-panel-border); border-radius: 5px; display: grid; gap: 6px; }
+    .env label { display: grid; gap: 3px; color: var(--vscode-descriptionForeground); }
+    .env input, .env select { box-sizing: border-box; width: 100%; padding: 4px 6px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; }
   </style>
 </head>
 <body>
@@ -107,6 +110,15 @@ export function renderSkipprConnectionsPanelHtml(options?: { cspSource?: string;
         if (!Array.isArray(items) || !items.length) return '<section class="section"><div class="section-title">' + esc(title) + '</div><div class="empty">None configured.</div></section>';
         return '<section class="section"><div class="section-title">' + esc(title) + '</div>' + items.map(item => card(item, kind)).join("") + '</section>';
       }
+      function envForm() {
+        const pipelines = Array.isArray(payload.pipelines) ? payload.pipelines : [];
+        if (!pipelines.length) return "";
+        return '<form class="env" id="envForm"><div class="section-title">Pipeline environment</div>' +
+          '<label>Pipeline<select name="pipeline">' + pipelines.map(p => '<option value="' + attr(p) + '">' + esc(p) + '</option>').join("") + '</select></label>' +
+          '<label>Variable<input name="key" placeholder="SNOWFLAKE_ACCOUNT" /></label>' +
+          '<label>Value<input name="value" /></label>' +
+          '<button type="submit">Save env var</button></form>';
+      }
       function render() {
         if (payload.status === "loading" || payload.status === "idle") {
           root.innerHTML = '<div class="toolbar"><strong>Connections</strong><span class="spacer"></span><button data-command="refresh">Refresh</button></div><div class="loading">Loading connections...</div>';
@@ -122,9 +134,13 @@ export function renderSkipprConnectionsPanelHtml(options?: { cspSource?: string;
           section("Sources", connections.sources, "source") +
           section("Data Sinks", connections.sinks, "sink") +
           section("Schema Sinks", connections.schema_sinks, "schema") +
+          envForm() +
           '</div>';
       }
       root.addEventListener("click", event => {
+        if (event.target && event.target.closest && event.target.closest("#envForm")) {
+          return;
+        }
         const target = event.target && event.target.closest ? event.target.closest("[data-command]") : null;
         if (!target) {
           openMenu = null;
@@ -147,6 +163,20 @@ export function renderSkipprConnectionsPanelHtml(options?: { cspSource?: string;
           kind,
           name,
           pipeline
+        });
+      });
+      root.addEventListener("submit", event => {
+        const form = event.target && event.target.closest ? event.target.closest("#envForm") : null;
+        if (!form) {
+          return;
+        }
+        event.preventDefault();
+        const data = new FormData(form);
+        vscode.postMessage({
+          command: "savePipelineEnv",
+          pipeline: String(data.get("pipeline") || ""),
+          key: String(data.get("key") || ""),
+          value: String(data.get("value") || "")
         });
       });
       root.addEventListener("keydown", event => {

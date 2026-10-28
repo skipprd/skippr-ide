@@ -1,4 +1,4 @@
-import { buildRunArgs, pipelineName, type SkipprRunOptions } from "./skipprRunner";
+import { buildSdeRunArgs, pipelineName, type SkipprRunOptions } from "./skipprSdeArgv";
 
 const configPath = "/workspace/skippr.yml";
 const pipeline = pipelineName("bike_hire");
@@ -6,25 +6,31 @@ if (!pipeline) {
   throw new Error("test pipeline should be valid");
 }
 
-const discoverArgs = buildRunArgs({
-  kind: "discover",
-  cwd: "/workspace",
-  configPath,
-  pipeline,
-  logLevel: "",
-  discoverOutput: "json"
-});
+const discoverArgs = buildSdeRunArgs(
+  {
+    kind: "discover",
+    cwd: "/workspace",
+    configPath,
+    pipeline,
+    logLevel: "",
+    discoverOutput: "json"
+  },
+  "/workspace"
+);
 
 if (discoverArgs.join(" ") !== "--config /workspace/skippr.yml discover --pipeline bike_hire --output json") {
   throw new Error(`unexpected discover args: ${discoverArgs.join(" ")}`);
 }
 
-const syncAllArgs = buildRunArgs({
-  kind: "sync-all-once",
-  cwd: "/workspace",
-  configPath,
-  logLevel: ""
-});
+const syncAllArgs = buildSdeRunArgs(
+  {
+    kind: "sync-all-once",
+    cwd: "/workspace",
+    configPath,
+    logLevel: ""
+  },
+  "/workspace"
+);
 
 if (syncAllArgs.includes("--pipeline")) {
   throw new Error("sync-all-once must not accept a pipeline argument");
@@ -39,12 +45,23 @@ const missingPipeline: SkipprRunOptions = {
 };
 void missingPipeline;
 
-const syncAllWithPipeline: SkipprRunOptions = {
-  kind: "sync-all-once",
+const modelRun: SkipprRunOptions = {
+  kind: "model",
   cwd: "/workspace",
   configPath,
-  // @ts-expect-error Pipeline-free runs must not carry a pipeline.
   pipeline,
-  logLevel: ""
+  logLevel: "",
+  modelNoResume: true
 };
-void syncAllWithPipeline;
+void modelRun;
+
+const modelWithGoal: SkipprRunOptions = {
+  kind: "model",
+  cwd: "/workspace",
+  configPath,
+  pipeline,
+  logLevel: "",
+  // @ts-expect-error sde model does not take --goal
+  modelGoal: "x"
+};
+void modelWithGoal;

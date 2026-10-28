@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { isTerminalHeadlineEvent, runPhaseHint, runTitle } from "./skipprRunDisplay.js";
 
-test("runTitle uses kind and pipeline", () => {
+test("runTitle uses Start Sync for continuous sync", () => {
+  assert.equal(runTitle({ runKind: "sync", pipeline: "bike_hire" }), "Start Sync · bike_hire");
+});
+
+test("runTitle uses Sync for sync-once", () => {
   assert.equal(runTitle({ runKind: "sync-once", pipeline: "bike_hire" }), "Sync · bike_hire");
 });
 

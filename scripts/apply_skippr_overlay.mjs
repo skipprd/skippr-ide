@@ -412,105 +412,63 @@ if (!layoutActionsSource.includes(firstSyncConfettiImport)) {
 }
 const firstSyncConfettiActionNeedle = "skippr.workbench.playFirstSyncConfetti";
 if (!layoutActionsSource.includes(firstSyncConfettiActionNeedle)) {
-  const forceSchemaSidebarBlock = `registerAction2(class extends Action2 {
-\tconstructor() {
-\t\tsuper({
-\t\t\tid: 'skippr.workbench.forceSchemaSidebar',
-\t\t\ttitle: localize2('skipprForceSchemaSidebar', "Force Skippr Schema Sidebar"),
-\t\t});
-\t}
+  const firstSyncConfettiBlock = `registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.playFirstSyncConfetti',
+			title: localize2('skipprPlayFirstSyncConfetti', "Play Skippr First Sync Confetti"),
+		});
+	}
 
-\trun(accessor: ServicesAccessor): void {
-\t\tconst viewDescriptorService = accessor.get(IViewDescriptorService);
-\t\tconst container = viewDescriptorService.getViewContainerById('skippr.schema.sidebar');
-\t\tif (container) {
-\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.AuxiliaryBar, undefined, 'skippr.forceSchemaSidebar');
-\t\t}
-\t}
-});`;
-  const firstSyncConfettiBlock = `${forceSchemaSidebarBlock}
-
-registerAction2(class extends Action2 {
-\tconstructor() {
-\t\tsuper({
-\t\t\tid: 'skippr.workbench.playFirstSyncConfetti',
-\t\t\ttitle: localize2('skipprPlayFirstSyncConfetti', "Play Skippr First Sync Confetti"),
-\t\t});
-\t}
-
-\trun(): void {
-\t\tplaySkipprFirstSyncConfetti(mainWindow);
-\t}
-});`;
-  if (!layoutActionsSource.includes(forceSchemaSidebarBlock)) {
-    throw new Error("layoutActions.ts forceSchemaSidebar block not found; cannot inject first-sync confetti action.");
-  }
-  layoutActionsSource = layoutActionsSource.replace(forceSchemaSidebarBlock, firstSyncConfettiBlock);
-}
-if (!layoutActionsSource.includes("skippr.workbench.forceActivityBar")) {
-  const forceActivityBarBlock = `registerAction2(class extends Action2 {
-\tconstructor() {
-\t\tsuper({
-\t\t\tid: 'skippr.workbench.forceActivityBar',
-\t\t\ttitle: localize2('skipprForceActivityBar', "Force Skippr Activity Bar Views"),
-\t\t});
-\t}
-
-\trun(accessor: ServicesAccessor): void {
-\t\tconst viewDescriptorService = accessor.get(IViewDescriptorService);
-\t\tconst activityContainerIds = [
-\t\t\t'skipprConnectionsActivity',
-\t\t\t'skipprLineageActivity',
-\t\t\t'skippr.dashboards.activity',
-\t\t];
-\t\tfor (const id of activityContainerIds) {
-\t\t\tconst container = viewDescriptorService.getViewContainerById(id);
-\t\t\tif (container) {
-\t\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Sidebar, undefined, 'skippr.forceActivityBar');
-\t\t\t}
-\t\t}
-\t\tconst pinnedViews = ['skippr.connections', 'skippr.lineageLaunch', 'skippr.dashboards'];
-\t\tfor (const viewId of pinnedViews) {
-\t\t\tconst viewDescriptor = viewDescriptorService.getViewDescriptorById(viewId);
-\t\t\tconst defaultContainer = viewDescriptorService.getDefaultContainerById(viewId);
-\t\t\tif (!viewDescriptor || !defaultContainer) {
-\t\t\t\tcontinue;
-\t\t\t}
-\t\t\tfor (const container of viewDescriptorService.viewContainers) {
-\t\t\t\tconst model = viewDescriptorService.getViewContainerModel(container);
-\t\t\t\tif (model.allViewDescriptors.some(v => v.id === viewId) && container.id !== defaultContainer.id) {
-\t\t\t\t\tviewDescriptorService.moveViewsToContainer([viewDescriptor], defaultContainer, undefined, 'skippr.forceActivityBar');
-\t\t\t\t}
-\t\t\t}
-\t\t}
-\t}
+	run(): void {
+		playSkipprFirstSyncConfetti(mainWindow);
+	}
 });
-
 `;
-  layoutActionsSource = layoutActionsSource.replace(
-    "registerAction2(class extends Action2 {\n\tconstructor() {\n\t\tsuper({\n\t\t\tid: 'skippr.workbench.forceSchemaSidebar',",
-    `${forceActivityBarBlock}registerAction2(class extends Action2 {\n\tconstructor() {\n\t\tsuper({\n\t\t\tid: 'skippr.workbench.forceSchemaSidebar',`
-  );
+  layoutActionsSource += `\n${firstSyncConfettiBlock}`;
 }
+layoutActionsSource = layoutActionsSource.replace(
+  /registerAction2\(class extends Action2 \{\n\tconstructor\(\) \{\n\t\tsuper\(\{\n\t\t\tid: 'skippr\.workbench\.forceSchemaSidebar'[\s\S]*?\n\}\);\n?/,
+  ""
+);
+layoutActionsSource = layoutActionsSource.replace(
+  /registerAction2\(class extends Action2 \{\n\tconstructor\(\) \{\n\t\tsuper\(\{\n\t\t\tid: 'skippr\.workbench\.forceActivityBar'[\s\S]*?\n\}\);\n?/,
+  ""
+);
 const skipprLayoutImport =
-  "import {\n\tgetSkipprViewContainerByManifestId,\n\tSKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS,\n\tSKIPPR_PINNED_ACTIVITY_VIEW_IDS,\n\tSKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS,\n} from '../../common/skippr/skipprPinnedWorkbenchLayout.js';";
+  "import {\n\tgetSkipprViewContainerByManifestId,\n\tSKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS,\n} from '../../common/skippr/skipprPinnedWorkbenchLayout.js';";
 if (!layoutActionsSource.includes("skipprPinnedWorkbenchLayout")) {
   layoutActionsSource = layoutActionsSource.replace(
     firstSyncConfettiImport,
     `${firstSyncConfettiImport}\n${skipprLayoutImport}`
   );
-}
-if (layoutActionsSource.includes("'skipprConnectionsActivity'")) {
+} else if (layoutActionsSource.includes("SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS")) {
   layoutActionsSource = layoutActionsSource.replace(
-    /\t\tconst activityContainerIds = \[[\s\S]*?\];\n\t\tfor \(const id of activityContainerIds\) \{[\s\S]*?\t\t\}\n\t\tconst pinnedViews = \[[\s\S]*?\];\n\t\tfor \(const viewId of pinnedViews\) \{/,
-    `\t\tfor (const manifestId of SKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS) {
-\t\t\tconst container = getSkipprViewContainerByManifestId(id => viewDescriptorService.getViewContainerById(id), manifestId);
-\t\t\tif (container) {
-\t\t\t\tviewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Sidebar, undefined, 'skippr.forceActivityBar');
-\t\t\t}
-\t\t}
-\t\tfor (const viewId of SKIPPR_PINNED_ACTIVITY_VIEW_IDS) {`
+    /import \{\n\tgetSkipprViewContainerByManifestId,\n\tSKIPPR_ACTIVITY_BAR_CONTAINER_MANIFEST_IDS,\n\tSKIPPR_PINNED_ACTIVITY_VIEW_IDS,\n\tSKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS,\n\} from '\.\.\/\.\.\/common\/skippr\/skipprPinnedWorkbenchLayout\.js';/,
+    skipprLayoutImport
   );
+}
+if (!layoutActionsSource.includes("skippr.workbench.forceRunPanels")) {
+  const forceRunPanelsBlock = `registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'skippr.workbench.forceRunPanels',
+			title: localize2('skipprForceRunPanels', "Force Skippr Run Panels"),
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const viewDescriptorService = accessor.get(IViewDescriptorService);
+		for (const [index, manifestId] of SKIPPR_RUN_PANEL_CONTAINER_MANIFEST_IDS.entries()) {
+			const container = getSkipprViewContainerByManifestId(id => viewDescriptorService.getViewContainerById(id), manifestId);
+			if (container) {
+				viewDescriptorService.moveViewContainerToLocation(container, ViewContainerLocation.Panel, index, 'skippr.forceRunPanels');
+			}
+		}
+	}
+});
+`;
+  layoutActionsSource += `\n${forceRunPanelsBlock}`;
 }
 if (layoutActionsSource.includes("'skippr.run.timeline.panel'") && layoutActionsSource.includes("const runContainerIds")) {
   layoutActionsSource = layoutActionsSource.replace(
@@ -538,7 +496,7 @@ mkdirSync(path.dirname(skipprLayoutModulePath), { recursive: true });
 writeFileSync(
   skipprLayoutModulePath,
   readFileSync(
-    path.join(rootDir, "vscode", "src", "vs", "workbench", "common", "skippr", "skipprPinnedWorkbenchLayout.ts"),
+    path.join(rootDir, "overlays", "vscode", "src", "vs", "workbench", "common", "skippr", "skipprPinnedWorkbenchLayout.ts"),
     "utf8"
   ),
   "utf8"

@@ -1,5 +1,7 @@
 import * as crypto from "node:crypto";
 import * as vscode from "vscode";
+import { historyExcludingCurrent } from "./skipprRunHistoryList";
+import { describedRunEvents, describeRunEvent } from "./skipprRunEventDescribe";
 import { isTerminalHeadlineEvent, runTitle } from "./skipprRunDisplay";
 import { syncMetricHistorySamples } from "./skipprRunMetricsChart";
 import {
@@ -120,28 +122,14 @@ export interface SkipprRunStateSnapshot {
   history: SkipprRunHistorySummary[];
 }
 
-/** Previous-runs list: never include the active run (or other in-progress duplicates). */
-export function historyExcludingCurrent(
-  history: SkipprRunHistorySummary[],
-  current?: SkipprObservedRun
-): SkipprRunHistorySummary[] {
-  if (!current) {
-    return history;
+export function withDescribedEvents(run: SkipprObservedRun | undefined): SkipprObservedRun | undefined {
+  if (!run) {
+    return undefined;
   }
-  const currentIds = new Set<string>([current.id]);
-  const lockRunId = current.workspaceRunLock?.runId.trim();
-  if (lockRunId) {
-    currentIds.add(lockRunId);
-  }
-  return history.filter((row) => {
-    if (currentIds.has(row.id)) {
-      return false;
-    }
-    if (current.status === "running" && row.status === "running") {
-      return false;
-    }
-    return true;
-  });
+  return {
+    ...run,
+    events: describedRunEvents(run.events)
+  };
 }
 
 export class SkipprRunStateStore {
@@ -159,8 +147,8 @@ export class SkipprRunStateStore {
   snapshot(): SkipprRunStateSnapshot {
     return {
       type: "observability",
-      current: this.currentRun,
-      selected: this.selectedRun,
+      current: withDescribedEvents(this.currentRun),
+      selected: withDescribedEvents(this.selectedRun),
       history: historyExcludingCurrent(this.history, this.currentRun)
     };
   }
@@ -493,60 +481,3 @@ function equivalentTimelineEvent(a: SkipprRunEvent, b: SkipprRunEvent): boolean 
   );
 }
 
-function describeRunEvent(event: SkipprRunEvent): string | undefined {
-  switch (event.event) {
-    case "discover_start":
-      return `Discover started: ${event.pipeline ?? "pipeline"}`;
-    case "namespace_discovered":
-      return `Discovered ${event.namespace ?? event.schema?.namespace ?? "namespace"}`;
-    case "schema_evolved":
-      return `Schema evolved: ${event.namespace ?? "namespace"}`;
-    case "discover_complete":
-      return `Discover complete: ${event.pipeline ?? "pipeline"}`;
-    case "sync_start":
-      return `Sync started: ${event.pipeline ?? "pipeline"}`;
-    case "sync_status":
-      return `Sync status: rows=${event.total_rows ?? event.metrics?.messages_total ?? 0}`;
-    case "batch_ingested":
-      return `Batch ingested: ${event.namespace ?? "namespace"}`;
-    case "output_synced":
-      return `Output synced: ${event.namespace ?? "namespace"}`;
-    case "sync_complete":
-      return `Sync complete: ${event.pipeline ?? "pipeline"}`;
-    case "sync_error":
-      return `Sync error: ${event.error ?? "unknown error"}`;
-    case "tool_start":
-      return undefined;
-    case "tool_end":
-      if (event.status === "ok" || event.status === "success") {
-        return undefined;
-      }
-      return `Tool ${event.status ?? "finished"}: ${event.clean_name ?? event.name ?? "tool"}`;
-    case "model_start":
-      return `Model started: ${event.pipeline ?? "pipeline"}`;
-    case "model_preflight":
-      return event.model_preflight?.ok
-        ? `Model preflight passed: ${event.model_preflight.command ?? "dbt"}`
-        : `Model preflight failed`;
-    case "model_authoring_start":
-      return "Model authoring started";
-    case "model_file_changed":
-      return `Model files changed: ${event.changed_files?.length ?? 0}`;
-    case "model_review_ready":
-      return event.summary ?? `Model review ready: ${event.total_count ?? event.changed_files?.length ?? 0} files`;
-    case "model_validation_start":
-      return "Model validation started";
-    case "model_validation":
-      return event.validation?.ok ? "Model validation passed" : "Model validation failed";
-    case "model_validation_complete":
-      return event.validation?.ok ? "Model validation passed" : "Model validation failed";
-    case "model_phase_changed":
-      return `Model phase: ${event.phase ?? "unknown"}`;
-    case "model_complete":
-      return `Model complete: ${event.pipeline ?? "pipeline"}`;
-    case "model_error":
-      return `Model error: ${event.error ?? event.failure_summary ?? "unknown error"}`;
-    default:
-      return undefined;
-  }
-}
